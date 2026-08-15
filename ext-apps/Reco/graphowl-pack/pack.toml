@@ -14,9 +14,21 @@
 # registered, so loading these out of order fails every upload, not just
 # this pack's own 6 fields.
 #
-# Still ingestion only (Slice 1): no [[documents]], [[findings]], [[queries]]
-# or [matching.blocking]. Reconciliation-specific configuration is Slice 2's
-# — plans/118-reco-now-integration.md / plans/119-architecture-audit.md §5b.
+# Slice 2 (plans/118-reco-now-integration.md / plans/119-architecture-audit.md
+# §5b) adds [[documents]] (law data, not fixtures — see below),
+# [[queries]]/[[findings]] for the 3 finding rules reachable with reco-now's
+# current books+GSTR-2B upload and clean field mappings. Still no
+# [matching.blocking]: the deferred findings that need it
+# (GstinTransposition, SupplierPanMismatch) are not wired here.
+#
+# **These finding queries require a graph shape reco-now's ingestion did
+# not originally build** — found by reading each query's `WHERE` clause in
+# full, not by checking field-level vocabulary compatibility (which is as
+# far as the first pass of this fix went). Every one of them joins through
+# a canonical `?canonical gst:recordedIn ?purchase` / `gst:reflectedIn
+# ?filed` pair, and reads the supplier's GSTIN off a real `gst:Supplier`
+# subject via `gst:issuedBy`, never off a literal directly on the invoice.
+# `graphowl_client.rows_to_turtle` now emits both.
 
 [pack]
 id = "reco"
@@ -50,3 +62,102 @@ name = "voucherNumber"
 
 [[predicates]]
 name = "originalInvoiceNumber"
+
+# **Statute data, not demo fixtures.** packs/gst's own [[documents]] list
+# (its planted INV-1001..INV-2002 scenarios) is deliberately excluded from
+# this deployment — `main.py`'s `_install_graphowl_pack` loads packs/gst
+# with `include_documents=False`, because the native reconcile engine has
+# no per-source data isolation and those demo invoices would otherwise be
+# evaluated alongside reco-now's real data. But `amount-mismatch.sparql`'s
+# own WHERE clause needs the dated `gst:Provision`/`capPercent` subjects
+# these two files carry — that's law-as-data, not a fixture, and
+# reco-now's own reconciliation genuinely depends on it. Copied verbatim
+# from packs/gst/law/ (queries/README.md records the coupling).
+[[documents]]
+path = "law/sections.ttl"
+source = "reco-gst-law"
+
+[[documents]]
+path = "law/rule-36-4.ttl"
+source = "reco-gst-law-rule-36-4"
+
+# Verbatim copies of packs/gst/queries/ — see queries/README.md for which
+# 5 of packs/gst's 12 finding rules are reachable with reco-now's current
+# upload flow, and why only 3 of those 5 are wired below.
+[[queries]]
+name = "missing-in-gstr2b"
+path = "queries/missing-in-gstr2b.sparql"
+
+[[queries]]
+name = "amount-mismatch"
+path = "queries/amount-mismatch.sparql"
+
+[[queries]]
+name = "tax-head-mismatch"
+path = "queries/tax-head-mismatch.sparql"
+
+# The three finding rules, identical in shape to packs/gst's own — same
+# query names, same evidence bindings, same guidance text — because the
+# underlying vocabulary and law are the same pack's. Registered under
+# reco-now's own pack id, so `POST /packs/reco/reconcile` and
+# `GET /findings?pack=reco` only ever see reco-now's own findings, never
+# packs/gst's (which this deployment never loads any fixture data for in
+# the first place — see above).
+
+[[findings]]
+label = "gst:PotentialMismatch"
+summary = "An invoice claimed in the purchase register that has not reached GSTR-2B (no GSTR-1 data loaded to say why)"
+governed_by = "gst:Section16-2-aa"
+query = "missing-in-gstr2b"
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+]
+
+[findings.guidance]
+title = "Claimed, not available in GSTR-2B"
+meaning = "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it."
+next_action = "Follow up with the supplier — ITC cannot be claimed until it appears in GSTR-2B."
+tone = "danger"
+
+[[findings]]
+label = "gst:AmountMismatch"
+summary = "Both sides report the invoice, and the values differ by more than the cap then in force allowed"
+governed_by = "gst:Rule36-4"
+query = "amount-mismatch"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxableValue", var = "claimed" },
+  { predicate = "gst:taxableValue", var = "filed" },
+  { predicate = "gst:capPercent", var = "capPercent" },
+  { predicate = "gst:citation", var = "citation" },
+]
+
+[findings.guidance]
+title = "Your books and GSTR-2B disagree"
+meaning = "Both sides report the invoice and the values differ by more than the cap in force allowed."
+next_action = "Compare against the physical invoice, then correct whichever side is wrong."
+tone = "warning"
+
+[[findings]]
+label = "gst:TaxHeadMismatch"
+summary = "The invoice matches on every total, and the tax is split across different heads than the supplier filed"
+governed_by = "gst:Section16-2-aa"
+query = "tax-head-mismatch"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:igst", var = "bookedIgst" },
+  { predicate = "gst:igst", var = "filedIgst" },
+]
+
+[findings.guidance]
+title = "Totals agree, tax heads do not"
+meaning = "Every total matches and the tax sits under different heads than the supplier filed — inter-state against intra-state."
+next_action = "ITC is claimed head-wise in GSTR-3B, so correct the head before claiming. Credit under the wrong head is a reversal exposure with interest."
+tone = "danger"

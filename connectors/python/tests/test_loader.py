@@ -167,6 +167,38 @@ def test_a_pack_with_no_glossary_table_registers_none():
 
 
 @pytest.mark.parametrize("pack", ["hospitality", "gst"])
+def test_include_documents_false_skips_every_document_import(pack):
+    # A consumer composing with a pack's *vocabulary* (namespace,
+    # predicates, ontology) without wanting its demo/reference fixture
+    # data — ext-apps/Reco/backend/app/main.py loading packs/gst is the
+    # motivating case: reco-now's own reconciliation must not be
+    # cross-contaminated by packs/gst's planted INV-1001..INV-2002
+    # scenarios, since the native reconcile engine has no per-source
+    # isolation (plans/119-architecture-audit.md's Slice-2 investigation).
+    with scripted_server() as (url, received):
+        result = load_pack(PACKS / pack, url, include_documents=False)
+
+    assert not any(r["path"] == "/graph/import/rdf" for r in received), received
+    assert result.documents == []
+    assert result.landed == 0
+    assert result.skipped == 0
+    # Namespace and predicates are still real requests — the whole point is
+    # vocabulary without data, not nothing at all.
+    assert any(r["path"] == "/namespaces" for r in received), received
+    assert any(r["path"] == "/predicates" for r in received), received
+
+
+def test_include_documents_defaults_to_true_unchanged_from_before(pack="gst"):
+    # The new parameter must not change any existing caller's behaviour by
+    # default — every current call site (demo.sh, verify-pack-load.sh,
+    # the CLI) calls load_pack with no opinion on this at all.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / pack, url)
+
+    assert any(r["path"] == "/graph/import/rdf" for r in received), received
+
+
+@pytest.mark.parametrize("pack", ["hospitality", "gst"])
 def test_every_document_is_imported_under_its_own_source(pack):
     with scripted_server() as (url, received):
         result = load_pack(PACKS / pack, url)

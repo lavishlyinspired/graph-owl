@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from app.graphowl_client import IngestError, import_document, rows_to_turtle
+from app.graphowl_client import IngestError, import_document, list_findings, rows_to_turtle
 
 #: Fields reco-now shares with packs/gst — asserted as `gst:` predicates.
 GST_PREDICATES = (
@@ -68,6 +68,28 @@ def _row(**overrides) -> dict:
 class TestRowsToTurtle:
     def test_empty_rows_produce_an_empty_document(self):
         assert rows_to_turtle([], "books") == ""
+
+    def test_invoice_date_is_normalized_to_iso_8601(self):
+        # Reco's own CSVs (and _normalize's output) carry dates as
+        # DD-MM-YYYY strings — main.py's own sample data uses "07-08-2026"
+        # for 7 August 2026. packs/gst's finding queries compare
+        # gst:invoiceDate against gst:effectiveFrom lexicographically as
+        # plain strings (amount-mismatch.sparql: `FILTER (?from <= ?date)`,
+        # no xsd:date cast) — verified live: with the raw DD-MM-YYYY string
+        # asserted, every comparison against an ISO "20XX-01-01" provision
+        # failed silently (no exception, just zero results), because "2"
+        # sorts after "0" character-by-character. ISO YYYY-MM-DD is the
+        # only format both this pack's dates and packs/gst's law dates can
+        # be compared under with plain `<=`.
+        turtle = rows_to_turtle([_row(invoice_date="07-08-2026")], "books")
+        assert 'gst:invoiceDate "2026-08-07"' in turtle
+        assert "07-08-2026" not in turtle
+
+    def test_an_unparseable_date_is_passed_through_unchanged(self):
+        # A malformed date is a data-quality problem to surface, not one
+        # for this function to silently swallow or crash on.
+        turtle = rows_to_turtle([_row(invoice_date="not-a-date")], "books")
+        assert 'gst:invoiceDate "not-a-date"' in turtle
 
     def test_fully_populated_row_carries_every_predicate_under_the_right_prefix(self):
         turtle = rows_to_turtle([_row()], "books")
@@ -150,7 +172,11 @@ class TestRowsToTurtle:
             _row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7"),
         ]
         turtle = rows_to_turtle(rows, "books")
-        subjects = [line for line in turtle.splitlines() if line.startswith("<")]
+        # The per-source invoice subject specifically (not the Supplier or
+        # canonical blocks, which every row also emits now).
+        subjects = [
+            line for line in turtle.splitlines() if line.startswith("<https://reconow.dev/pack#books-")
+        ]
         assert len(subjects) == 2
         assert subjects[0] != subjects[1]
 
@@ -191,12 +217,104 @@ class TestRowsToTurtle:
         # Real GST invoice numbers commonly look like "INF/23-24/0456" —
         # an un-encoded "/" would silently change the IRI's path shape.
         turtle = rows_to_turtle([_row(invoice_no="INF/23-24/0456")], "books")
-        subject_line = next(line for line in turtle.splitlines() if line.startswith("<"))
+        subject_line = next(
+            line for line in turtle.splitlines() if line.startswith("<https://reconow.dev/pack#books-")
+        )
         assert "INF/23-24/0456" not in subject_line
         assert "INF%2F23-24%2F0456" in subject_line
 
 
-def _handler(received: list[dict], fail: bool):
+class TestCanonicalLinking:
+    """packs/gst's finding queries (missing-in-gstr2b, amount-mismatch,
+    tax-head-mismatch) don't join books-vs-2B by a shared literal key — they
+    walk a real graph shape: a canonical subject linked to each per-source
+    invoice via gst:recordedIn/gst:reflectedIn, and each per-source invoice
+    linked to a real gst:Supplier subject via gst:issuedBy (confirmed by
+    reading amount-mismatch.sparql/tax-head-mismatch.sparql/
+    missing-in-gstr2b.sparql in full — not assumed from field-level
+    vocabulary compatibility, which is what the first pass at this got
+    wrong). Without this, every one of packs/gst's finding queries would
+    silently match zero of reco-now's subjects."""
+
+    def test_supplier_subject_is_a_gst_supplier_with_its_gstin(self):
+        turtle = rows_to_turtle([_row(supplier_gstin="27AAAFN2938K1Z2")], "books")
+        assert "a gst:Supplier" in turtle
+        assert 'gst:supplierGstin "27AAAFN2938K1Z2"' in turtle
+
+    def test_supplier_gstin_no_longer_lands_directly_on_the_invoice(self):
+        # It now lives on the Supplier subject, reached via gst:issuedBy —
+        # matching packs/gst's own queries (`?supplier gst:supplierGstin
+        # ?gstin`, never `?purchase gst:supplierGstin ?gstin`). Asserting
+        # it in both places would be exactly the kind of redundant,
+        # unrelated-looking duplication plans/119-architecture-audit.md
+        # §3.1 already found and fixed once.
+        turtle = rows_to_turtle([_row()], "books")
+        # supplierGstin must appear exactly once in the whole document —
+        # on the Supplier subject — not additionally on the invoice.
+        assert turtle.count("gst:supplierGstin") == 1
+
+    def test_the_invoice_carries_an_issuedby_edge_to_the_supplier(self):
+        turtle = rows_to_turtle([_row(supplier_gstin="27AAAFN2938K1Z2")], "books")
+        assert "gst:issuedBy <https://reconow.dev/pack#supplier-27AAAFN2938K1Z2>" in turtle
+
+    def test_a_books_row_links_its_canonical_subject_via_recordedin(self):
+        turtle = rows_to_turtle(
+            [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "books"
+        )
+        assert (
+            "<https://reconow.dev/pack#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "    gst:recordedIn <https://reconow.dev/pack#books-27AAAFN2938K1Z2-INV-AUG-101> ."
+        ) in turtle
+        assert "gst:reflectedIn" not in turtle
+
+    def test_a_gstr2b_row_links_its_canonical_subject_via_reflectedin(self):
+        turtle = rows_to_turtle(
+            [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "gstr2b"
+        )
+        assert (
+            "<https://reconow.dev/pack#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "    gst:reflectedIn <https://reconow.dev/pack#gstr2b-27AAAFN2938K1Z2-INV-AUG-101> ."
+        ) in turtle
+        assert "gst:recordedIn" not in turtle
+
+    def test_the_same_invoice_gets_the_same_canonical_subject_regardless_of_kind(self):
+        # Not asserted in one call (rows_to_turtle only ever sees one kind
+        # at a time — books and gstr2b are two separate uploads/imports) —
+        # but the IRI must be deterministic from (gstin, invoice_no) alone,
+        # kind-independent, or the two imports would mint two different
+        # canonical subjects and gst:recordedIn/gst:reflectedIn would never
+        # meet on one subject the way amount-mismatch.sparql requires.
+        books = rows_to_turtle([_row(invoice_no="INV-9", supplier_gstin="27X")], "books")
+        gstr2b = rows_to_turtle([_row(invoice_no="INV-9", supplier_gstin="27X")], "gstr2b")
+        books_canonical = next(l for l in books.splitlines() if l.startswith("<") and "invoice-" in l)
+        gstr2b_canonical = next(l for l in gstr2b.splitlines() if l.startswith("<") and "invoice-" in l)
+        assert books_canonical == gstr2b_canonical
+
+    def test_books_row_carries_a_combined_tax_amount(self):
+        turtle = rows_to_turtle([_row(igst=3960, cgst=0, sgst=0, cess=0)], "books")
+        assert 'gst:taxAmount "3960"' in turtle
+
+    def test_combined_tax_amount_sums_all_four_components(self):
+        turtle = rows_to_turtle([_row(igst=0, cgst=8550, sgst=8550, cess=100)], "books")
+        assert 'gst:taxAmount "17200"' in turtle
+
+    def test_combined_tax_amount_treats_an_absent_component_as_zero(self):
+        turtle = rows_to_turtle([_row(igst=3960, cgst=None, sgst="", cess=float("nan"))], "books")
+        assert 'gst:taxAmount "3960"' in turtle
+
+    def test_gstr2b_rows_do_not_carry_a_combined_tax_amount(self):
+        # None of the 3 findings wired in this slice (PotentialMismatch,
+        # AmountMismatch, TaxHeadMismatch) read gst:taxAmount off the
+        # Gstr2bInvoice side — only itc-not-available/reverse-charge do,
+        # and those are deferred (Reco has no itcAvailable field at all,
+        # and its reverse_charge values are "Yes"/"No" text, not the "R"/
+        # "N" codes those queries filter on). Asserting a field nothing
+        # reads is speculative scope, not a fix.
+        turtle = rows_to_turtle([_row(igst=3960, cgst=0, sgst=0, cess=0)], "gstr2b")
+        assert "gst:taxAmount" not in turtle
+
+
+def _handler(received: list[dict], fail: bool, findings_response: list | None = None):
     class Scripted(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             parsed = urlparse(self.path)
@@ -221,6 +339,29 @@ def _handler(received: list[dict], fail: bool):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            received.append(
+                {
+                    "path": parsed.path,
+                    "query": {k: v[0] for k, v in parse_qs(parsed.query).items()},
+                    "raw": b"",
+                    "auth": self.headers.get("authorization"),
+                }
+            )
+            if fail:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'{"detail":"deliberate failure"}')
+                return
+            body = json.dumps(findings_response if findings_response is not None else []).encode(
+                "utf-8"
+            )
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *args):  # silence test output
             pass
 
@@ -228,8 +369,8 @@ def _handler(received: list[dict], fail: bool):
 
 
 @contextmanager
-def _server(received: list[dict], fail: bool = False):
-    server = HTTPServer(("127.0.0.1", 0), _handler(received, fail))
+def _server(received: list[dict], fail: bool = False, findings_response: list | None = None):
+    server = HTTPServer(("127.0.0.1", 0), _handler(received, fail, findings_response))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -273,3 +414,32 @@ class TestImportDocument:
     def test_unreachable_server_raises_ingest_error(self):
         with pytest.raises(IngestError):
             import_document("http://127.0.0.1:1", "s", "text")
+
+
+class TestListFindings:
+    def test_gets_findings_scoped_to_the_reco_pack(self):
+        received: list[dict] = []
+        sample = [{"id": "f1", "label": "gst:AmountMismatch", "subject": "x"}]
+        with _server(received, findings_response=sample) as url:
+            result = list_findings(url)
+        assert received[0]["path"] == "/findings"
+        assert received[0]["query"]["pack"] == "reco"
+        assert result == sample
+
+    def test_sends_bearer_token_when_given(self):
+        received: list[dict] = []
+        with _server(received, findings_response=[]) as url:
+            list_findings(url, token="abc123")
+        assert received[0]["auth"] == "Bearer abc123"
+
+    def test_empty_findings_list_is_a_real_empty_list_not_an_error(self):
+        received: list[dict] = []
+        with _server(received, findings_response=[]) as url:
+            result = list_findings(url)
+        assert result == []
+
+    def test_server_error_raises_ingest_error(self):
+        received: list[dict] = []
+        with _server(received, fail=True) as url:
+            with pytest.raises(IngestError, match="500"):
+                list_findings(url)

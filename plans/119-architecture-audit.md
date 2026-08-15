@@ -188,22 +188,38 @@ anything here "the canonical implementation," since canonical usually implies
 | `normalize_gstin`/`normalize_invoice_no` (case/punctuation strip) | `[[matching.blocking]] strategy = "normalized"` over `gst:supplierGstin`/`gst:invoiceNumber` (`graph-owl-core::blocking_strategy::Normalized`, DN-2) | Read `pack.toml` lines ~200-230 | Superseded |
 | Exact key match (`invoice_key`, GSTIN+invoice number) | Canonical `gst:Invoice` join — Plan 109 Slice 2's own comment in `amount-mismatch.sparql`: "computed deterministically from the exact GSTIN and normalized invoice number" | Read the query | Superseded |
 | Fuzzy fallback (Reco's is just the *same* normalized-key match run twice — no real edit-distance tolerance) | `ngram` blocking (n=3) on `supplierGstin` and `invoiceNumber`, feeding `GstinTransposition`/`SupplierPanMismatch` with tuned similarity bands (0.40-0.999) | Read `pack.toml`'s `[findings.similarity]` blocks | **Native is strictly more capable** — Reco has no real fuzzy match today |
-| Flat tolerance (`SESSION["tolerance"]`, user-adjustable, default ₹1) vs. `AmountMismatch` | **Different semantics, not a straight swap.** The query's own comment: *"The cap is read from the graph, never written here"* — `gst:Provision`/`capPercent` traversed from `law/rule-36-4.ttl` by invoice date, a statutory percentage, not a user-set rupee slack | Read `amount-mismatch.sparql` in full | **Needs a decision**, not a mapping: does the statutory cap alone cover the rounding-noise case Reco's ₹1 tolerance exists for? Check against real numbers (`packs/gst/eval/questions.md` has worked examples) before treating this as settled |
+| Flat tolerance (`SESSION["tolerance"]`, user-adjustable, default ₹1) vs. `AmountMismatch` | **Corrected 16 August 2026 — resolved, not open.** The first pass of this table read only the query's header comment ("the cap is read from the graph") and stopped there. The query's *filter clause*, read in full, has two conditions ANDed together: the statutory `capPercent` threshold, **and** a flat `> 1` floor — with its own comment explaining why: *"a queue full of ₹0.01 findings is one a reviewer stops reading... ₹1 is chosen as the smallest unit a CA would ever act on."* `packs/gst/law/rule-36-4.ttl` also confirms the cap is nil from 2022 onward — so for any 2026 invoice (all of Reco's real data), the statutory half of the filter is `> 0`, and the ₹1 floor is what actually governs, same as Reco's own default tolerance | Read `amount-mismatch.sparql`'s full `FILTER` clause, not just its header comment, plus `rule-36-4.ttl`'s dated provisions | **Superseded — native is a strict improvement, not a semantic gap.** It has Reco's own ₹1 floor already, plus correctly relaxes it for any invoice actually dated before 2022 (which Reco's flat tolerance does not do — Reco would apply ₹1 to a 2020 invoice too, where the law allowed a 10% band) |
 | `STATUS_ONLY_BOOKS` (single status: "not in GSTR-2B") | Two findings, not one: `PotentialMismatch` (no GSTR-1 loaded — the base case) *or* `SupplierNotFiled` (GSTR-1 loaded, supplier genuinely didn't file) | `pack.toml`: `PotentialMismatch` "stands down entirely once GSTR-1 evidence is loaded" | **Native is strictly more capable** — it tells apart two causes Reco's single status conflates |
-| `STATUS_ONLY_GSTR2B` (single status: "not in books") | `MissingInBooks` (`missing-in-books.sparql`) | Read the query | Superseded |
+| `STATUS_ONLY_GSTR2B` (single status: "not in books") | `MissingInBooks` (`missing-in-books.sparql`) | **Corrected 16 August 2026**: this table originally read the query's summary and stopped. Its `WHERE` clause requires `gst:Gstr1Invoice` in a mandatory `GRAPH` join, not an `OPTIONAL` guard the way `missing-in-gstr2b.sparql` does — checked directly, not assumed. Moves to the "needs GSTR-1" row below | Not reachable with books+2B alone — see the corrected count below |
 | `STATUS_MATCHED` (silent — no row emitted) | Absence of any finding for a canonical invoice | Convention stated throughout `pack.toml`'s finding comments | Superseded |
 | `classify_mismatches`'s hardcoded strings (`"Section 16(2)(aa), CGST Act"`) | `governed_by` + `law/sections.ttl`, traversed | Verified present, not assumed | Superseded — native is authoritative (real law graph vs. a literal string that can drift from the statute) |
 | GSTIN transposition, tax-head mismatch, supplier-PAN-same-GSTIN mismatch | **Not present in `reconciliation.py` at all** | Grepped `reconciliation.py` for equivalents — none | New capability, not a migration |
-| Three-way books/GSTR-1/GSTR-2B split (`SupplierNotFiled`, `Gstr1NotIn2b`, `BooksGstr1Mismatch`), goods-receipt timing, 180-day payment-overdue | **Not present**, and **not reachable today** — these query `gst:Gstr1Invoice`/`gst:GoodsReceipt`/`gst:PaymentEvent`, none of which Reco's two-dataset (books + GSTR-2B) upload flow ingests | Grepped each `.sparql` file for its required graph pattern | Blocked on Reco's UI gaining GSTR-1/goods-receipt/payment upload — **not in scope for the reconciliation.py→engine swap alone** |
+| Three-way books/GSTR-1/GSTR-2B split (`SupplierNotFiled`, `Gstr1NotIn2b`, `BooksGstr1Mismatch`, and — corrected — `MissingInBooks`), goods-receipt timing, 180-day payment-overdue | **Not present**, and **not reachable today** — these query `gst:Gstr1Invoice`/`gst:GoodsReceipt`/`gst:PaymentEvent` in a *required* join, none of which Reco's two-dataset (books + GSTR-2B) upload flow ingests | Grepped each `.sparql` file's `WHERE` clause for whether the reference is inside `OPTIONAL` (fires fine with no data) or a plain `GRAPH` pattern (requires it) — not just whether the string appears | Blocked on Reco's UI gaining GSTR-1/goods-receipt/payment upload — **not in scope for the reconciliation.py→engine swap alone** |
 | `supplier_health` (ITC-at-risk rollup by supplier), `ims_actions` (accept/follow-up/investigate buckets), `match_stats` (totals, match rate) | No engine equivalent — these are presentation aggregations, and IMS is a GST-portal UI concept the engine has no reason to know about | Checked `graph-owl-resolution`/`graph-owl-api` for anything analogous — nothing | **Reco-owned**, correctly — these should be recomputed *over the engine's findings* instead of over `reconciliation.py`'s own result rows, not moved anywhere |
 
-**What this changes about Slice 2's scope**: 8 of the 12 native findings
-(`PotentialMismatch`, `AmountMismatch`, `ITCNotAvailable`, `Reversed`,
-`GstinTransposition`, `MissingInBooks`, `TaxHeadMismatch`,
-`SupplierPanMismatch`) are reachable with the two datasets Reco already
-collects. The other 4 need data Reco's UI doesn't currently ingest at all —
-wiring those is a separate, later slice with its own upload-flow work, not
-part of retiring `reconciliation.py`.
+**What this changes about Slice 2's scope — corrected three times now, each
+time by checking the query text instead of its name/summary.** `packs/gst`
+registers **13** finding rules (recounted directly, `grep -c
+'^\[\[findings\]\]' packs/gst/pack.toml` — an earlier pass here said 12).
+7 of the 13 (`PotentialMismatch`, `AmountMismatch`, `ITCNotAvailable`,
+`Reversed`, `GstinTransposition`, `TaxHeadMismatch`, `SupplierPanMismatch`)
+are reachable with the two datasets Reco already collects — `MissingInBooks`
+moved out of this group (above). Of those 7, 2 (`GstinTransposition`,
+`SupplierPanMismatch`) additionally need `[matching.blocking]` similarity
+config not yet built. Of the remaining 5, 2 more turned out to need data
+or value-coding reco-now doesn't have: `ITCNotAvailable` reads
+`gst:itcAvailable`, a field reco-now's CSV format has no column for at
+all; `Reversed` filters `gst:reverseCharge = "R"` (the GST portal's own
+code), while reco-now's `reverse_charge` values are plain "Yes"/"No" text
+— found only once the actual finding queries' `WHERE` clauses were read
+in full (§5c), not from field-level vocabulary compatibility. **3
+implemented in this slice**: `PotentialMismatch`, `AmountMismatch`,
+`TaxHeadMismatch` — see `ext-apps/Reco/graphowl-pack/queries/README.md`.
+The other 10 (6 needing GSTR-1/goods-receipt/payment data —
+`SupplierNotFiled`, `Gstr1NotIn2b`, `MissingInBooks`, `BooksGstr1Mismatch`,
+`GoodsReceiptTiming`, `PaymentOverdue` — plus the 2 needing blocking config
+and the 2 needing field work above) are separate, later slices, not part
+of retiring `reconciliation.py`.
 
 ### 5b. The corrected retirement sequence for `reconciliation.py`
 
@@ -213,13 +229,74 @@ plan for Slice 2, not a report of what happened:
 
 | Step | Action | Result |
 |---|---|---|
-| 1 | Inspect/extract `reconciliation.py`'s behavior (§5a) | Done, above |
-| 2 | Fix `ext-apps/Reco/graphowl-pack` per §3.1 (dedupe against `gst:` predicates) | Not started |
-| 3 | Add `[[matching.blocking]]`/`[[findings]]`/`[[queries]]` to Reco's pack — reusing the 8 reachable `packs/gst` finding rules against Reco's own `reco:`-namespaced instances, extended with `gst:` predicates per §3.1's fix | Not started |
-| 4 | `/api/reconcile` calls `POST /packs/reco/reconcile` in **addition to** the existing `reconciliation.py` path — not replacing it yet | Not started |
-| 5 | **Parity tests**: for the fresh fixture data already in `SAMPLE/*_aug2026.csv`, assert the native engine's findings agree with `reconciliation.py`'s classification for every row both can classify (the 8 reachable findings vs. `reconciliation.py`'s 4 statuses) — a real test, run against a live server, not inspection | Not started |
-| 6 | Only once (5) is green: make `reconciliation.py`'s output the *derived* one (computed from the engine's findings) or route `/api/reconcile` to read the engine directly, with `reconciliation.py` behind a flag for one release as a fallback | Not started |
-| 7 | Only after (6) has run for real without a regression: delete `reconciliation.py` (or archive it — see the open question below) | Not started, and not until everything above is |
+| 1 | Inspect/extract `reconciliation.py`'s behavior (§5a) | **Done** |
+| 2 | Fix `ext-apps/Reco/graphowl-pack` per §3.1 (dedupe against `gst:` predicates) | **Done** |
+| 3 | Add `[[queries]]`/`[[findings]]` to Reco's pack — 3 of the 7 reachable `packs/gst` finding rules (§5a's revised count), against a canonical-invoice/Supplier graph shape `graphowl_client.rows_to_turtle` had to be extended to build (§5c) | **Done, narrower than planned** — 3 findings, not 7 or 8 |
+| 4 | `/api/reconcile` calls `POST /packs/reco/reconcile` in **addition to** the existing `reconciliation.py` path — not replacing it yet | **Done** |
+| 5 | **Parity tests**: fresh fixture data, live server, not inspection | **Done** — `ext-apps/Reco/scripts/verify-reconcile-parity.py`, passing |
+| 6 | Only once (5) is green: make `reconciliation.py`'s output the *derived* one, or route `/api/reconcile` to read the engine directly | **Not done — see §5c. The parity result itself is why**: it's not full parity, and (6) as originally scoped would be a real regression, not a safe swap |
+| 7 | Only after (6) has run for real without a regression: delete `reconciliation.py` | **Not done, and not recommended as originally scoped — see §5c** |
+
+### 5c. What the live parity test actually found, and the cutover decision
+
+Run against a genuinely fresh database (accumulated test data across
+sessions silently corrupts this comparison — hit twice while building it;
+see the script's own comment) with `ext-apps/Reco/SAMPLE/*_aug2026.csv`'s
+hand-designed answer key: 7 clean matches, 1 amount mismatch, 2 books-only,
+1 portal-only.
+
+**`reconciliation.py`: exactly right** — `{total: 11, matched: 7, review: 1,
+only_books: 2, only_gstr2b: 1}`. (This only became true after fixing a
+second, unrelated pre-existing bug found *by* this parity test: `_auto_map`
+never matched `igst`/`cgst`/`sgst` against a real GSTR-2B export's actual
+column names — "Integrated Tax"/"Central Tax"/"State/UT Tax" — only the
+literal substrings "igst"/"cgst"/"sgst". Every tax component silently
+zeroed on the portal side against realistic headers, which both
+`SAMPLE/gstr2b_mar2026.csv` and the fresh `gstr2b_aug2026.csv` use. Fixed
+in `main.py`'s `_FIELD_KEYWORDS`, `tests/test_main.py` added — this repo
+had zero tests for `main.py` before.)
+
+**The native engine: 3 findings** — 2× `PotentialMismatch` (exactly the 2
+`only_books` invoices), 1× `AmountMismatch` **and** 1× `TaxHeadMismatch`
+for the same invoice (INV-AUG-103: taxable value differs 42000 vs 40000,
+and — genuinely, checked against the raw CSV, not a bug — CGST/SGST differ
+proportionally by ₹180, correctly tripping both rules independently).
+Correct silence on all 7 matched invoices.
+
+**One real, structural gap, not a bug**: nothing in the 3 wired findings —
+or in any of `packs/gst`'s 13 — covers `only_gstr2b` ("in GSTR-2B, no
+matching books entry") without GSTR-1 evidence. `MissingInBooks` is the
+rule that names this case, and it requires `gst:Gstr1Invoice` in a
+mandatory join (§5a). `reconciliation.py` catches it (INV-AUG-111,
+correctly) by simple set difference; the native engine, as designed,
+treats "declared but not booked" as a claim that needs the supplier's own
+GSTR-1 filing as evidence, not an absence to infer from GSTR-2B alone.
+
+**Decision: do not proceed to steps 6-7 as scoped.** Making the native
+path primary and retiring `reconciliation.py` would delete `only_gstr2b`
+coverage entirely — a real regression, not a safe cutover, and exactly
+what the corrected process in this section exists to prevent. Two ways
+forward, not decided here because both are product decisions:
+
+- **Keep the dual-path permanently**, not as a stepping stone: native
+  findings *enrich* 3 of 4 categories (statute citations, the
+  tax-head-mismatch nuance, and — once §3.1's remaining gaps close —
+  transposition/PAN-mismatch detection `reconciliation.py` has no
+  equivalent for at all), while `reconciliation.py` remains the only
+  source for `only_gstr2b`. This is a coherent end-state, not a
+  compromise.
+- **Or**: author a new finding rule (in Reco's own pack, not `packs/gst`
+  — this case doesn't exist there because the platform's GST pack
+  assumes GSTR-1 is the right evidence for it) that infers `only_gstr2b`
+  from books+2B alone, the way `reconciliation.py` already does — then
+  re-run this parity script. If it passes, steps 6-7 are worth
+  reconsidering.
+
+Either way, `reconciliation.py`'s presentation functions
+(`supplier_health`, `ims_actions`, `match_stats` — §5a) were already
+Reco-owned regardless of this decision; "retire `reconciliation.py`" was
+never fully achievable as originally stated even in the best case — at
+most its matching logic could eventually be retired, not the whole file.
 
 This sequence is now the authoritative description of Slice 2 — it
 supersedes the one-paragraph version in `plans/118-reco-now-integration.md`,

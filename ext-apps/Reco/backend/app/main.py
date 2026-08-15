@@ -15,6 +15,7 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
+from graph_owl_packs.reconcile import run_findings
 
 from . import ai, exporters, graphowl_client, reconciliation as rc, sample_data
 
@@ -112,6 +113,16 @@ _FIELD_KEYWORDS = [
     ("voucher type", "voucher_type"),
     ("voucher no", "voucher_no"),
     ("voucher", "voucher_no"),
+    # A real GSTR-2B export names these "Integrated Tax"/"Central Tax"/
+    # "State/UT Tax", not "IGST"/"CGST"/"SGST" — found via
+    # plans/119-architecture-audit.md §5b's live parity test, which
+    # silently zeroed every portal-side tax component against realistic
+    # sample data (reco-now's own SAMPLE/gstr2b_*.csv use these exact
+    # header names) until these were added.
+    ("integrated tax", "igst"),
+    ("central tax", "cgst"),
+    ("state/ut tax", "sgst"),
+    ("state tax", "sgst"),
     ("igst", "igst"),
     ("cgst", "cgst"),
     ("sgst", "sgst"),
@@ -128,6 +139,7 @@ def _reset() -> None:
     SESSION["results"] = None
     SESSION["normalized"] = {}
     SESSION["graphowl"] = {}
+    SESSION["graphowl_reconcile"] = None
 
 
 def _auto_map(headers: list[str]) -> dict[str, int | None]:
@@ -204,16 +216,27 @@ def _startup() -> None:
 
 
 def _install_graphowl_pack() -> None:
-    """Declare packs/gst's namespace and predicates, then reco-now's own —
-    in that order, because `graphowl_client.rows_to_turtle` asserts gst:
-    predicates directly (plans/119-architecture-audit.md §3.1) and
-    `POST /graph/import/rdf` refuses any flake whose predicate is not yet
-    registered. Both loads use the one-time step `load_pack` already does
-    for packs/gst and packs/hospitality, reused here rather than
+    """Declare packs/gst's *vocabulary* (namespace, predicates, ontology —
+    not its demo fixtures), then reco-now's own — in that order, because
+    `graphowl_client.rows_to_turtle` asserts gst: predicates directly
+    (plans/119-architecture-audit.md §3.1) and `POST /graph/import/rdf`
+    refuses any flake whose predicate is not yet registered.
+
+    **`include_documents=False` on the gst load is load-bearing, not an
+    optimisation.** The native reconcile engine has no per-source data
+    isolation (`Catalog::reconcile_pack` runs each rule's SPARQL over the
+    whole store); packs/gst's own `[[documents]]` are its planted
+    INV-1001..INV-2002 demo scenarios, and loading them into reco-now's
+    deployment would put graph-owl's own demo invoices into every
+    reconciliation reco-now runs. Vocabulary composition is wanted here,
+    not the data.
+
+    Both loads use the one-time step `load_pack` already does for
+    packs/gst and packs/hospitality, reused here rather than
     reimplemented. Idempotent (loading a pack twice is a no-op), so this
     runs on every startup, not just the first."""
     try:
-        load_pack(GST_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        load_pack(GST_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN, include_documents=False)
         load_pack(GRAPH_OWL_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
     except LoadError as exc:
         print(f"[graphowl] pack install skipped — {exc}")
@@ -371,7 +394,39 @@ def run_reconcile() -> dict:
     portal = _normalize(SESSION["datasets"]["gstr2b"], SESSION["mapping"].get("gstr2b", {}))
     SESSION["normalized"] = {"books": books, "gstr2b": portal}
     SESSION["results"] = rc.reconcile(books, portal, tolerance=SESSION["tolerance"])
+    threading.Thread(target=_run_graphowl_reconcile, daemon=True).start()
     return overview()
+
+
+def _run_graphowl_reconcile() -> None:
+    """Dual-path, per plans/119-architecture-audit.md §5b step 4: the
+    native engine runs ALONGSIDE reconciliation.py here, not instead of
+    it — cutover (steps 6-7) only happens once parity is actually
+    demonstrated, not assumed. Best-effort and backgrounded, same as
+    ingestion: graph-owl may not have finished landing this upload yet
+    (ingestion is its own background thread, started at /api/upload) or
+    may not be running at all, and neither should block or fail the
+    Python-side reconciliation this endpoint already returns."""
+    try:
+        result = run_findings("reco", GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        SESSION["graphowl_reconcile"] = {
+            "evaluated": result.evaluated,
+            "found": result.found,
+            "opened": result.opened,
+            "alreadyOpen": result.already_open,
+            "findings": findings,
+        }
+    except (LoadError, graphowl_client.IngestError) as exc:
+        SESSION["graphowl_reconcile"] = {"error": str(exc)}
+
+
+@app.get("/api/graphowl/reconcile")
+def graphowl_reconcile_status() -> dict:
+    """What the native graph-owl reconcile engine found, run alongside
+    reconciliation.py per Slice 2 — a parallel view for comparison, not
+    yet the source of truth `overview()` reads from."""
+    return {"ok": True, "reconcile": SESSION.get("graphowl_reconcile")}
 
 
 @app.get("/api/overview")

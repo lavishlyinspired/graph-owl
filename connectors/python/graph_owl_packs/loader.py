@@ -108,6 +108,7 @@ def load_pack(
     server: str,
     token: str | None = None,
     dry_run: bool = False,
+    include_documents: bool = True,
 ) -> LoadResult:
     """Declare the pack's namespace, then import every document it lists.
 
@@ -116,6 +117,14 @@ def load_pack(
     genuinely different check from validating the manifest locally, and it is
     the one worth having: a pack whose ontology violates a shape is a pack
     that will half-load, and finding that out before it does is the point.
+
+    `include_documents=False` declares the namespace, predicates and glossary
+    — the pack's *vocabulary* — without importing any `[[documents]]`. For a
+    consumer composing with a pack rather than running its own copy of it
+    (reco-now extending packs/gst, plans/119-architecture-audit.md): the
+    native reconcile engine has no per-source data isolation, so a pack's own
+    demo/reference fixtures loaded alongside a real consumer's data would be
+    evaluated together and cross-contaminate that consumer's findings.
 
     # Raises
 
@@ -170,7 +179,7 @@ def load_pack(
         _register_glossary(base, manifest, token)
 
     results: list[DocumentResult] = []
-    for document in manifest.documents:
+    for document in manifest.documents if include_documents else ():
         path = directory / document.path
         if not path.is_file():
             raise LoadError(

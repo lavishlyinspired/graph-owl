@@ -35,6 +35,8 @@ import json
 import math
 import urllib.error
 import urllib.request
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 #: Must match graphowl-pack/pack.toml's [pack] table.
@@ -56,9 +58,12 @@ CLASS_BY_KIND = {
 #: already registers; only the 6 packs/gst does not have get `reco:`.
 #: Matches graphowl-pack/pack.toml's [[predicates]] and ontology.ttl
 #: exactly, as one table, so they cannot drift silently against each other.
+#: `supplier_gstin` is deliberately not here — packs/gst's own finding
+#: queries read it off the *Supplier* subject (`?supplier gst:supplierGstin
+#: ?gstin`), reached via `gst:issuedBy`, never as a direct literal on the
+#: invoice. `rows_to_turtle` asserts it once, on the Supplier subject.
 PREDICATES: dict[str, tuple[str, str]] = {
     "invoice_no": ("gst", "invoiceNumber"),
-    "supplier_gstin": ("gst", "supplierGstin"),
     "supplier_name": ("gst", "supplierName"),
     "taxable": ("gst", "taxableValue"),
     "invoice_date": ("gst", "invoiceDate"),
@@ -94,6 +99,25 @@ def _is_present(value: object) -> bool:
     return True
 
 
+def _normalize_date(value: object) -> object:
+    """DD-MM-YYYY (reco-now's own CSV/UI format, e.g. "07-08-2026") to ISO
+    8601 (`2026-08-07`).
+
+    **Load-bearing, not cosmetic.** `amount-mismatch.sparql` picks the law
+    provision in force with `FILTER (?from <= ?date)` — a plain string
+    comparison, no `xsd:date` cast. `gst:effectiveFrom` is always ISO
+    (`packs/gst/law/rule-36-4.ttl`); a DD-MM-YYYY `?date` sorts against it
+    character-by-character ('0' < '2'), so every provision fails the
+    filter and the finding silently never fires — found by running the
+    query against real data, not by reading it. An unparseable date is
+    passed through unchanged: a data-quality problem to surface, not one
+    for this function to swallow or crash on."""
+    try:
+        return datetime.strptime(str(value), "%d-%m-%Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return value
+
+
 def _turtle_string(value: object) -> str:
     """A Turtle string literal for `value`. Backslash first, then quote,
     then the whitespace escapes — in that order, or escaping the quote
@@ -125,6 +149,39 @@ def _subject_iri(kind: str, row: dict) -> str:
     return f"{NAMESPACE}{kind}-{gstin}-{invoice_no}"
 
 
+def _supplier_iri(gstin_raw: str) -> str:
+    gstin = quote(str(gstin_raw or "").strip(), safe="")
+    return f"{NAMESPACE}supplier-{gstin}"
+
+
+def _canonical_iri(gstin_raw: str, invoice_no_raw: str) -> str:
+    """One subject per real invoice, **kind-independent** — a books upload
+    and a gstr2b upload for the same (gstin, invoice number) must mint the
+    identical IRI, or `gst:recordedIn` and `gst:reflectedIn` would land on
+    two different subjects instead of meeting on one, and every finding
+    query that joins through `?canonical` would silently match nothing."""
+    gstin = quote(str(gstin_raw or "").strip(), safe="")
+    invoice_no = quote(str(invoice_no_raw or "").strip(), safe="")
+    return f"{NAMESPACE}invoice-{gstin}-{invoice_no}"
+
+
+def _combined_tax_amount(row: dict) -> str:
+    """igst + cgst + sgst + cess, absent/blank/NaN components treated as
+    zero. Only meaningful on the books side — `missing-in-gstr2b.sparql`
+    is the one wired finding that reads `gst:taxAmount`, and it reads it
+    off `gst:PurchaseInvoice` only."""
+    total = Decimal("0")
+    for field in ("igst", "cgst", "sgst", "cess"):
+        value = row.get(field)
+        if not _is_present(value):
+            continue
+        try:
+            total += Decimal(str(value))
+        except InvalidOperation:
+            continue
+    return str(total)
+
+
 def rows_to_turtle(rows: list[dict], kind: str) -> str:
     """Normalized rows (main.py's `_normalize` output) as one Turtle
     document, ready for `import_document`.
@@ -147,12 +204,37 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     lines = [f"@prefix gst: <{GST_NAMESPACE}> .", f"@prefix reco: <{NAMESPACE}> .", ""]
     for row in rows:
         subject = _subject_iri(kind, row)
-        triples = [f"a {CLASS_BY_KIND[kind]}"]
+        gstin_raw = row.get("supplier_gstin")
+        supplier = _supplier_iri(gstin_raw)
+        canonical = _canonical_iri(gstin_raw, row.get("invoice_no"))
+
+        # The Supplier subject — packs/gst's finding queries read the GSTIN
+        # off it (`?supplier gst:supplierGstin ?gstin`), not off the
+        # invoice directly.
+        lines.append(
+            f"<{supplier}>\n    a gst:Supplier ;\n    gst:supplierGstin "
+            f"{_turtle_string(gstin_raw)} .\n"
+        )
+
+        # The canonical link — one triple, the half this (books or
+        # gstr2b) upload can assert. The other half lands when the other
+        # side is uploaded, in its own named graph; both edges meeting on
+        # the same `canonical` subject is what makes it canonical.
+        link_predicate = "gst:recordedIn" if kind == "books" else "gst:reflectedIn"
+        lines.append(f"<{canonical}>\n    {link_predicate} <{subject}> .\n")
+
+        triples = [f"a {CLASS_BY_KIND[kind]}", f"gst:issuedBy <{supplier}>"]
         for field, (prefix, predicate) in PREDICATES.items():
             value = row.get(field)
             if not _is_present(value):
                 continue
+            if field == "invoice_date":
+                value = _normalize_date(value)
             triples.append(f"{prefix}:{predicate} {_turtle_string(value)}")
+        if kind == "books":
+            # Only PotentialMismatch (of the findings wired so far) reads
+            # gst:taxAmount, and only off the PurchaseInvoice side.
+            triples.append(f"gst:taxAmount {_turtle_string(_combined_tax_amount(row))}")
         body = " ;\n    ".join(triples)
         lines.append(f"<{subject}>\n    {body} .\n")
     return "\n".join(lines)
@@ -187,4 +269,33 @@ def import_document(
         raise IngestError(f"POST {url} was unreachable: {unreachable.reason}") from unreachable
 
 
-__all__ = ["IngestError", "PREDICATES", "import_document", "rows_to_turtle"]
+def list_findings(server: str, token: str | None = None) -> list:
+    """`GET /findings?pack=reco` — every finding this pack's registered
+    rules have recorded, evidence included. Read-only and not admin-gated
+    server-side (`crates/graph-owl-server/src/lib.rs`'s own comment: "an
+    operator who cannot see the queue cannot do it"), so this needs no
+    special principal beyond whatever `token` main.py already carries.
+
+    # Raises
+
+    `IngestError` if the server refuses or is unreachable.
+    """
+    base = server.rstrip("/")
+    url = f"{base}/findings?pack=reco"
+    request = urllib.request.Request(url, method="GET")
+    if token:
+        request.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else []
+    except urllib.error.HTTPError as refused:
+        detail = refused.read().decode("utf-8", errors="replace")
+        raise IngestError(f"GET {url} failed: HTTP {refused.code} {detail}") from refused
+    except urllib.error.URLError as unreachable:
+        raise IngestError(f"GET {url} was unreachable: {unreachable.reason}") from unreachable
+
+
+__all__ = [
+    "IngestError", "PREDICATES", "import_document", "list_findings", "rows_to_turtle",
+]
