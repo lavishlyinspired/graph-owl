@@ -1,12 +1,16 @@
 # Plan: GST canonical Invoice model — the B+C semantic-ingestion migration
 
-**Status**: Planned, not started. Second review pass complete — the user
-caught a real semantic error (GSTR-2B modeled as supplier-filed rather than
-recipient-generated) plus three smaller gaps in this plan's first draft; all
-four are corrected below. Two points remain open for confirmation before any
-code: the review-surface question (reuse findings vs a new queue), and this
-session's own proposed resolution for `gst:Recipient` (a single well-known
-subject — new scope neither source document named).
+**Status**: **Approved for implementation, pending two final refinements
+landed in this revision.** Two review passes: the first caught a real
+semantic error (GSTR-2B modeled as supplier-filed rather than
+recipient-generated) plus three smaller gaps, all corrected. The second
+approved the architecture and added two closing refinements — a new,
+domain-agnostic resolution-finding type rather than overloading
+`gst:GstinTransposition`/`gst:SupplierPanMismatch` as the attachment
+decision, and a collision guard that also gates the *exact*-match
+auto-attach path, not only the ambiguous one. Both are folded in below.
+**Next step: begin Slice 1**, per the user's explicit instruction not to do
+another architecture pass after this one.
 
 **Origin**: `plans/ingestion_extraction.md` (a design-consultation transcript,
 first-party architectural reasoning — verified not to reference any
@@ -27,8 +31,9 @@ is explicitly out of scope — gated on this plan shipping green.
 
 **Scope**: two layers, sequenced as two slices. A **platform** layer — a new,
 domain-agnostic entity-resolution/attachment capability (`graph_owl_core`,
-`graph-owl-resolution`, `graph-owl-storage(-postgres)`, `graph-owl-api`,
-possibly `graph-owl-server`) — and a **pack-content** layer on top of it:
+`graph-owl-resolution`, `graph-owl-storage(-postgres)`, `graph-owl-api` — no
+new `graph-owl-server` routes; the review surface reuses the existing
+findings decision endpoint) — and a **pack-content** layer on top of it:
 `packs/gst/` (ontology, fixtures, all 13 registered SPARQL queries,
 `pack.toml`'s `[console.reconciliation]` config) plus all four ingestion
 surfaces that currently emit the three source classes
@@ -78,12 +83,26 @@ by the user; see "Entity-resolution/attachment capability" below.
    grep — `supplierGstin` exists, no `recipientGstin`/`taxpayerGstin`
    equivalent does), and this pack is single-tenant: every reconciliation is
    one taxpayer's own data, so there is exactly one `gst:Recipient` subject
-   ever needed. This plan's proposed resolution — **a single well-known
-   subject** (e.g. `gst:recipient-self`), instantiated once, every
-   `Gstr2bStatement` pointing at the same one — rather than building out a
-   real multi-recipient identity system nothing currently needs. **Flag if
-   wrong**: this is this session's minimal-scope answer to a gap the user's
-   corrected model implies but does not fully specify.
+   ever needed. **Approved, with an explicit rule attached** — a single
+   well-known subject:
+
+   ```turtle
+   gst:recipient-self rdf:type gst:Recipient .
+   ```
+
+   every `Gstr2bStatement`'s `generatedFor` pointing at it, meaning **"the
+   recipient/taxpayer whose data this GST reconciliation deployment
+   represents"** — not a taxpayer identity system.
+
+   **Standing architectural rule, added per the user's explicit
+   instruction, to record now rather than let drift**: `gst:recipient-self`
+   is a single-tenant pack context anchor, not a globally reusable
+   identity. It must not be used as the basis for cross-tenant identity
+   resolution. If multi-tenant GST support is introduced later, the
+   recipient subject becomes tenant-scoped and can carry the taxpayer
+   GSTIN. This is written down here specifically so nobody six months from
+   now reads `gst:recipient-self` as an accidental global singleton and
+   builds on that assumption.
 
 3. **The purchase register stays a separate source/record concept, not a
    Filing** — per the user's explicit instruction. A purchase-register entry
@@ -188,6 +207,41 @@ by the user; see "Entity-resolution/attachment capability" below.
      confidence or produces an `Ambiguous` result, never something that
      silently merges or silently splits on its own.
 
+   **The collision guard gates the exact-match path too — a second-round
+   catch by the user on this plan's *previous* revision.** "Exact hard-key
+   match ⇒ auto-attach" is not quite right by itself: two source records
+   can share an identical `(supplierGstin, document number, document type)`
+   key and still be genuinely different invoices — a supplier reusing
+   `INV-001` a year apart is exactly the scenario the guard exists to name,
+   and the guard must actually run on that path, not only on records that
+   already failed an exact match. Corrected sequence:
+
+   ```
+   Hard key match
+        │
+        ▼
+   Collision guard (date/FY compatibility)
+        │
+    ┌───┴────────┐
+    ▼            ▼
+   Compatible   Conflict
+    │            │
+    ▼            ▼
+   Attach      Ambiguous
+   ```
+
+   A working definition of "compatible," proposed this session and not yet
+   confirmed: **same financial year** (India's GST financial year runs
+   April–March), on the reasoning that the legitimate late-filing
+   carry-forward case this pack already models (`gst:filedDate`, the
+   Section 16(2)(aa) rules) spans weeks to a couple of months and does not
+   cross an FY boundary in any fixture this pack has, while a numbering
+   collision across *years* is what the guard exists to catch. **Flag if
+   this threshold is wrong** — it is this session's proposal, not something
+   either review pass specified a number for, and per this project's
+   standing rule every non-obvious number needs a stated reason (this is
+   it) and a place to be revisited if it is not tight enough.
+
    **Entity resolution for ambiguous records is genuinely new platform
    work — corrected by the user after this plan's first draft treated the
    existing read-only near-miss display as sufficient. It is not.** See the
@@ -200,6 +254,9 @@ implicit, which risks an implementation that creates a canonical Invoice for
 every source record on ingestion and only *later* claims resolution
 happened — defeating the whole point. Explicit sequence:
 
+**Updated for the second review pass's collision-guard refinement**: the
+guard now gates the exact-match path too, not only the ambiguous one.
+
 ```
 SOURCE RECORDS (books / GSTR-1 / GSTR-2B, per-line, as today)
       │
@@ -209,34 +266,56 @@ Identity evaluation (business-identity key: supplierGstin + normalized
       │
  ┌────┴──────┐
  │           │
-Exact       Ambiguous (candidate scored below exact but above the
-match       resolution floor — the pack's existing ngram blocking on
- │           gst:supplierGstin/gst:invoiceNumber)
+Hard key    No hard-key match, but scored above the resolution floor —
+matches     the pack's existing ngram blocking on gst:supplierGstin/
+ │          gst:invoiceNumber
  ▼           │
-Create or    ▼
-attach     Candidate(s) only — nothing written, nothing attached
-canonical    │
-gst:Invoice  ▼
-           Review (reuse the findings decision flow — see the open
-             question below)
-             │
-       ┌─────┴──────┐
-       ▼            ▼
-    Accept        Reject
-       │             │
-       ▼             ▼
- Attach source   No attachment; the two source records stay under
- record to the   separate canonical gst:Invoice subjects, exactly as
- chosen          today's GstinTransposition/SupplierPanMismatch findings
- canonical       already leave two separate source-typed subjects
- gst:Invoice     unmerged.
+Collision    │
+guard        │
+(date/FY     │
+compatible?) │
+ │           │
+ ├─ yes ──┐  │
+ │        ▼  ▼
+ │      Create/attach   Ambiguous — candidate(s) only, nothing
+ │      canonical        written, nothing attached
+ │      gst:Invoice       │
+ │                        ▼
+ └─ no ──► Ambiguous ──► Resolution finding raised through the
+           (a hard-key    existing findings queue — a new,
+           collision      domain-agnostic finding type
+           with           (gst:InvoiceIdentityAmbiguity), not
+           incompatible   gst:GstinTransposition/
+           dates is a     gst:SupplierPanMismatch reused as the
+           conflict,      decision itself. Existing GST findings
+           not a match)   may contribute evidence; they are not
+                           themselves the attachment decision.
+                              │
+                        ┌─────┴──────┐
+                        ▼            ▼
+                     Accept        Reject
+                        │             │
+                        ▼             ▼
+                  Write a          No attachment; the two source
+                  SubjectAttachment records stay under separate
+                  record, attaching canonical gst:Invoice subjects.
+                  the source record
+                  to the chosen
+                  canonical
+                  gst:Invoice
 ```
 
-**New acceptance criterion, added to Slice 1 below per the user's exact
-wording**: *"Repeated ingestion of the same source records is idempotent:
-exact deterministic matches resolve to exactly one canonical gst:Invoice;
-ambiguous candidates create no canonical attachment until explicitly
-accepted."*
+**New acceptance criteria, added to Slice 1 below**:
+
+- Per the user's exact wording: *"Repeated ingestion of the same source
+  records is idempotent: exact deterministic matches resolve to exactly
+  one canonical gst:Invoice; ambiguous candidates create no canonical
+  attachment until explicitly accepted."*
+- Per the user's exact wording, closing the false-merge path the first
+  revision missed: *"An exact business-identity match auto-attaches only
+  when collision-guard fields are compatible; a hard-key collision with
+  incompatible invoice date/financial-year evidence becomes Ambiguous
+  rather than being silently merged."*
 
 ## Entity-resolution/attachment capability — genuinely new platform work
 
@@ -280,39 +359,59 @@ the `Uuid`-typed types themselves:**
   literally "Entity resolution, coreference, temporal" — this is squarely
   inside it, not a reason for a new crate) that takes a caller-supplied
   identity-key policy and a set of candidate subjects, and produces exactly
-  Epic 17's three bands: auto-attach on an exact deterministic key match
-  (`New`/`Existing` collapse to one path here, since an exact key match
-  *is* the deterministic identity, not a scored candidate), or an
-  `Ambiguous` result — candidates only, **nothing written, nothing
-  attached** — for anything resolved only by score. This is the load-bearing
-  property the user's instruction names directly: *"ambiguous matches must
-  remain reviewable rather than being auto-attached solely from a fuzzy
-  score."*
+  Epic 17's three bands: auto-attach **only on an exact business-identity
+  key match that also passes the collision guard** (`New`/`Existing`
+  collapse to one path here), or an `Ambiguous` result — candidates only,
+  **nothing written, nothing attached** — for anything resolved only by
+  score, *and* for an exact key match whose collision-guard fields
+  conflict (decision 6's second correction — a hard-key collision is not
+  automatically a match). This is the load-bearing property the user's
+  instruction names directly: *"ambiguous matches must remain reviewable
+  rather than being auto-attached solely from a fuzzy score."*
 - **GST supplies an identity policy, not identity logic.** Declared in
   `pack.toml`, the same pattern `[[matching.blocking]]` already uses for
   supplier matching: which predicates form the **business-identity key**
   (`supplierGstin`, `invoiceKey`, a document-type marker — no period/date
   field, per decision 6's correction), which predicate is the
-  **collision-guard/discriminator** (invoice date), and which existing
-  blocking strategy (`ngram`, already configured for GSTIN and
+  **collision-guard/discriminator** (invoice date, checked against a
+  same-financial-year compatibility rule — see decision 6), and which
+  existing blocking strategy (`ngram`, already configured for GSTIN and
   invoice-number transposition) supplies ambiguous candidates when the
   business-identity key does not match exactly. No GST-specific Rust.
-- **Open design question, not resolved by either source document — flag for
-  confirmation**: does the review step reuse the pack's *existing* findings
-  queue (an ambiguous match surfaces as a `gst:GstinTransposition`-shaped
-  finding, and *accepting* it is what writes the attachment record — reusing
-  UI, decision endpoint, and audit trail the console already has), or does
-  it need its own review surface? Reusing findings is smaller and this
-  plan's default; a separate resolution queue is real new console/API
-  surface with no forcing fixture behind it yet.
+- **Review surface: resolved.** Reuse the findings infrastructure — queue,
+  evidence display, decision endpoint, audit trail, accept/reject UI — but
+  **not the existing GST finding semantics.** An ambiguous match does not
+  become a `gst:GstinTransposition`/`gst:SupplierPanMismatch` finding —
+  those are reconciliation findings about *tax facts*, and entity
+  resolution is a different platform concern. Instead, a new,
+  domain-agnostic finding shape: the resolution engine raises
+  `gst:InvoiceIdentityAmbiguity` (GST's own name for the pattern; a future
+  healthcare pack would raise `healthcare:PatientIdentityAmbiguity`
+  against the *same* platform machinery — no new console surface per
+  domain) through the existing `FindingStore`/`Finding` types, unchanged.
+  Confirmed this fits without any new storage type: `Finding.subject` is
+  one subject (the primary candidate), and `Evidence` entries each carry
+  their **own** `subject` field — so a second (or further) candidate, its
+  score, and the fields that justified it surface as evidence rows against
+  their own subject, exactly the pattern `gst:GstinTransposition`'s
+  `[findings.similarity]`/`resolve_by` band already uses to reach a second
+  candidate today. Existing GST findings like `GstinTransposition`/
+  `SupplierPanMismatch` may *contribute* evidence to a resolution finding's
+  candidate list; they are never themselves the attachment decision.
+  Accepting the resolution finding is what writes the `SubjectAttachment`
+  record; rejecting leaves the two source records under separate canonical
+  `gst:Invoice` subjects, unmerged — matching how a rejected
+  `GstinTransposition` already behaves today.
 
 This is real, multi-layer platform engineering — `graph-owl-core` (new
-types), `graph-owl-storage`/`graph-owl-storage-postgres` (new persistence),
+types), `graph-owl-storage`/`graph-owl-storage-postgres` (new persistence
+for `SubjectAttachment`; `FindingStore` itself needs no new methods),
 `graph-owl-resolution` (the generalized band/attach logic, extending its
-existing charter), `graph-owl-api` (orchestration), `graph-owl-server`
-(routes if the review step is not reused from findings) — not a pack-content
-change, and not something 105c Slice 1's "zero Rust changed" precedent
-applies to.
+existing charter), `graph-owl-api` (orchestration: constructing and
+recording the `Finding`, and writing the `SubjectAttachment` on accept) —
+not a pack-content change, and not something 105c Slice 1's "zero Rust
+changed" precedent applies to. No new `graph-owl-server` routes: findings
+already have a decision endpoint, and this reuses it.
 
 ## What this plan does NOT do (explicitly deferred)
 
@@ -338,22 +437,42 @@ applies to.
       evidence, confidence, `decided_by: MergeDecidedBy`, reversible).
 - [ ] A domain-agnostic resolution function/service in `graph-owl-resolution`
       (or orchestrated from `graph-owl-api`, exact placement decided during
-      implementation) takes a caller-supplied deterministic-key policy plus
-      a blocking-strategy-sourced candidate set, and returns exactly one of:
-      auto-attach (exact key match), or `Ambiguous` (candidates, evidence,
-      confidence — nothing written). No code path writes an attachment from
-      an `Ambiguous` result.
+      implementation) takes a caller-supplied business-identity-key policy,
+      a collision-guard field, and a blocking-strategy-sourced candidate
+      set, and returns exactly one of: auto-attach (exact business-identity
+      key match **and** collision-guard fields compatible), or `Ambiguous`
+      (candidates, evidence, confidence — nothing written) for everything
+      else, including an exact key match whose collision-guard fields
+      conflict. No code path writes an attachment from an `Ambiguous`
+      result.
 - [ ] Storage for the new attachment records, exercised by a real test
       against Postgres (this project's standing testcontainers pattern).
-- [ ] A round-trip test: two GST source records with an exact deterministic
-      key match attach automatically; the pack's own planted transposition
-      pair (INV-1004, `…1MZ` vs `…1ZM`) and PAN-mismatch pair (INV-1015)
-      produce `Ambiguous` with the correct candidates and evidence, and no
-      attachment record exists until a decision is made.
-- [ ] The review-surface question (reuse findings vs a new queue) is
-      resolved and, if findings are reused, an accepted
-      `gst:GstinTransposition`/`gst:SupplierPanMismatch` finding is what
-      writes the attachment record — exercised end-to-end.
+- [ ] A round-trip test: two GST source records with an exact
+      business-identity match and compatible dates attach automatically;
+      the pack's own planted transposition pair (INV-1004, `…1MZ` vs
+      `…1ZM`) and PAN-mismatch pair (INV-1015) produce `Ambiguous` with the
+      correct candidates and evidence, and no attachment record exists
+      until a decision is made.
+- [ ] **The collision-guard-on-exact-match test, per the user's exact
+      wording**: *"An exact business-identity match auto-attaches only when
+      collision-guard fields are compatible; a hard-key collision with
+      incompatible invoice date/financial-year evidence becomes Ambiguous
+      rather than being silently merged."* Concretely: two source records
+      sharing `(supplierGstin, invoiceKey, documentType)` exactly, dated a
+      year apart (crossing a financial-year boundary — the user's own
+      `INV-001` 2025-01-10 / 2026-01-10 example), produce `Ambiguous`, not
+      an auto-attach.
+- [ ] **The review surface, resolved**: an ambiguous match raises a new,
+      domain-agnostic `gst:InvoiceIdentityAmbiguity` finding through the
+      existing `FindingStore`/`Finding` types (no new storage type — the
+      primary candidate is `Finding.subject`, further candidates surface as
+      `Evidence` rows carrying their own `subject`, the same pattern
+      `gst:GstinTransposition`'s similarity band already uses). Accepting
+      it writes the `SubjectAttachment` record; rejecting leaves the source
+      records under separate canonical subjects. `gst:GstinTransposition`/
+      `gst:SupplierPanMismatch` are never themselves the attachment
+      decision — exercised end-to-end with a test asserting that accepting
+      one of *those* findings does **not** write a `SubjectAttachment`.
 - [ ] **Idempotency, per the user's exact wording**: repeated ingestion of
       the same source records is idempotent — exact deterministic matches
       resolve to exactly one canonical `gst:Invoice` (re-ingesting the same
@@ -476,12 +595,13 @@ correction both name as missing.
 
 **Path**: `graph_owl_core` (new `Sid`-typed attachment/audit type) →
 `graph-owl-resolution` (band decision + candidate scoring, reusing
-`bands::decide`/`score`/`rule_match` as-is) → `graph-owl-storage` +
+`bands::decide`/`score`/`rule_match` as-is, plus the collision-guard check
+on both the exact and ambiguous paths) → `graph-owl-storage` +
 `graph-owl-storage-postgres` (new persistence, tested against real Postgres)
-→ `graph-owl-api` (orchestration: policy in, candidates out, decision
-in, attachment written) → the review-surface wiring (reusing `findings`
-decision endpoints, per the open question above, resolved during this
-slice) → a test run against the GST pack's *own* already-shipped
+→ `graph-owl-api` (orchestration: policy in, candidates out; an
+`Ambiguous` result records a `gst:InvoiceIdentityAmbiguity`-style finding
+through the existing `FindingStore`; accepting it writes the attachment) →
+a test run against the GST pack's *own* already-shipped
 transposition/PAN-mismatch fixtures, with no ontology change required to
 prove it.
 
@@ -489,18 +609,29 @@ prove it.
 `mutation-testing`, and `refactoring` before any code changes.
 
 **Acceptance criteria**: this plan's Slice 1 Acceptance Criteria above.
-**Present to human and get explicit confirmation — including on the
-review-surface open question — before any file is edited.**
+**Architecture approved; both review passes are folded in. Present this
+plan for one final human confirmation before the first file is edited, per
+the user's own stated next step — not another design pass.**
 
 **RED**: A failing test asserting that two candidate subjects sharing an
-exact deterministic key attach automatically with a written, reversible
-record, and that two candidates related only by an `ngram`-scored near-miss
-(the pack's own INV-1004/INV-1015 shapes) produce an `Ambiguous` result with
-**no** attachment record written.
+exact business-identity key **with compatible collision-guard dates**
+attach automatically with a written, reversible record; that the same
+exact key **with incompatible dates** (a year apart, crossing a financial
+year) produces `Ambiguous`, not an auto-attach; and that two candidates
+related only by an `ngram`-scored near-miss (the pack's own
+INV-1004/INV-1015 shapes) produce an `Ambiguous` result with **no**
+attachment record written, surfaced as a `gst:InvoiceIdentityAmbiguity`
+finding rather than as `gst:GstinTransposition`/`gst:SupplierPanMismatch`
+themselves.
 Mutator watch: a mutant that treats a high-but-not-exact score as "close
-enough to auto-attach" must be caught — the test asserting *zero* attachment
-records exist after an `Ambiguous` resolution is the one that catches it,
-not merely asserting the candidates list is non-empty.
+enough to auto-attach" must be caught — the test asserting *zero*
+attachment records exist after an `Ambiguous` resolution is the one that
+catches it, not merely asserting the candidates list is non-empty. Equally,
+a mutant that drops the collision-guard check on the exact-match path
+(auto-attaching on hard-key match alone) must be caught by the
+incompatible-dates test specifically — this is the false-merge path the
+second review pass added because the first draft's test suite would not
+have caught it.
 
 **GREEN**: The new type, the generalized band/attach logic, storage, and
 orchestration, together — this is the platform primitive Slice 2 depends on
@@ -556,9 +687,9 @@ and per touched query's own test coverage (`test_gstr2b.py`, `gstr2b.test.ts`,
 `books.test.ts`, `gstr1.test.ts`, plus any Rust tests touching the pack).
 
 **Acceptance criteria**: this plan's Slice 2 Acceptance Criteria above.
-**Present to human and get explicit confirmation — including on decision 4's
-proposed wiring specifically, since it's this session's synthesis rather
-than a literal instruction — before any file is edited.**
+**Architecture approved across two review passes, including decision 4's
+wiring. Begin only once Slice 1 is shipped and green — this slice's queries
+and fixtures depend on it existing, not on a stub.**
 
 **RED**: For each of the four ingestion surfaces, a failing test asserting
 the new Turtle shape (a `gst:Invoice` subject present with no period in its
@@ -614,10 +745,10 @@ and `scripts/verify-pack-load.sh` both green, human approves commit.
 5. TypeScript: `books.test.ts`, `gstr1.test.ts`, `gstr2b.test.ts`,
    `gstText.test.ts`, `packSurfaces.test.ts` (the last for the
    `console.reconciliation.sources` class-name question above).
-6. `cargo fmt`/`clippy` on every crate Slice 1 touches
-   (`graph-owl-core`, `graph-owl-resolution`, `graph-owl-storage`,
-   `graph-owl-storage-postgres`, `graph-owl-api`, `graph-owl-server` if the
-   review surface is new). Slice 2 is not expected to touch any Rust —
-   confirm nothing did.
+6. `cargo fmt`/`clippy` on every crate Slice 1 touches (`graph-owl-core`,
+   `graph-owl-resolution`, `graph-owl-storage`, `graph-owl-storage-postgres`,
+   `graph-owl-api` — no `graph-owl-server` changes expected, the review
+   surface reuses the existing findings decision route). Slice 2 is not
+   expected to touch any Rust — confirm nothing did.
 7. `cargo mutants` scoped to Slice 1's new resolution/attachment logic —
    0 missed, per this plan's own Slice 1 acceptance criteria.
