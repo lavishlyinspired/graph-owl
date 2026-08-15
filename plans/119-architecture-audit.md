@@ -224,6 +224,7 @@ plan for Slice 2, not a report of what happened:
 This sequence is now the authoritative description of Slice 2 — it
 supersedes the one-paragraph version in `plans/118-reco-now-integration.md`,
 which should be read as pointing here.
+
 4. **Optional, low-priority rename**: `connectors/python/graph_owl_packs` →
    split pack-infrastructure from connector modules by package, purely for
    the discoverability problem in §3.4. Not urgent — nothing is functionally
@@ -231,5 +232,73 @@ which should be read as pointing here.
 5. **Optional**: wire `connectors/python`'s and `integrations/langchain`'s
    test suites into CI or `scripts/gate.sh`, so "canonical" code is also
    "gated" code. Separate decision from the architecture question.
+
+## 6. Repo-wide dead-code audit — `_archived/` candidates
+
+Requested as a follow-on: not "does grep find an import" but a per-item
+check against imports, registration/config/CLI/discovery, tests, CI, and
+docs — classified ACTIVE / INDIRECT / HISTORICAL / DEAD / UNCERTAIN.
+**Nothing has been moved.** This is a proposal.
+
+**Method**: `crates/` and `ui/` audited by dedicated search passes (full
+`cargo check --workspace --all-features --all-targets` for the former,
+cross-referencing every low-hit-count file against `App.tsx`, the
+`queues.ts`/`vocabularies.ts`/`packSurfaces.ts` config-registry patterns,
+and two-hop parent components for the latter); `scripts/` audited file-by-file
+against CI, `gate.sh`, and `plans/*.md`; `connectors/`, `examples/`,
+`integrations/langchain/` audited directly in this session, extending the
+per-file checks already done in §2-§4 above. The one substantial finding
+(`rebuild_usage_rollups`) was independently re-verified with a fresh grep
+before being included here, not taken on the sub-agent's word alone.
+
+### 6.1 Proposed for `_archived/` (DEAD, evidence-backed)
+
+| Item | Classification | Evidence checked | Notes |
+|---|---|---|---|
+| `Storage::rebuild_usage_rollups` (trait method, `graph-owl-storage/src/lib.rs:3925`) + its two adapter implementations (`graph-owl-storage-memory/src/lib.rs:4103`, `graph-owl-storage-postgres/src/lib.rs:7312`) + `Catalog::rebuild_usage_rollups` facade (`graph-owl-api/src/lib.rs:7159`) | **DEAD** | Independently re-verified: exactly 5 matches for `rebuild_usage_rollups` workspace-wide — the 4 definitions above plus the facade's own one-line internal call into the trait method. Zero external callers: not in `graph-owl-server`'s `main.rs`/`lib.rs`, no `.route(...)`, zero hits in any `tests/*.rs` or `#[cfg(test)]` block anywhere. The method's own doc comment claims justification as being needed for "Slice B's equivalence test" — searched for that test by name; it does not exist, in any `plans/*.md` or any `#[test]` in the tree | The doc comment reads like a real reason to keep it; checking what it actually points at found nothing. This is the audit's own cautionary pattern, inverted — a plausible-sounding justification that doesn't survive verification |
+| `scripts/demo copy.sh` | **DEAD / HISTORICAL** | Zero references anywhere (CI, `gate.sh`, any `plans/*.md`, any other script). Diffed against `scripts/demo.sh`: an older, feature-incomplete version — missing `--gst`, OIDC auto-detection, and the agent-service startup step that `demo.sh` has | Almost certainly an accidental `cp`-with-space-in-filename left uncommitted-cleanup; superseded by `demo.sh` |
+| `examples/adapter-csv/` (directory) | **DEAD, trivially** | Zero files (confirmed with `find`), not tracked by git (`git ls-files` returns nothing for it). `scripts/verify-examples.sh`'s "adapter-csv" phase does not read from this directory at all — it runs `sdk/python/tests/test_example_adapter_live.py`; the directory name is only an echo label | Empty and untracked — there is no content to lose either way. Worth a plain `rmdir` rather than an "archive" once confirmed, since nothing would be preserved by moving an empty directory |
+
+### 6.2 UNCERTAIN — flagging, not proposing
+
+| Item | Why uncertain |
+|---|---|
+| `scripts/check-llm.sh` | Zero references anywhere (CI, `gate.sh`, docs, other scripts) — but it's a coherent, self-contained diagnostic (curl-based smoke test against the same `LLM_PROVIDER`/`LLM_API_BASE_URL`/`LLM_MODEL` env vars `demo.sh`'s agent-service step and `integrations/langchain/agent_service` both use) with an obvious, legitimate manual-tool purpose. The other manual tools in `scripts/` all have an explicit "run this when X" line in `plans/*.md` or `CLAUDE.md`; this one doesn't. Plausibly just undocumented rather than dead |
+
+### 6.3 Corrections surfaced along the way (not archival, worth fixing separately)
+
+- `graph-owl-bolt` and `graph-owl-cli` were listed in this session's earlier
+  understanding (carried from `CLAUDE.md`'s crate table) as intentional
+  placeholder stubs. Both have grown into substantial, wired, tested code
+  since — `graph-owl-bolt` (3,725 lines, feature-gated Bolt/PackStream
+  listener, wired in `graph-owl-server`'s `main.rs`) and `graph-owl-cli`
+  (3,027 src + 1,522 test lines, real `clap` subcommands, invoked in CI).
+  Their own `lib.rs` doc comments still say `"Status: placeholder"`, which is
+  now false and worth fixing — not an archive question, a stale-comment one.
+  Only `graph-owl-search-hnsw` and `graph-owl-search-opensearch` are still
+  true stubs.
+- `AppError::Forbidden` in `graph-owl-server` carries a stale
+  `#[allow(dead_code)]` and a comment saying it "will be constructed by the
+  authorization middleware" — it already is, twice (`follow_asset`/
+  `unfollow_asset`). The suppression is the only dead thing here; delete the
+  attribute, not the variant.
+
+### 6.4 Everything else checked and found clean
+
+`ui/` (140 files swept): zero DEAD. Every low-hit-count file resolved to a
+real consumer through a barrel export, a config-registry pattern
+(`queues.ts`, `vocabularies.ts`, `packSurfaces.ts`), or a two-hop parent
+component. `connectors/python/graph_owl_packs/` (all 6 files): all ACTIVE,
+consistent with §2-§4 above. `integrations/langchain/`: `agent_service`'s
+`files.py`/`providers.py`/`streaming.py` are imported via
+`from agent_service.X import ...` (absolute-package style, not `from .X
+import`, which is why an initial narrower check missed them) — all ACTIVE.
+19 of 21 `scripts/` files ACTIVE (7 direct-CI, 2 indirect-via-CI, 2 via
+`gate.sh`, 9 documented manual tools). `plans/` (130 files) was
+**deliberately not classified individually**, per explicit instruction — the
+project's own convention (`CLAUDE.md`: "Completed, kept as historical
+record — do not delete", covering `90-done-table-entity.md` and
+`91-done-relationships.md`) already handles this, and nothing found
+suggests a plan outside that convention needs the same treatment.
 
 No files were moved or deleted to produce this audit.
