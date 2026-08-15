@@ -286,6 +286,126 @@ class TestCanonicalLinking:
         turtle = rows_to_turtle([_row(igst=3960, cgst=0, sgst=0, cess=0)], "gstr2b")
         assert "gst:taxAmount" not in turtle
 
+    def test_books_rows_carry_a_normalized_invoice_key(self):
+        # packs/gst's keying-error guards (missing-in-gstr1.sparql,
+        # missing-in-books.sparql) match "same invoice, any GSTIN" via
+        # gst:invoiceKey — reused from reconciliation.normalize_invoice_no
+        # rather than re-derived, so the two can never compute different
+        # keys for what a human would call the same invoice number.
+        turtle = rows_to_turtle([_row(invoice_no="inv-2024/001")], "books")
+        assert 'gst:invoiceKey "INV2024001"' in turtle
+
+    def test_gstr2b_rows_also_carry_a_normalized_invoice_key(self):
+        # missing-in-gstr1.sparql's own "GSTR-2B presence is conclusive
+        # proof the supplier filed" guard reads gst:invoiceKey off the
+        # Gstr2bInvoice side (`?availableIn2b a gst:Gstr2bInvoice ;
+        # gst:invoiceKey ?key`) — its comment names the exact failure mode
+        # of skipping this: "before this guard every 2B-matched invoice
+        # with no 2A row was reported as one the supplier had never
+        # filed." Omitting it here reintroduces precisely that bug for any
+        # deployment with partial GSTR-1/2A coverage, which is the normal
+        # case, not an edge one.
+        turtle = rows_to_turtle([_row(invoice_no="inv-2024/001")], "gstr2b")
+        assert 'gst:invoiceKey "INV2024001"' in turtle
+
+
+def _gstr1_row(**overrides) -> dict:
+    """A GSTR-2A/GSTR-1 declared-invoice row — packs/gst's ontology
+    deliberately has no separate Gstr2aInvoice class (its own comment:
+    "a revolving view over the same supplier-declared data"
+    gst:Gstr1Invoice already carries), so a GSTR-2A upload ingests as
+    gst:Gstr1Invoice, same as a GSTR-1 upload would."""
+    base = {
+        "invoice_no": "INV-AUG-113",
+        "supplier_gstin": "29AAECK4410L1Z7",
+        "supplier_name": "Kavya Cloud Systems LLP",
+        "taxable": 180000,
+        "invoice_date": "13-08-2026",
+        "igst": 0,
+        "cgst": 16200,
+        "sgst": 16200,
+        "cess": 0,
+        "filed_date": "20-09-2026",
+        "period": "082026",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestGstr1Ingestion:
+    """GSTR-2A/GSTR-1 support — closes the only_gstr2b/MissingInBooks gap
+    from plans/119-architecture-audit.md §5c/§8 by giving the 4
+    GSTR-1-anchored finding rules (already registered in packs/gst, never
+    reachable before) the gst:Gstr1Invoice-shaped data they need."""
+
+    def test_mints_the_gstr1_invoice_class(self):
+        turtle = rows_to_turtle([_gstr1_row()], "gstr1")
+        assert "a gst:Gstr1Invoice" in turtle
+        assert "gst:PurchaseInvoice" not in turtle
+        assert "gst:Gstr2bInvoice" not in turtle
+
+    def test_carries_a_normalized_invoice_key(self):
+        turtle = rows_to_turtle([_gstr1_row(invoice_no="inv-2024/001")], "gstr1")
+        assert 'gst:invoiceKey "INV2024001"' in turtle
+
+    def test_carries_a_combined_tax_amount(self):
+        # missing-in-books.sparql reads gst:taxAmount off the declared
+        # (Gstr1Invoice) side too, not just the books side.
+        turtle = rows_to_turtle([_gstr1_row(igst=0, cgst=16200, sgst=16200, cess=0)], "gstr1")
+        assert 'gst:taxAmount "32400"' in turtle
+
+    def test_the_invoice_carries_an_issuedby_edge_to_the_supplier(self):
+        turtle = rows_to_turtle([_gstr1_row(supplier_gstin="29AAECK4410L1Z7")], "gstr1")
+        assert "gst:issuedBy <https://graph-owl.dev/packs/gst#supplier-29AAECK4410L1Z7>" in turtle
+
+    def test_links_its_canonical_subject_via_appearsin_not_recordedin_or_reflectedin(self):
+        turtle = rows_to_turtle(
+            [_gstr1_row(invoice_no="INV-AUG-113", supplier_gstin="29AAECK4410L1Z7")], "gstr1"
+        )
+        assert (
+            "<https://graph-owl.dev/packs/gst#invoice-29AAECK4410L1Z7-INV-AUG-113>\n"
+            "    gst:appearsIn <https://graph-owl.dev/packs/gst#gstr1-29AAECK4410L1Z7-INV-AUG-113> ."
+        ) in turtle
+        assert "gst:recordedIn" not in turtle
+        assert "gst:reflectedIn" not in turtle
+
+    def test_the_same_invoice_shares_its_canonical_subject_with_the_books_side(self):
+        # The whole point of the canonical link: a books upload and a
+        # gstr1 upload for the same (gstin, invoice_no) must agree on
+        # which subject is "this invoice", or gst:recordedIn and
+        # gst:appearsIn would never meet.
+        books = rows_to_turtle(
+            [_row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7")], "books"
+        )
+        gstr1 = rows_to_turtle(
+            [_gstr1_row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7")], "gstr1"
+        )
+        books_canonical = next(l for l in books.splitlines() if l.startswith("<") and "invoice-" in l)
+        gstr1_canonical = next(l for l in gstr1.splitlines() if l.startswith("<") and "invoice-" in l)
+        assert books_canonical == gstr1_canonical
+
+    def test_links_to_a_filing_subject_carrying_filed_date_and_period(self):
+        turtle = rows_to_turtle(
+            [_gstr1_row(supplier_gstin="29AAECK4410L1Z7", filed_date="20-09-2026", period="082026")],
+            "gstr1",
+        )
+        filing_iri = "https://graph-owl.dev/packs/gst#filing-29AAECK4410L1Z7-082026"
+        assert f"gst:filedIn <{filing_iri}>" in turtle
+        assert f"<{filing_iri}>\n    a gst:Gstr1Filing" in turtle
+        # filedDate goes through the same DD-MM-YYYY -> ISO normalization
+        # invoiceDate does, for the identical reason (law-provision date
+        # comparisons are plain-string lexicographic).
+        assert 'gst:filedDate "2026-09-20"' in turtle
+        assert 'gst:period "082026"' in turtle
+
+    def test_two_rows_from_the_same_supplier_and_period_share_one_filing_subject(self):
+        rows = [
+            _gstr1_row(invoice_no="INV-A", supplier_gstin="29AAECK4410L1Z7", period="082026"),
+            _gstr1_row(invoice_no="INV-B", supplier_gstin="29AAECK4410L1Z7", period="082026"),
+        ]
+        turtle = rows_to_turtle(rows, "gstr1")
+        assert turtle.count("a gst:Gstr1Filing") == 1
+
 
 def _handler(received: list[dict], fail: bool, findings_response: list | None = None):
     class Scripted(BaseHTTPRequestHandler):

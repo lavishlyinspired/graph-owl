@@ -24,22 +24,38 @@ import sys
 import urllib.request
 
 # The answer key for SAMPLE/purchase_register_aug2026.csv +
-# SAMPLE/gstr2b_aug2026.csv, hand-derived when the fixture was authored
-# (11 unique invoices: 7 clean matches, 1 amount mismatch, 2 books-only,
-# 1 portal-only) — not read off either system's output, so it catches
-# both sides being wrong in the same way.
+# SAMPLE/gstr2b_aug2026.csv + SAMPLE/gstr2a_aug2026.csv, hand-derived by
+# reading every finding query's WHERE clause against the fixture rows
+# (plans/119-architecture-audit.md §8) — not read off either system's
+# output, so it catches both sides being wrong in the same way.
+#
+# reconciliation.py only ever sees books+gstr2b (it has no GSTR-1/2A
+# concept at all), so its stats are unaffected by the 3 new gstr2a rows
+# except through the 2 new books-only rows (INV-AUG-113, INV-AUG-114) that
+# exist to give those gstr2a rows something to reconcile against:
+# 13 unique invoices across books+2b (was 11): 7 clean matches, 1 amount
+# mismatch (INV-AUG-103), 4 books-only (INV-AUG-105, 109, 113, 114),
+# 1 portal-only (INV-AUG-111).
 EXPECTED_RECO_STATS = {
-    "total": 11, "matched": 7, "review": 1, "only_books": 2, "only_gstr2b": 1,
+    "total": 13, "matched": 7, "review": 1, "only_books": 4, "only_gstr2b": 1,
 }
-# The native engine's honest coverage of that same answer key — see the
-# "known gap" note below before changing this.
+# The native engine's coverage once GSTR-1/2A evidence exists in the
+# store — see the "known gap" note below before changing this.
+#
+# gst:PotentialMismatch (missing-in-gstr2b) is deliberately NOT here: its
+# own query stands down globally the moment any gst:Gstr1Invoice exists
+# anywhere in the store (see missing-in-gstr2b.sparql's "handover switch"
+# comment) — INV-AUG-105 and INV-AUG-109 move to gst:SupplierNotFiled
+# instead, which is the more specific answer GSTR-1 evidence unlocks.
 EXPECTED_NATIVE_LABELS = {
-    "gst:PotentialMismatch": 2,   # == only_books
-    "gst:AmountMismatch": 1,      # == review
-    "gst:TaxHeadMismatch": 1,     # same invoice as AmountMismatch — a real,
-                                   # additional distinction (cgst/sgst genuinely
-                                   # differ by >₹1, proportional to the taxable
-                                   # value delta), not double-counting a bug.
+    "gst:AmountMismatch": 1,       # INV-AUG-103 — claimed vs GSTR-2B taxable differ
+    "gst:TaxHeadMismatch": 1,      # INV-AUG-103 — same invoice, cgst/sgst differ >₹1 too
+    "gst:SupplierNotFiled": 2,     # INV-AUG-105, 109 — absent from GSTR-1 AND GSTR-2B
+    "gst:Gstr1NotIn2b": 2,         # INV-AUG-113, 114 — supplier filed, absent from 2B
+    "gst:MissingInBooks": 1,       # INV-AUG-112 — GSTR-1/2A only, never booked
+    "gst:BooksGstr1Mismatch": 1,   # INV-AUG-114 — books 55000 vs GSTR-1 53000 (also
+                                    # Gstr1NotIn2b, a real second distinction: absent
+                                    # from 2B *and* mismatched against what was filed)
 }
 
 
@@ -71,7 +87,7 @@ def main() -> int:
     sample_dir = pathlib.Path(__file__).resolve().parents[1] / "SAMPLE"
     boundary = uuid.uuid4().hex
     parts = []
-    for fname in ("purchase_register_aug2026.csv", "gstr2b_aug2026.csv"):
+    for fname in ("purchase_register_aug2026.csv", "gstr2b_aug2026.csv", "gstr2a_aug2026.csv"):
         content = (sample_dir / fname).read_bytes()
         header = (
             f'--{boundary}\r\nContent-Disposition: form-data; name="files"; '
@@ -105,11 +121,11 @@ def main() -> int:
     print("    " + ("OK" if native_ok else f"MISMATCH — expected {EXPECTED_NATIVE_LABELS}"))
 
     print()
-    print("Known, honest gap (not a bug): the native engine has no wired")
-    print("finding for reconciliation.py's only_gstr2b case ('in GSTR-2B,")
-    print("not in books') without GSTR-1 data — packs/gst's MissingInBooks")
-    print("requires it. Full parity does not hold; see")
-    print("plans/119-architecture-audit.md §5b/§6 for the cutover decision.")
+    print("Known, honest gap (not a bug): INV-AUG-111 is only_gstr2b with no")
+    print("matching gst:Gstr1Invoice in this fixture's gstr2a_aug2026.csv —")
+    print("packs/gst's MissingInBooks would catch it too, but only once GSTR-1")
+    print("evidence for that specific invoice is loaded. Realistic partial 2A/2B")
+    print("coverage, not a modeling gap; see plans/119-architecture-audit.md §8.")
 
     return 0 if (ok and native_ok) else 1
 

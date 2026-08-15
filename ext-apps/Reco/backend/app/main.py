@@ -70,6 +70,8 @@ FIELD_LABELS = {
     "cgst": "CGST",
     "sgst": "SGST",
     "cess": "Cess",
+    "filed_date": "Filing Date",
+    "period": "Return Period",
 }
 
 REQUIRED_FIELDS = {"invoice_no", "taxable"}
@@ -125,6 +127,14 @@ _FIELD_KEYWORDS = [
     ("cgst", "cgst"),
     ("sgst", "sgst"),
     ("cess", "cess"),
+    # GSTR-2A/GSTR-1 only — packs/gst's gstr1-not-in-2b.sparql reads these
+    # off the gst:Gstr1Filing subject (graphowl_client.py). Harmless on a
+    # books/GSTR-2B header row: nothing there matches, so these stay
+    # unmapped exactly like any other absent field.
+    ("filing date", "filed_date"),
+    ("filed date", "filed_date"),
+    ("return period", "period"),
+    ("period", "period"),
 ]
 
 
@@ -365,7 +375,15 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"Could not parse {file.filename}: {exc}"}
         lower = file.filename.lower() if file.filename else ""
-        if "2b" in lower or "gstr-2b" in lower or "portal" in lower or "gov" in lower:
+        if "2a" in lower or "gstr-2a" in lower or "gstr1" in lower or "gstr-1" in lower:
+            # GSTR-2A/GSTR-1 — ingests as gst:Gstr1Invoice
+            # (graphowl_client.CLASS_BY_KIND's own comment: packs/gst
+            # deliberately has no separate Gstr2aInvoice class, 2A is "a
+            # revolving view over the same supplier-declared data").
+            # Backend/graph-owl support only for now — no dedicated Map/
+            # Reconcile UI slot yet (plans/119-architecture-audit.md §8).
+            kind, name = "gstr1", "GSTR-2A / GSTR-1"
+        elif "2b" in lower or "gstr-2b" in lower or "portal" in lower or "gov" in lower:
             kind, name = "gstr2b", "Government Data"
         else:
             kind, name = "books", "Your Books"
@@ -373,7 +391,7 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
         kind_order.append(kind)
     if not SESSION["datasets"]:
         return {"ok": False, "error": "No valid files uploaded."}
-    for kind in ("books", "gstr2b"):
+    for kind in ("books", "gstr2b", "gstr1"):
         if kind in SESSION["datasets"]:
             SESSION["mapping"][kind] = _auto_map(SESSION["datasets"][kind]["headers"])
             _ingest_to_graphowl(kind, SESSION["datasets"][kind], SESSION["mapping"][kind])

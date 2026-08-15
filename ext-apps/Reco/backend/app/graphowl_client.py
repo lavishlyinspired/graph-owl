@@ -43,19 +43,53 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
+from .reconciliation import normalize_invoice_no
+
 #: The one pack this whole module speaks — graph-owl's own canonical GST
 #: pack. Must match `packs/gst/pack.toml`'s `[pack]` table exactly.
 PACK_ID = "gst"
 NAMESPACE = "https://graph-owl.dev/packs/gst#"
 
-#: reco-now's own two dataset kinds (main.py's `kind` values) -> the
-#: `packs/gst` class each becomes — not reco-now's own class: the
-#: ontology already draws this exact distinction ("Purchase invoice
-#: (taxpayer's register)" / "GSTR-2B invoice (as filed by the supplier)").
+#: reco-now's dataset kinds (main.py's `kind` values) -> the `packs/gst`
+#: class each becomes — not reco-now's own classes: the ontology already
+#: draws these distinctions ("Purchase invoice (taxpayer's register)" /
+#: "GSTR-2B invoice (as filed by the supplier)"). `gstr1` also covers a
+#: GSTR-2A upload: `packs/gst/ontology.ttl`'s own comment is explicit that
+#: there is deliberately no separate `Gstr2aInvoice` class — 2A is "a
+#: revolving view over the same supplier-declared data
+#: [gst:Gstr1Invoice] already carries."
 CLASS_BY_KIND = {
     "books": "gst:PurchaseInvoice",
     "gstr2b": "gst:Gstr2bInvoice",
+    "gstr1": "gst:Gstr1Invoice",
 }
+
+#: The canonical-subject edge each kind's upload asserts — the half it
+#: can, from its own named graph. The other kinds' edges meet it there
+#: when their own uploads land, never in the same call.
+LINK_PREDICATE_BY_KIND = {
+    "books": "gst:recordedIn",
+    "gstr2b": "gst:reflectedIn",
+    "gstr1": "gst:appearsIn",
+}
+
+#: Kinds whose invoice subject needs `gst:invoiceKey`. `books` and
+#: `gstr1` for the any-GSTIN keying-error guards
+#: (`missing-in-gstr1.sparql`/`missing-in-books.sparql`); `gstr2b` too —
+#: `missing-in-gstr1.sparql` reads it off the Gstr2bInvoice side as
+#: conclusive proof the supplier filed (`?availableIn2b a
+#: gst:Gstr2bInvoice ; gst:invoiceKey ?key`), and its own comment records
+#: what omitting it does: "every 2B-matched invoice with no [GSTR-1/2A]
+#: row was reported as one the supplier had never filed" — found live,
+#: 16 August 2026, the moment GSTR-1 data first existed in the store for
+#: this rule to actually run against (verify-reconcile-parity.py's
+#: SupplierNotFiled count came back 10 against an expected 2).
+KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b"}
+
+#: Kinds whose invoice subject needs a combined `gst:taxAmount` —
+#: `missing-in-gstr2b.sparql` reads it off the books side,
+#: `missing-in-books.sparql` off the gstr1 side. Never gstr2b.
+KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1"}
 
 #: Row field (main.py's FIELD_LABELS keys) -> `gst:` predicate local
 #: name. Matches `packs/gst/pack.toml`'s `[[predicates]]` and
@@ -154,6 +188,17 @@ def _supplier_iri(gstin_raw: str) -> str:
     return f"{NAMESPACE}supplier-{gstin}"
 
 
+def _filing_iri(gstin_raw: str, period_raw: str) -> str:
+    """One `gst:Gstr1Filing` subject per (supplier, period) — `gstr1-not-
+    in-2b.sparql` reads `filedDate`/`period` off it, reached via
+    `gst:filedIn` from each declared invoice. Two invoice rows from the
+    same supplier and period share this IRI, so they share one Filing
+    subject rather than minting a duplicate per invoice line."""
+    gstin = quote(str(gstin_raw or "").strip(), safe="")
+    period = quote(str(period_raw or "").strip(), safe="")
+    return f"{NAMESPACE}filing-{gstin}-{period}"
+
+
 def _canonical_iri(gstin_raw: str, invoice_no_raw: str) -> str:
     """One subject per real invoice, **kind-independent** — a books upload
     and a gstr2b upload for the same (gstin, invoice number) must mint the
@@ -167,9 +212,9 @@ def _canonical_iri(gstin_raw: str, invoice_no_raw: str) -> str:
 
 def _combined_tax_amount(row: dict) -> str:
     """igst + cgst + sgst + cess, absent/blank/NaN components treated as
-    zero. Only meaningful on the books side — `missing-in-gstr2b.sparql`
-    is the one wired finding that reads `gst:taxAmount`, and it reads it
-    off `gst:PurchaseInvoice` only."""
+    zero. Read by `missing-in-gstr2b.sparql` (books side) and
+    `missing-in-books.sparql` (gstr1 side) — see
+    `KINDS_NEEDING_TAX_AMOUNT`."""
     total = Decimal("0")
     for field in ("igst", "cgst", "sgst", "cess"):
         value = row.get(field)
@@ -202,6 +247,7 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
         return ""
 
     lines = [f"@prefix gst: <{NAMESPACE}> .", ""]
+    seen_filings: set[str] = set()
     for row in rows:
         subject = _subject_iri(kind, row)
         gstin_raw = row.get("supplier_gstin")
@@ -216,14 +262,36 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
             f"{_turtle_string(gstin_raw)} .\n"
         )
 
-        # The canonical link — one triple, the half this (books or
-        # gstr2b) upload can assert. The other half lands when the other
-        # side is uploaded, in its own named graph; both edges meeting on
-        # the same `canonical` subject is what makes it canonical.
-        link_predicate = "gst:recordedIn" if kind == "books" else "gst:reflectedIn"
-        lines.append(f"<{canonical}>\n    {link_predicate} <{subject}> .\n")
+        # The canonical link — one triple, the half this (books, gstr2b
+        # or gstr1) upload can assert. The other half(s) land when the
+        # other side is uploaded, in its own named graph; all the edges
+        # meeting on the same `canonical` subject is what makes it
+        # canonical.
+        lines.append(f"<{canonical}>\n    {LINK_PREDICATE_BY_KIND[kind]} <{subject}> .\n")
+
+        # The Filing subject — only a gstr1 (GSTR-1/GSTR-2A) row has one.
+        # gstr1-not-in-2b.sparql reaches filedDate/period through it via
+        # gst:filedIn.
+        if kind == "gstr1":
+            period_raw = row.get("period")
+            filing = _filing_iri(gstin_raw, period_raw)
+            if filing not in seen_filings:
+                seen_filings.add(filing)
+                filing_triples = ["a gst:Gstr1Filing"]
+                if _is_present(period_raw):
+                    filing_triples.append(f"gst:period {_turtle_string(period_raw)}")
+                filed_date_raw = row.get("filed_date")
+                if _is_present(filed_date_raw):
+                    filing_triples.append(
+                        f"gst:filedDate {_turtle_string(_normalize_date(filed_date_raw))}"
+                    )
+                lines.append(f"<{filing}>\n    " + " ;\n    ".join(filing_triples) + " .\n")
 
         triples = [f"a {CLASS_BY_KIND[kind]}", f"gst:issuedBy <{supplier}>"]
+        if kind in KINDS_NEEDING_INVOICE_KEY and _is_present(row.get("invoice_no")):
+            triples.append(f"gst:invoiceKey {_turtle_string(normalize_invoice_no(row.get('invoice_no')))}")
+        if kind == "gstr1":
+            triples.append(f"gst:filedIn <{filing}>")
         for field, predicate in PREDICATES.items():
             value = row.get(field)
             if not _is_present(value):
@@ -231,9 +299,7 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
             if field == "invoice_date":
                 value = _normalize_date(value)
             triples.append(f"gst:{predicate} {_turtle_string(value)}")
-        if kind == "books":
-            # Only PotentialMismatch (of the findings wired so far) reads
-            # gst:taxAmount, and only off the PurchaseInvoice side.
+        if kind in KINDS_NEEDING_TAX_AMOUNT:
             triples.append(f"gst:taxAmount {_turtle_string(_combined_tax_amount(row))}")
         body = " ;\n    ".join(triples)
         lines.append(f"<{subject}>\n    {body} .\n")

@@ -466,3 +466,57 @@ expected to unlock all four at once, not just the one named in §5c.
 Not designed or implemented in this session — named here so the next
 pass starts from packs/gst's own stated model rather than reinventing
 the 2A/2B distinction.
+
+### 8a. Implemented — 16 August 2026
+
+Built as designed above: `/api/upload` detects a "2a"/"gstr-2a"/"gstr1"/
+"gstr-1" filename and ingests it as `kind="gstr1"`
+(`graphowl_client.CLASS_BY_KIND["gstr1"] = "gst:Gstr1Invoice"`), sharing
+the same generic `_ingest_to_graphowl`/`_auto_map` machinery books and
+gstr2b already use — no changes needed there, confirming the "kind-
+agnostic" design held. New: a `gst:Gstr1Filing` subject per (supplier,
+period), deduplicated across rows from the same filing, carrying
+`gst:filedDate`/`gst:period`, linked from each declared invoice via
+`gst:filedIn` — read by `gstr1-not-in-2b.sparql`.
+
+All four findings named above fire correctly against
+`SAMPLE/gstr2a_aug2026.csv` (3 rows added alongside 2 new
+`purchase_register_aug2026.csv` rows to give them something to
+reconcile against) — confirmed by reading every relevant query's `WHERE`
+clause line by line against the fixture, then checking the live server's
+`evidence` bindings matched invoice-for-invoice
+(`scripts/verify-reconcile-parity.py`, extended to a 3-file upload):
+
+| Finding | Fires for | Reason |
+|---|---|---|
+| `SupplierNotFiled` | INV-AUG-105, 109 | absent from both GSTR-1 and GSTR-2B |
+| `MissingInBooks` | INV-AUG-112 | GSTR-1/2A only, never booked |
+| `Gstr1NotIn2b` | INV-AUG-113, 114 | supplier filed, absent from GSTR-2B |
+| `BooksGstr1Mismatch` | INV-AUG-114 | books ₹55,000 vs GSTR-1 ₹53,000 |
+
+`PotentialMismatch` (the two-document `missing-in-gstr2b` rule) is
+correctly silent throughout — its own "handover switch" stands the rule
+down globally the moment any `gst:Gstr1Invoice` exists anywhere in the
+store, exactly as its comment says.
+
+**A real bug surfaced by this, not a fixture-tuning problem**:
+`SupplierNotFiled` initially fired for 10 invoices instead of 2 — every
+books row not in GSTR-1 *and every books row that already matched in
+GSTR-2B*. `missing-in-gstr1.sparql`'s own guard ("GSTR-2B presence is
+conclusive proof the supplier filed") requires `gst:invoiceKey` on the
+`Gstr2bInvoice` side, and `graphowl_client.py`'s
+`KINDS_NEEDING_INVOICE_KEY` never included `"gstr2b"` — so the guard's
+`OPTIONAL` clause never bound, and the exact false-accusation failure
+mode the query's own comment describes having fixed once already was
+latent in reco-now's ingestion the entire time. It never surfaced before
+because `SupplierNotFiled` had no `gst:Gstr1Invoice` data to run against
+until this slice. Fixed by adding `"gstr2b"` to
+`KINDS_NEEDING_INVOICE_KEY`; RED test added first
+(`test_gstr2b_rows_also_carry_a_normalized_invoice_key`), 54 backend
+tests green.
+
+Still backend-only, as scoped above: no dedicated Map/Reconcile UI slot
+for a third upload yet. `INV-AUG-111` (GSTR-2B-only, no matching GSTR-1
+row in this fixture) remains a deliberate, honest gap — realistic partial
+2A/2B coverage, not a modeling gap, and `MissingInBooks` would catch it
+too once evidence for that specific invoice is loaded.
