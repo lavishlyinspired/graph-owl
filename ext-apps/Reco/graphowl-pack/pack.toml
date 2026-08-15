@@ -1,51 +1,37 @@
-# reco-now's own graph-owl pack — owned by this app, not by graph-owl.
+# reco-now's own graph-owl pack — an EXTENSION of packs/gst, not a parallel
+# pack. Corrected per plans/119-architecture-audit.md §3.1/§6: the first
+# version of this file (15 August 2026) independently re-declared 11
+# predicates packs/gst already has (invoiceNumber, supplierGstin,
+# supplierName, taxableValue, invoiceDate, placeOfSupply, reverseCharge,
+# igst, cgst, sgst, cess) under an unrelated namespace — a real duplication
+# bug, not a design choice. Fixed by registering ONLY the 6 fields
+# packs/gst's ontology genuinely does not have.
 #
-# Lives inside ext-apps/Reco/, never inside graph-owl's own packs/
-# directory, so that "an app configures its own pack" is demonstrated by
-# where this file lives, not just asserted. Loaded through the same
-# generic mechanism packs/gst and packs/hospitality already use
-# (`connectors/python/graph_owl_packs`) — no engine change, per
-# plans/105-domain-neutrality.md.
+# **Dependency**: packs/gst MUST be loaded before this pack — reco-now's
+# ingestion documents assert gst: predicates directly (`_install_graphowl_pack`
+# in ext-apps/Reco/backend/app/main.py loads packs/gst first, then this pack).
+# `POST /graph/import/rdf` rejects any flake whose predicate is not
+# registered, so loading these out of order fails every upload, not just
+# this pack's own 6 fields.
 #
-# Field set is reco-now's own — `ext-apps/Reco/backend/app/main.py`'s
-# FIELD_LABELS, 17 columns it already extracts from an uploaded Purchase
-# Register or GSTR-2B file — authored fresh, not copied from
-# packs/gst/ontology.ttl, which does not carry HSN code, IMS status, note
-# type, voucher type/number or original invoice number.
-#
-# Slice 1 (plans/118-reco-now-integration.md) is ingestion only: no
-# [[documents]], [[findings]], [[queries]] or [matching.blocking] yet.
-# Reconciliation-specific configuration is Slice 2's, added when there is
-# a reconciliation behaviour to configure — not invented ahead of it.
+# Still ingestion only (Slice 1): no [[documents]], [[findings]], [[queries]]
+# or [matching.blocking]. Reconciliation-specific configuration is Slice 2's
+# — plans/118-reco-now-integration.md / plans/119-architecture-audit.md §5b.
 
 [pack]
 id = "reco"
 namespace = "https://reconow.dev/pack#"
 prefix = "reco"
-description = "reco-now: Purchase Register vs GSTR-2B rows, as graph subjects."
+description = "reco-now: the 6 Purchase-Register/GSTR-2B fields packs/gst does not carry (HSN, IMS status, note/voucher fields) — everything else reuses gst: directly."
 
-# Amounts stay strings for the same reason packs/gst's do: a monetary
-# value parsed to a float at the graph boundary loses the exactness a tax
-# figure needs, and this pack's own reconciliation (Slice 2) compares them
-# as decimals, not IEEE doubles.
-
-[[predicates]]
-name = "invoiceNumber"
-
-[[predicates]]
-name = "supplierGstin"
-
-[[predicates]]
-name = "supplierName"
-
-[[predicates]]
-name = "taxableValue"
-
-[[predicates]]
-name = "invoiceDate"
-
-[[predicates]]
-name = "placeOfSupply"
+# The 11 fields reco-now shares with packs/gst (invoiceNumber, supplierGstin,
+# supplierName, taxableValue, invoiceDate, placeOfSupply, reverseCharge,
+# igst, cgst, sgst, cess) are NOT redeclared here — reco-now's ingestion
+# asserts `gst:` predicates for those directly, and mints subjects typed
+# `gst:PurchaseInvoice`/`gst:Gstr2bInvoice` rather than inventing its own
+# classes for a distinction packs/gst's ontology already draws identically
+# ("Purchase invoice (taxpayer's register)" / "GSTR-2B invoice (as filed by
+# the supplier)" — reco-now's "books"/"gstr2b" datasets are exactly that).
 
 [[predicates]]
 name = "hsnCode"
@@ -54,28 +40,13 @@ name = "hsnCode"
 name = "imsStatus"
 
 [[predicates]]
-name = "reverseCharge"
-
-[[predicates]]
 name = "noteType"
 
 [[predicates]]
 name = "voucherType"
 
 [[predicates]]
-name = "originalInvoiceNumber"
-
-[[predicates]]
 name = "voucherNumber"
 
 [[predicates]]
-name = "igst"
-
-[[predicates]]
-name = "cgst"
-
-[[predicates]]
-name = "sgst"
-
-[[predicates]]
-name = "cess"
+name = "originalInvoiceNumber"

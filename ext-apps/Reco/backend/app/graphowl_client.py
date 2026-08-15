@@ -1,20 +1,32 @@
-"""reco-now's own client for its own graph-owl pack.
+"""reco-now's own client for its graph-owl pack — an EXTENSION of
+packs/gst, not a parallel copy of it.
 
-plans/118-reco-now-integration.md, Slice 1. stdlib `urllib` only, matching
-this repo's own convention for every graph-owl Python client
-(`connectors/python/graph_owl_packs/loader.py`'s own words: "a loader is
-not a place to acquire an HTTP dependency").
+plans/118-reco-now-integration.md, Slice 1; corrected per
+plans/119-architecture-audit.md §3.1/§6. The first version of this module
+(15 August 2026) minted `reco:invoiceNumber`, `reco:supplierGstin`, etc. —
+11 predicates that duplicate ones `packs/gst` already registers — under an
+unrelated namespace nothing relates back to the pack that has them. Fixed
+by reusing `gst:` directly for every field packs/gst already carries, and
+registering `reco:` predicates only for the 6 it doesn't
+(`graphowl-pack/pack.toml`). Row subjects mint `gst:PurchaseInvoice`/
+`gst:Gstr2bInvoice` as their type for the same reason — packs/gst's
+ontology already draws exactly reco-now's books/gstr2b distinction
+("taxpayer's register" / "as filed by the supplier").
+
+stdlib `urllib` only, matching this repo's own convention for every
+graph-owl Python client (`connectors/python/graph_owl_packs/loader.py`'s
+own words: "a loader is not a place to acquire an HTTP dependency").
 
 Two responsibilities, kept separate because one is pure and one is not:
 
 - `rows_to_turtle` — normalized rows in, one RDF subject per row out.
   No I/O, so every case in it is a fast unit test.
 - `import_document` — one `POST /graph/import/rdf` call, landing a
-  Turtle document under a caller-named source. Installing the pack itself
-  (declaring the namespace, registering these same predicates) is a
-  one-time step at backend startup using the already-shipped, already-
-  tested `graph_owl_packs.loader.load_pack` — this module does not
-  reimplement that.
+  Turtle document under a caller-named source. Installing packs/gst and
+  then this pack (order matters — see `main.py`'s `_install_graphowl_pack`)
+  is a one-time step at backend startup using the already-shipped,
+  already-tested `graph_owl_packs.loader.load_pack` — this module does
+  not reimplement that.
 """
 
 from __future__ import annotations
@@ -27,36 +39,41 @@ from urllib.parse import quote
 
 #: Must match graphowl-pack/pack.toml's [pack] table.
 NAMESPACE = "https://reconow.dev/pack#"
+#: The pack this one extends. Must be loaded first — see main.py.
+GST_NAMESPACE = "https://graph-owl.dev/packs/gst#"
 
 #: reco-now's own two dataset kinds (main.py's `kind` values) -> the
-#: ontology class each becomes. Matches graphowl-pack/ontology.ttl.
+#: *shared* gst: class each becomes. Not reco-now's own class: packs/gst's
+#: ontology already draws this exact distinction ("Purchase invoice
+#: (taxpayer's register)" / "GSTR-2B invoice (as filed by the supplier)").
 CLASS_BY_KIND = {
-    "books": "reco:BooksInvoice",
-    "gstr2b": "reco:PortalInvoice",
+    "books": "gst:PurchaseInvoice",
+    "gstr2b": "gst:Gstr2bInvoice",
 }
 
-#: Row field (main.py's FIELD_LABELS keys) -> predicate local name.
+#: Row field (main.py's FIELD_LABELS keys) -> (namespace prefix, predicate
+#: local name). 11 of the 17 fields reuse a `gst:` predicate packs/gst
+#: already registers; only the 6 packs/gst does not have get `reco:`.
 #: Matches graphowl-pack/pack.toml's [[predicates]] and ontology.ttl
-#: exactly, as one table, so the three cannot drift silently against
-#: each other.
-PREDICATES: dict[str, str] = {
-    "invoice_no": "invoiceNumber",
-    "supplier_gstin": "supplierGstin",
-    "supplier_name": "supplierName",
-    "taxable": "taxableValue",
-    "invoice_date": "invoiceDate",
-    "place_of_supply": "placeOfSupply",
-    "hsn": "hsnCode",
-    "ims_status": "imsStatus",
-    "reverse_charge": "reverseCharge",
-    "note_type": "noteType",
-    "voucher_type": "voucherType",
-    "original_invoice_no": "originalInvoiceNumber",
-    "voucher_no": "voucherNumber",
-    "igst": "igst",
-    "cgst": "cgst",
-    "sgst": "sgst",
-    "cess": "cess",
+#: exactly, as one table, so they cannot drift silently against each other.
+PREDICATES: dict[str, tuple[str, str]] = {
+    "invoice_no": ("gst", "invoiceNumber"),
+    "supplier_gstin": ("gst", "supplierGstin"),
+    "supplier_name": ("gst", "supplierName"),
+    "taxable": ("gst", "taxableValue"),
+    "invoice_date": ("gst", "invoiceDate"),
+    "place_of_supply": ("gst", "placeOfSupply"),
+    "hsn": ("reco", "hsnCode"),
+    "ims_status": ("reco", "imsStatus"),
+    "reverse_charge": ("gst", "reverseCharge"),
+    "note_type": ("reco", "noteType"),
+    "voucher_type": ("reco", "voucherType"),
+    "original_invoice_no": ("reco", "originalInvoiceNumber"),
+    "voucher_no": ("reco", "voucherNumber"),
+    "igst": ("gst", "igst"),
+    "cgst": ("gst", "cgst"),
+    "sgst": ("gst", "sgst"),
+    "cess": ("gst", "cess"),
 }
 
 
@@ -127,15 +144,15 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     if not rows:
         return ""
 
-    lines = [f"@prefix reco: <{NAMESPACE}> .", ""]
+    lines = [f"@prefix gst: <{GST_NAMESPACE}> .", f"@prefix reco: <{NAMESPACE}> .", ""]
     for row in rows:
         subject = _subject_iri(kind, row)
         triples = [f"a {CLASS_BY_KIND[kind]}"]
-        for field, predicate in PREDICATES.items():
+        for field, (prefix, predicate) in PREDICATES.items():
             value = row.get(field)
             if not _is_present(value):
                 continue
-            triples.append(f"reco:{predicate} {_turtle_string(value)}")
+            triples.append(f"{prefix}:{predicate} {_turtle_string(value)}")
         body = " ;\n    ".join(triples)
         lines.append(f"<{subject}>\n    {body} .\n")
     return "\n".join(lines)

@@ -28,6 +28,13 @@ app = FastAPI(title="RecoNow — Intelligence for Indirect Tax", version="1.0.0"
 GRAPH_OWL_SERVER = os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080")
 GRAPH_OWL_TOKEN = os.environ.get("GRAPH_OWL_TOKEN")
 GRAPH_OWL_PACK_DIR = Path(__file__).resolve().parents[2] / "graphowl-pack"
+# reco-now's pack extends this one (plans/119-architecture-audit.md §3.1) —
+# it asserts gst: predicates directly rather than duplicating them, so
+# packs/gst's predicates must be registered before reco-now's own pack
+# installs, and before any upload is ingested. Reaches outside ext-apps/
+# on purpose: this app lives inside the graph-owl monorepo specifically to
+# compose with the platform's own reference pack, not fork it.
+GST_PACK_DIR = Path(__file__).resolve().parents[4] / "packs" / "gst"
 
 app.add_middleware(
     CORSMiddleware,
@@ -197,12 +204,16 @@ def _startup() -> None:
 
 
 def _install_graphowl_pack() -> None:
-    """Declare reco-now's own namespace and register its predicates —
-    the one-time step `load_pack` already does for packs/gst and
-    packs/hospitality, reused here rather than reimplemented. Idempotent
-    (loading a pack twice is a no-op), so this runs on every startup, not
-    just the first."""
+    """Declare packs/gst's namespace and predicates, then reco-now's own —
+    in that order, because `graphowl_client.rows_to_turtle` asserts gst:
+    predicates directly (plans/119-architecture-audit.md §3.1) and
+    `POST /graph/import/rdf` refuses any flake whose predicate is not yet
+    registered. Both loads use the one-time step `load_pack` already does
+    for packs/gst and packs/hospitality, reused here rather than
+    reimplemented. Idempotent (loading a pack twice is a no-op), so this
+    runs on every startup, not just the first."""
     try:
+        load_pack(GST_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
         load_pack(GRAPH_OWL_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
     except LoadError as exc:
         print(f"[graphowl] pack install skipped — {exc}")

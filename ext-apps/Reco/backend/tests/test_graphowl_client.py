@@ -1,11 +1,16 @@
 """RED tests for reco-now's graph-owl ingestion client.
 
-plans/118-reco-now-integration.md, Slice 1. Two layers, tested
-differently: `rows_to_turtle` is pure and gets plain unit tests;
-`import_document` talks HTTP and gets the same "a real local double, not
-a mock" discipline connectors/python/tests/test_loader.py already uses —
-not a live graph-owl-server, which is what the manual end-to-end
-verification step (Slice 1's "Done when") is for.
+plans/118-reco-now-integration.md Slice 1, corrected per
+plans/119-architecture-audit.md §3.1/§6: reco-now's pack is an EXTENSION of
+packs/gst, not a parallel copy of it. 11 of the 17 fields reuse `gst:`
+predicates and `gst:PurchaseInvoice`/`gst:Gstr2bInvoice` directly; only the
+6 fields packs/gst's ontology doesn't have get a `reco:` predicate.
+
+Two layers, tested differently: `rows_to_turtle` is pure and gets plain
+unit tests; `import_document` talks HTTP and gets the same "a real local
+double, not a mock" discipline connectors/python/tests/test_loader.py
+already uses — not a live graph-owl-server, which is what the manual
+end-to-end verification step (Slice 1's "Done when") is for.
 """
 
 from __future__ import annotations
@@ -20,11 +25,16 @@ import pytest
 
 from app.graphowl_client import IngestError, import_document, rows_to_turtle
 
-ALL_PREDICATES = (
+#: Fields reco-now shares with packs/gst — asserted as `gst:` predicates.
+GST_PREDICATES = (
     "invoiceNumber", "supplierGstin", "supplierName", "taxableValue",
-    "invoiceDate", "placeOfSupply", "hsnCode", "imsStatus", "reverseCharge",
-    "noteType", "voucherType", "originalInvoiceNumber", "voucherNumber",
+    "invoiceDate", "placeOfSupply", "reverseCharge",
     "igst", "cgst", "sgst", "cess",
+)
+#: The 6 fields packs/gst's ontology does not have — reco-now's own.
+RECO_PREDICATES = (
+    "hsnCode", "imsStatus", "noteType", "voucherType",
+    "voucherNumber", "originalInvoiceNumber",
 )
 
 
@@ -59,39 +69,108 @@ class TestRowsToTurtle:
     def test_empty_rows_produce_an_empty_document(self):
         assert rows_to_turtle([], "books") == ""
 
-    def test_fully_populated_row_carries_every_predicate(self):
+    def test_fully_populated_row_carries_every_predicate_under_the_right_prefix(self):
         turtle = rows_to_turtle([_row()], "books")
-        for predicate in ALL_PREDICATES:
-            assert f"reco:{predicate}" in turtle, f"missing {predicate}"
+        for predicate in GST_PREDICATES:
+            assert f"gst:{predicate}" in turtle, f"missing gst:{predicate}"
+        for predicate in RECO_PREDICATES:
+            assert f"reco:{predicate}" in turtle, f"missing reco:{predicate}"
 
-    def test_books_kind_uses_the_books_class(self):
+    def test_shared_fields_never_land_under_the_reco_prefix(self):
+        # The regression this fix exists for: a shared field must not be
+        # asserted twice under two unrelated predicates.
         turtle = rows_to_turtle([_row()], "books")
-        assert "a reco:BooksInvoice" in turtle
-        assert "reco:PortalInvoice" not in turtle
+        for predicate in GST_PREDICATES:
+            assert f"reco:{predicate}" not in turtle, f"gst:{predicate} duplicated as reco:{predicate}"
 
-    def test_portal_kind_uses_the_portal_class(self):
+    def test_declares_both_prefixes(self):
+        turtle = rows_to_turtle([_row()], "books")
+        assert "@prefix gst: <https://graph-owl.dev/packs/gst#>" in turtle
+        assert "@prefix reco: <https://reconow.dev/pack#>" in turtle
+
+    def test_books_kind_mints_the_shared_gst_purchase_invoice_class(self):
+        turtle = rows_to_turtle([_row()], "books")
+        assert "a gst:PurchaseInvoice" in turtle
+        assert "gst:Gstr2bInvoice" not in turtle
+        assert "reco:BooksInvoice" not in turtle  # the old, duplicated class
+
+    def test_gstr2b_kind_mints_the_shared_gst_2b_invoice_class(self):
         turtle = rows_to_turtle([_row()], "gstr2b")
-        assert "a reco:PortalInvoice" in turtle
-        assert "reco:BooksInvoice" not in turtle
+        assert "a gst:Gstr2bInvoice" in turtle
+        assert "gst:PurchaseInvoice" not in turtle
+        assert "reco:PortalInvoice" not in turtle  # the old, duplicated class
 
     def test_unknown_kind_is_rejected(self):
         with pytest.raises(ValueError):
             rows_to_turtle([_row()], "not-a-real-kind")
 
     @pytest.mark.parametrize("blank", [None, "", float("nan")])
-    def test_absent_field_is_omitted_not_written_as_a_blank_literal(self, blank):
+    def test_absent_reco_field_is_omitted_not_written_as_a_blank_literal(self, blank):
         turtle = rows_to_turtle([_row(ims_status=blank, note_type=blank)], "books")
-        # Negative, not merely "we didn't check for it": the predicate
-        # must not appear at all — distinct from appearing with `""`,
-        # which would claim "recorded as blank" for a fact never recorded.
         assert "reco:imsStatus" not in turtle
         assert "reco:noteType" not in turtle
-        assert '""' not in turtle
+
+    @pytest.mark.parametrize("blank", [None, "", float("nan")])
+    def test_absent_gst_field_is_also_omitted_not_written_as_a_blank_literal(self, blank):
+        # The omission rule applies uniformly regardless of which prefix a
+        # field ends up under — this pins that down explicitly.
+        turtle = rows_to_turtle([_row(supplier_name=blank, place_of_supply=blank)], "books")
+        assert "gst:supplierName" not in turtle
+        assert "gst:placeOfSupply" not in turtle
 
     def test_zero_is_a_real_value_and_is_not_treated_as_absent(self):
         turtle = rows_to_turtle([_row(cgst=0, sgst=0)], "books")
-        assert "reco:cgst" in turtle
-        assert "reco:sgst" in turtle
+        assert "gst:cgst" in turtle
+        assert "gst:sgst" in turtle
+
+    def test_a_blank_field_beside_populated_ones_still_lets_the_rest_land(self):
+        turtle = rows_to_turtle([_row(ims_status=None)], "books")
+        assert "gst:supplierName" in turtle
+        assert "gst:taxableValue" in turtle
+        assert "reco:imsStatus" not in turtle
+
+    def test_quote_backslash_and_newline_are_escaped(self):
+        # Actual value: O"Brien \ Textiles<newline>Unit 2 — a real supplier
+        # name and a real multi-line note can both hit this. supplierName
+        # is now a gst: field, so this also proves escaping isn't tied to
+        # one particular namespace's predicates.
+        turtle = rows_to_turtle(
+            [_row(supplier_name='O"Brien \\ Textiles\nUnit 2')], "books"
+        )
+        assert '\\"Brien' in turtle  # the quote became \"
+        assert "\\\\ Textiles" in turtle  # the single backslash became \\
+        assert "Textiles\\nUnit" in turtle  # the real newline became \n
+        # An unescaped quote/backslash would corrupt Turtle parsing past
+        # that point — one subject block proves it did not.
+        assert turtle.count("a gst:PurchaseInvoice") == 1
+
+    def test_same_invoice_number_different_supplier_gives_distinct_subjects(self):
+        rows = [
+            _row(invoice_no="INV-9", supplier_gstin="27AAAFN2938K1Z2"),
+            _row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7"),
+        ]
+        turtle = rows_to_turtle(rows, "books")
+        subjects = [line for line in turtle.splitlines() if line.startswith("<")]
+        assert len(subjects) == 2
+        assert subjects[0] != subjects[1]
+
+    def test_subjects_are_minted_under_the_pack_s_own_registered_namespace(self):
+        # Regression: subjects were originally minted under a separate
+        # "https://reconow.dev/data/..." namespace, which POST
+        # /namespaces never declares — graph-owl refused every row with
+        # "not in a namespace this store recognises" (found by actually
+        # running the upload, not by reading the code). Only the pack's
+        # own NAMESPACE is ever registered, so every subject must live
+        # under it — the same shape packs/gst's own fixtures use
+        # (`gst:pr-INV-1001`, not a separate data prefix). Instance
+        # identity stays under reco:'s own namespace even though the
+        # *type* and most *predicates* are now gst: — a subject's IRI and
+        # its rdf:type are independent facts.
+        from app.graphowl_client import NAMESPACE
+
+        turtle = rows_to_turtle([_row()], "books")
+        subject_line = next(line for line in turtle.splitlines() if line.startswith("<"))
+        assert subject_line.startswith(f"<{NAMESPACE}")
 
     def test_a_real_non_nan_float_is_present_not_treated_as_absent(self):
         # pandas hands back float64 for a numeric column even when every
@@ -99,7 +178,7 @@ class TestRowsToTurtle:
         # treats every float as absent would still pass every int-typed
         # fixture above and only show up on real upload data.
         turtle = rows_to_turtle([_row(taxable=22000.5)], "books")
-        assert "reco:taxableValue" in turtle
+        assert "gst:taxableValue" in turtle
 
     def test_whitespace_only_field_is_treated_as_absent(self):
         # A cell that round-tripped through a spreadsheet as spaces, not
@@ -115,50 +194,6 @@ class TestRowsToTurtle:
         subject_line = next(line for line in turtle.splitlines() if line.startswith("<"))
         assert "INF/23-24/0456" not in subject_line
         assert "INF%2F23-24%2F0456" in subject_line
-
-    def test_a_blank_field_beside_populated_ones_still_lets_the_rest_land(self):
-        turtle = rows_to_turtle([_row(ims_status=None)], "books")
-        assert "reco:supplierName" in turtle
-        assert "reco:taxableValue" in turtle
-        assert "reco:imsStatus" not in turtle
-
-    def test_quote_backslash_and_newline_are_escaped(self):
-        # Actual value: O"Brien \ Textiles<newline>Unit 2 — a real supplier
-        # name and a real multi-line note can both hit this.
-        turtle = rows_to_turtle(
-            [_row(supplier_name='O"Brien \\ Textiles\nUnit 2')], "books"
-        )
-        assert '\\"Brien' in turtle  # the quote became \"
-        assert "\\\\ Textiles" in turtle  # the single backslash became \\
-        assert "Textiles\\nUnit" in turtle  # the real newline became \n
-        # An unescaped quote/backslash would corrupt Turtle parsing past
-        # that point — one subject block proves it did not.
-        assert turtle.count("a reco:BooksInvoice") == 1
-
-    def test_subjects_are_minted_under_the_pack_s_own_registered_namespace(self):
-        # Regression: subjects were originally minted under a separate
-        # "https://reconow.dev/data/..." namespace, which POST
-        # /namespaces never declares — graph-owl refused every row with
-        # "not in a namespace this store recognises" (found by actually
-        # running the upload, not by reading the code). Only the pack's
-        # own NAMESPACE is ever registered, so every subject must live
-        # under it — the same shape packs/gst's own fixtures use
-        # (`gst:pr-INV-1001`, not a separate data prefix).
-        from app.graphowl_client import NAMESPACE
-
-        turtle = rows_to_turtle([_row()], "books")
-        subject_line = next(line for line in turtle.splitlines() if line.startswith("<"))
-        assert subject_line.startswith(f"<{NAMESPACE}")
-
-    def test_same_invoice_number_different_supplier_gives_distinct_subjects(self):
-        rows = [
-            _row(invoice_no="INV-9", supplier_gstin="27AAAFN2938K1Z2"),
-            _row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7"),
-        ]
-        turtle = rows_to_turtle(rows, "books")
-        subjects = [line for line in turtle.splitlines() if line.startswith("<")]
-        assert len(subjects) == 2
-        assert subjects[0] != subjects[1]
 
 
 def _handler(received: list[dict], fail: bool):
