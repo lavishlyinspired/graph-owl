@@ -263,3 +263,78 @@ jobs:
         run: cd ui && npm run build
       - name: tests
         run: cd ui && npm test
+
+  python-suites:
+    name: connectors, worker and reco-now backend test suites
+    # None of these three need Docker or a live graph-owl-server — each
+    # tests HTTP behaviour against a local `http.server` double (the same
+    # "a real local double, not a mock" discipline `test_loader.py` names),
+    # not a running service. `examples/gst-reconcile`'s own tests are the
+    # same shape but live under `examples/` — see the `examples` job below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: connectors/python
+        run: |
+          python -m venv "$RUNNER_TEMP/connectors-venv"
+          "$RUNNER_TEMP/connectors-venv/bin/pip" -q install -e "connectors/python[dev]"
+          cd connectors/python && "$RUNNER_TEMP/connectors-venv/bin/pytest" -q
+
+      # `[pdf,ovis-ocr2]` — some of this suite's own tests (e.g.
+      # test_ocr.py's real `from PIL import Image`) need the optional
+      # extras actually installed, not just the fallback-path tests that
+      # deliberately poison sys.modules to test their absence.
+      #
+      # `graph-owl-sdk` is this workspace's own package, not published to
+      # PyPI, so `workers/python`'s dependency on it only resolves once
+      # `sdk/python` is installed first — found by running this step, not
+      # by reading `workers/python/pyproject.toml` alone.
+      - name: workers/python
+        run: |
+          python -m venv "$RUNNER_TEMP/workers-venv"
+          "$RUNNER_TEMP/workers-venv/bin/pip" -q install -e sdk/python
+          "$RUNNER_TEMP/workers-venv/bin/pip" -q install -e "workers/python[pdf,ovis-ocr2,dev]"
+          cd workers/python && "$RUNNER_TEMP/workers-venv/bin/pytest" -q
+
+      # requirements.txt's own `-e ../../../connectors/python` is relative
+      # to this file's directory, so pip runs from inside it rather than
+      # the repo root.
+      - name: ext-apps/Reco backend
+        run: |
+          python -m venv "$RUNNER_TEMP/reco-venv"
+          cd ext-apps/Reco/backend
+          "$RUNNER_TEMP/reco-venv/bin/pip" -q install -r requirements.txt
+          "$RUNNER_TEMP/reco-venv/bin/pytest" -q
+
+  examples:
+    name: reference applications (examples/) round-trip and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10
+
+      # agent-triage, browse and adapter-csv (sdk/python) against a real
+      # service — verify-sdks.sh/verify-langchain.sh's own reasoning: a
+      # unit test of an example tests its own opinion of the API.
+      - name: verify-examples.sh
+        run: bash scripts/verify-examples.sh
+
+      # examples/gst-reconcile needs no live service at all — scored
+      # against packs/gst/eval/questions.md's answer key with a local
+      # http.server double, the same zero-API-cost discipline
+      # reconcile_agent.py's own docstring describes — so it runs as its
+      # own lightweight step rather than inside the live-service script.
+      - name: examples/gst-reconcile
+        run: |
+          python -m venv "$RUNNER_TEMP/gst-reconcile-venv"
+          "$RUNNER_TEMP/gst-reconcile-venv/bin/pip" -q install pytest
+          cd examples/gst-reconcile && "$RUNNER_TEMP/gst-reconcile-venv/bin/pytest" -q
