@@ -235,7 +235,7 @@ class TestCanonicalLinking:
             [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "books"
         )
         assert (
-            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INVAUG101>\n"
             "    gst:recordedIn <https://graph-owl.dev/packs/gst#books-27AAAFN2938K1Z2-INV-AUG-101> ."
         ) in turtle
         assert "gst:reflectedIn" not in turtle
@@ -245,7 +245,7 @@ class TestCanonicalLinking:
             [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "gstr2b"
         )
         assert (
-            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INVAUG101>\n"
             "    gst:reflectedIn <https://graph-owl.dev/packs/gst#gstr2b-27AAAFN2938K1Z2-INV-AUG-101> ."
         ) in turtle
         assert "gst:recordedIn" not in turtle
@@ -294,6 +294,20 @@ class TestCanonicalLinking:
         # keys for what a human would call the same invoice number.
         turtle = rows_to_turtle([_row(invoice_no="inv-2024/001")], "books")
         assert 'gst:invoiceKey "INV2024001"' in turtle
+
+    def test_the_canonical_subject_normalizes_the_invoice_number(self):
+        # connectors/python/graph_owl_packs/gstr2b.py (the live-GSP
+        # connector) already normalizes the invoice number before
+        # building its canonical subject; this module didn't — found 16
+        # August 2026 while extracting the shared gst_identity module.
+        # Harmless while gstr2b.py was never called in production, but a
+        # books upload for "INV-2024/001" and a live 2B pull for
+        # "inv2024001" must land on the *same* canonical subject, or
+        # every finding query joining through it silently matches nothing.
+        turtle = rows_to_turtle(
+            [_row(invoice_no="inv-2024/001", supplier_gstin="27X")], "books"
+        )
+        assert "<https://graph-owl.dev/packs/gst#invoice-27X-INV2024001>" in turtle
 
     def test_gstr2b_rows_also_carry_a_normalized_invoice_key(self):
         # missing-in-gstr1.sparql's own "GSTR-2B presence is conclusive
@@ -363,7 +377,7 @@ class TestGstr1Ingestion:
             [_gstr1_row(invoice_no="INV-AUG-113", supplier_gstin="29AAECK4410L1Z7")], "gstr1"
         )
         assert (
-            "<https://graph-owl.dev/packs/gst#invoice-29AAECK4410L1Z7-INV-AUG-113>\n"
+            "<https://graph-owl.dev/packs/gst#invoice-29AAECK4410L1Z7-INVAUG113>\n"
             "    gst:appearsIn <https://graph-owl.dev/packs/gst#gstr1-29AAECK4410L1Z7-INV-AUG-113> ."
         ) in turtle
         assert "gst:recordedIn" not in turtle

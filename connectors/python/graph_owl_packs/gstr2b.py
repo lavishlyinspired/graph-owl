@@ -37,6 +37,14 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from .gst_identity import (
+    canonical_local_name,
+    invoice_key,
+    subject_suffix,
+    supplier_local_name,
+    turtle_literal,
+)
+
 #: The pack whose vocabulary this produces. Named once so a second
 #: authority-facing connector cannot drift from it silently.
 PREFIX = "gst"
@@ -94,26 +102,7 @@ class Gstr2bInvoice:
         ontology and never instantiated — every invoice carried the GSTIN
         as a bare literal, unreachable by a graph walk.
         """
-        return f"{PREFIX}:supplier-{subject_suffix(self.supplier_gstin)}"
-
-
-def invoice_key(value: str) -> str:
-    """The key two records are the same invoice by.
-
-    A supplier writes ``INV-2023/01``, the taxpayer's clerk keys ``INV202301``,
-    and an exact join sees two unrelated invoices — so the register row reads as
-    one the supplier never filed *and* the 2B row as one never booked. Two false
-    findings, opposite in direction, about a single invoice that matched.
-
-    Deliberately conservative: case and punctuation only. Leading zeros are
-    **not** stripped — ``INV-001`` and ``INV-1`` are different invoices in
-    plenty of numbering schemes, and a wrong match silently claims credit
-    against the wrong invoice, where a missed one only leaves a finding.
-
-    Kept byte-for-byte equivalent to ``invoiceKey`` in
-    ``ui/src/features/packs/gstText.ts``.
-    """
-    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return f"{PREFIX}:{supplier_local_name(self.supplier_gstin)}"
 
 
 def invoice_subject(gstin: str, invoice_number: str) -> str:
@@ -127,40 +116,14 @@ def invoice_subject(gstin: str, invoice_number: str) -> str:
     per ``plans/109-gst-canonical-invoice-model.md`` decision 6: a hard-key
     collision must be reviewed, never silently merged.
 
-    Kept byte-for-byte equivalent to ``invoiceSubject`` in
-    ``ui/src/features/packs/gstText.ts``.
+    Delegates to ``gst_identity.canonical_local_name`` — shared with
+    ``graphowl_client.py`` (``ext-apps/Reco``) since 16 August 2026, so the
+    two cannot independently drift on what "the same invoice" means. Kept
+    byte-for-byte equivalent to ``invoiceSubject`` in
+    ``ui/src/features/packs/gstText.ts``, which this extraction does not
+    change — same algorithm, same output, one fewer place it lived.
     """
-    return f"{PREFIX}:invoice-{subject_suffix(gstin)}-{invoice_key(invoice_number)}"
-
-
-def subject_suffix(value: str) -> str:
-    """An identifier as the local part of a prefixed name.
-
-    **The bug a real upload found, and it is not an edge case.** Indian invoice
-    numbers routinely look like ``RST/2026/0455`` — a slash is the ordinary
-    separator. Written straight into a prefixed name that is
-    ``gst:2b-RST/2026/0455``, which is not legal Turtle, and the server rejects
-    the whole import. Both this module and its TypeScript twin had it.
-
-    **Percent-encoded rather than substituted, because a collision here merges
-    two invoices.** Mapping every unsafe character onto ``-`` would make
-    ``INV/1`` and ``INV-1`` one subject: two different invoices silently
-    becoming one in a tax reconciliation. Percent-encoding is reversible and is
-    explicitly legal in a Turtle ``PN_LOCAL`` (the ``PLX``/``PERCENT``
-    production).
-
-    Kept byte-for-byte equivalent to ``subjectSuffix`` in
-    ``ui/src/features/packs/gstText.ts`` — the two are pinned to the same
-    fixture assertions, and an encoding that differed between them would land
-    the same invoice under two subjects.
-    """
-    out = []
-    for char in value:
-        if char.isascii() and (char.isalnum() or char in "_-"):
-            out.append(char)
-        else:
-            out.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
-    return "".join(out)
+    return f"{PREFIX}:{canonical_local_name(gstin, invoice_number)}"
 
 
 def _money(value: object) -> str:
@@ -309,12 +272,6 @@ def normalize(payload: dict) -> list[Gstr2bInvoice]:
     return invoices
 
 
-def _literal(value: str) -> str:
-    """A Turtle string literal. Backslash first, or the escapes escape each
-    other and one badly-named supplier corrupts every triple after it."""
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-
-
 def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> str:
     """The same shape `packs/gst/fixtures/gstr2b.ttl` carries.
 
@@ -352,7 +309,7 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         present = [(field_name, value) for field_name, value in fields if value != ""]
         for index, (field_name, value) in enumerate(present):
             terminator = " ." if index == len(present) - 1 else " ;"
-            lines.append(f'    {PREFIX}:{field_name:<13} "{_literal(value)}"{terminator}')
+            lines.append(f'    {PREFIX}:{field_name:<13} "{turtle_literal(value)}"{terminator}')
         lines.append("")
 
     # **The statements — one per return period, deduplicated across every
@@ -367,7 +324,7 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         lines.append("")
     for period in periods:
         lines.append(f"{statement_subject(period)} rdf:type {PREFIX}:Gstr2bStatement ;")
-        lines.append(f'    {PREFIX}:{"period":<13} "{_literal(period)}" ;')
+        lines.append(f'    {PREFIX}:{"period":<13} "{turtle_literal(period)}" ;')
         lines.append(f'    {PREFIX}:{"generatedFor":<13} {PREFIX}:recipient-self .')
         lines.append("")
 
@@ -409,7 +366,7 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         for name, value in present_literals:
             written += 1
             terminator = " ." if written == total else " ;"
-            lines.append(f'    {PREFIX}:{name:<13} "{_literal(value)}"{terminator}')
+            lines.append(f'    {PREFIX}:{name:<13} "{turtle_literal(value)}"{terminator}')
         if has_statement:
             lines.append(f'    {PREFIX}:{"reflectedIn":<13} {statement_subject(invoice.period)} .')
         lines.append("")

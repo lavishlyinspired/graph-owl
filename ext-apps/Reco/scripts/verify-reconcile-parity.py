@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
-"""Parity check: reconciliation.py's classification vs. the native
-graph-owl reconcile engine, over reco-now's real fresh sample data
-(SAMPLE/*_aug2026.csv) — plans/119-architecture-audit.md §5b step 5.
+"""Regression check: /api/reconcile's stats (native findings, primary
+source since the 16 August 2026 cutover, plans/119-architecture-audit.md
+§9) against a hand-derived answer key, over reco-now's real fresh sample
+data (SAMPLE/*_aug2026.csv).
+
+**Was a parity check between two independent paths** (reconciliation.py's
+own tolerance/matching math vs. the native engine) **before the cutover.**
+`/api/reconcile` now calls `native_findings.reconcile` directly, so the
+two numbers below are the same data read two ways rather than two
+independent computations — kept as two assertions anyway, because one
+checks the aggregate buckets `overview()` exposes and the other checks
+the underlying per-label finding counts, and a bug in the bucket-mapping
+logic (`native_findings._STATUS_BY_LABEL`/`_STATUS_PRIORITY`) could make
+the first wrong while the second still passes.
 
 **Requires a live stack**, same as scripts/verify-pack-load.sh does for
 packs/gst: a running graph-owl-server (open mode) with a *fresh* database
@@ -26,18 +37,18 @@ import urllib.request
 # The answer key for SAMPLE/purchase_register_aug2026.csv +
 # SAMPLE/gstr2b_aug2026.csv + SAMPLE/gstr2a_aug2026.csv, hand-derived by
 # reading every finding query's WHERE clause against the fixture rows
-# (plans/119-architecture-audit.md §8) — not read off either system's
+# (plans/119-architecture-audit.md §8/§9) — not read off either system's
 # output, so it catches both sides being wrong in the same way.
 #
-# reconciliation.py only ever sees books+gstr2b (it has no GSTR-1/2A
-# concept at all), so its stats are unaffected by the 3 new gstr2a rows
-# except through the 2 new books-only rows (INV-AUG-113, INV-AUG-114) that
-# exist to give those gstr2a rows something to reconcile against:
-# 13 unique invoices across books+2b (was 11): 7 clean matches, 1 amount
-# mismatch (INV-AUG-103), 4 books-only (INV-AUG-105, 109, 113, 114),
-# 1 portal-only (INV-AUG-111).
+# 14 unique invoices across books+2b+gstr1 (books+2b alone would be 13 —
+# reconciliation.py's old fallback-path number, still exercised if
+# graph-owl is unreachable): 7 clean matches, 2 review (INV-AUG-103's
+# amount+tax-head mismatch, INV-AUG-114's books-vs-GSTR-1 mismatch), 3
+# only-books (INV-AUG-105, 109 not filed at all; INV-AUG-113 filed but not
+# yet in 2B), 2 only-portal (INV-AUG-111 in 2B only, INV-AUG-112 in
+# GSTR-1/2A only).
 EXPECTED_RECO_STATS = {
-    "total": 13, "matched": 7, "review": 1, "only_books": 4, "only_gstr2b": 1,
+    "total": 14, "matched": 7, "review": 2, "only_books": 3, "only_gstr2b": 2,
 }
 # The native engine's coverage once GSTR-1/2A evidence exists in the
 # store — see the "known gap" note below before changing this.
@@ -55,7 +66,9 @@ EXPECTED_NATIVE_LABELS = {
     "gst:MissingInBooks": 1,       # INV-AUG-112 — GSTR-1/2A only, never booked
     "gst:BooksGstr1Mismatch": 1,   # INV-AUG-114 — books 55000 vs GSTR-1 53000 (also
                                     # Gstr1NotIn2b, a real second distinction: absent
-                                    # from 2B *and* mismatched against what was filed)
+                                    # from 2B *and* mismatched against what was filed —
+                                    # native_findings._STATUS_PRIORITY picks the review
+                                    # bucket for this row, keeping both reasons)
 }
 
 
@@ -103,7 +116,7 @@ def main() -> int:
 
     time.sleep(2)  # background ingestion
 
-    print("==> running reconciliation.py")
+    print("==> running /api/reconcile (native findings, primary since the cutover)")
     reco = _post(f"{base}/api/reconcile")
     stats = {k: reco["stats"][k] for k in EXPECTED_RECO_STATS}
     print("    stats:", stats)

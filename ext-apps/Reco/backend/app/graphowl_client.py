@@ -43,6 +43,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
+from graph_owl_packs.gst_identity import canonical_local_name, supplier_local_name, turtle_literal
+
 from .reconciliation import normalize_invoice_no
 
 #: The one pack this whole module speaks — graph-owl's own canonical GST
@@ -156,13 +158,11 @@ def _normalize_date(value: object) -> object:
 
 
 def _turtle_string(value: object) -> str:
-    """A Turtle string literal for `value`. Backslash first, then quote,
-    then the whitespace escapes — in that order, or escaping the quote
-    would double-escape the backslash just inserted before it."""
-    text = str(value)
-    text = text.replace("\\", "\\\\").replace('"', '\\"')
-    text = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    return f'"{text}"'
+    """A quoted Turtle string literal for `value`. The escaping itself is
+    `graph_owl_packs.gst_identity.turtle_literal`, shared with
+    `gstr2b.py` — this wrapper only adds the surrounding quotes every
+    call site here expects."""
+    return f'"{turtle_literal(value)}"'
 
 
 def _subject_iri(kind: str, row: dict) -> str:
@@ -184,8 +184,11 @@ def _subject_iri(kind: str, row: dict) -> str:
 
 
 def _supplier_iri(gstin_raw: str) -> str:
-    gstin = quote(str(gstin_raw or "").strip(), safe="")
-    return f"{NAMESPACE}supplier-{gstin}"
+    """Shared with `gstr2b.py`'s own `Gstr2bInvoice.supplier_subject` via
+    `graph_owl_packs.gst_identity.supplier_local_name` — a books upload
+    and a live GSTR-2B pull for the same GSTIN must resolve to the same
+    `gst:Supplier` subject."""
+    return f"{NAMESPACE}{supplier_local_name(gstin_raw)}"
 
 
 def _filing_iri(gstin_raw: str, period_raw: str) -> str:
@@ -204,10 +207,16 @@ def _canonical_iri(gstin_raw: str, invoice_no_raw: str) -> str:
     and a gstr2b upload for the same (gstin, invoice number) must mint the
     identical IRI, or `gst:recordedIn` and `gst:reflectedIn` would land on
     two different subjects instead of meeting on one, and every finding
-    query that joins through `?canonical` would silently match nothing."""
-    gstin = quote(str(gstin_raw or "").strip(), safe="")
-    invoice_no = quote(str(invoice_no_raw or "").strip(), safe="")
-    return f"{NAMESPACE}invoice-{gstin}-{invoice_no}"
+    query that joins through `?canonical` would silently match nothing.
+
+    Delegates to `graph_owl_packs.gst_identity.canonical_local_name` —
+    shared with `gstr2b.py`'s own `invoice_subject` since 16 August 2026.
+    Fixed at the same time: this used to build the IRI from the *raw*
+    invoice number, where `gstr2b.py` already normalized it first — a
+    books row for "INV-2024/001" and a live 2B pull for "inv2024001"
+    would have computed two different canonical subjects, silently, the
+    moment both wrote to the same store. Normalizing here closes that."""
+    return f"{NAMESPACE}{canonical_local_name(gstin_raw, invoice_no_raw)}"
 
 
 def _combined_tax_amount(row: dict) -> str:
