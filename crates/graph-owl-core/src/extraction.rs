@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 /// Byte offsets rather than line/column: a PDF worker and an OCR worker
 /// have no meaningful notion of a line, and every representation can agree
 /// on "this range of the extracted text".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSpan {
     /// The byte offset of the span's start.
@@ -67,7 +67,7 @@ impl TextSpan {
 /// nothing structural in common, and a representation rich enough for one
 /// is wrong for the others — but all of them can produce text, and all of
 /// them can say which part of it a claim came from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedDocument {
     /// Stable identity of the source, used for idempotent re-ingestion and
@@ -89,13 +89,53 @@ pub struct ParsedDocument {
 }
 
 /// A piece of document structure a parser happened to recover.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Section {
     /// The section's heading, if it has one.
     pub heading: Option<String>,
     /// Where in the document this section lies.
     pub span: TextSpan,
+}
+
+/// Where a claim's evidence lives, for a source shape `TextSpan` cannot
+/// express.
+///
+/// **Data, not a variant — the same trade `Provenance`'s `extractor` field
+/// already makes.** `kind` names the shape (`"text"`, `"tabular"`, `"json"`,
+/// more later) as an open string; `location`'s shape is a documented
+/// convention per `kind`, not enforced by the Rust type system. A closed
+/// enum would need a recompile for every new source format a future worker
+/// introduces — exactly what this epic's binding requirement (adding a
+/// worker must not change the Rust domain model) rules out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceLocation {
+    /// The shape of `location` — `"text"`, `"tabular"`, `"json"`, or a kind
+    /// a future worker introduces.
+    pub kind: String,
+    /// The location itself, shaped per `kind`'s own convention. For
+    /// `"text"`, this is a serialized [`TextSpan`].
+    pub location: serde_json::Value,
+}
+
+impl EvidenceLocation {
+    /// The text this location refers to, for a `"text"` location whose
+    /// `location` deserializes to an in-bounds [`TextSpan`].
+    ///
+    /// Returns `None` for a non-`"text"` `kind` (a tabular cell or a JSON
+    /// path has no meaningful position in a document's plain text) and for
+    /// an out-of-range or malformed span, for the same reason
+    /// [`TextSpan::resolve`] does: the location is untrusted input the
+    /// moment an external worker can produce it.
+    #[must_use]
+    pub fn resolve<'a>(&self, text: &'a str) -> Option<&'a str> {
+        if self.kind != "text" {
+            return None;
+        }
+        let span: TextSpan = serde_json::from_value(self.location.clone()).ok()?;
+        span.resolve(text)
+    }
 }
 
 /// Who produced a claim, and from what.
@@ -106,7 +146,7 @@ pub struct Section {
 /// worker is therefore a deployment, not a schema migration — which is the
 /// whole point, since the workers are the part of this epic that does not
 /// exist yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Provenance {
     /// The document the claim came from.
@@ -121,7 +161,7 @@ pub struct Provenance {
     /// source is unverifiable** (decision 5), so this is not optional — a
     /// worker that cannot say where a claim came from is telling you
     /// something about the claim.
-    pub evidence: TextSpan,
+    pub evidence: EvidenceLocation,
 }
 
 /// One extracted assertion, before any policy has been applied to it.
@@ -132,7 +172,7 @@ pub struct Provenance {
 /// rather than there is what makes decision 1 (ontology-constrained, never
 /// open information extraction) enforceable against a worker nobody in this
 /// repository wrote.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Claim {
     /// The FQN of the entity this is about.
@@ -247,7 +287,7 @@ impl ReviewDecision {
 
 /// Why a claim was thrown away, kept so a run can be diagnosed rather than
 /// merely counted.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscardedClaim {
     /// The claim that was thrown away.
@@ -263,7 +303,7 @@ pub struct DiscardedClaim {
 /// returns it as a value. Neither path is privileged, which is what makes
 /// the boundary stable — the in-process extractor is not a shortcut around
 /// the contract, it is a client of it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionResult {
     /// The claims extracted.
@@ -313,7 +353,10 @@ mod tests {
             extractor: "markdown-rules".to_string(),
             extractor_version: "1".to_string(),
             extracted_at: Utc::now(),
-            evidence: TextSpan::new(0, 4),
+            evidence: EvidenceLocation {
+                kind: "text".to_string(),
+                location: serde_json::to_value(TextSpan::new(0, 4)).expect("TextSpan serializes"),
+            },
         }
     }
 
@@ -466,5 +509,53 @@ mod tests {
             "byte 4 is mid-é: None, not a panic and not a silent truncation"
         );
         assert_eq!(TextSpan::new(0, 5).resolve(text), Some("café"));
+    }
+
+    /// **Tabular evidence.** A spreadsheet cell has no byte offset into
+    /// prose — `EvidenceLocation` is what lets a claim cite "this row, this
+    /// column" instead of forcing every source into `TextSpan`'s shape.
+    #[test]
+    fn tabular_evidence_round_trips_through_json() {
+        let mut original = claim(0.9);
+        original.provenance.evidence = EvidenceLocation {
+            kind: "tabular".to_string(),
+            location: serde_json::json!({
+                "sheet": "Purchases",
+                "row": 1821,
+                "column": "Invoice No"
+            }),
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: Claim = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.provenance.evidence.kind, "tabular");
+        assert_eq!(
+            parsed.provenance.evidence.location["row"],
+            serde_json::json!(1821),
+            "the round trip must preserve location's actual contents, not just avoid panicking"
+        );
+    }
+
+    /// **JSON-path evidence.** A claim sourced from a JSON payload (an API
+    /// response, a GST return) names a `$`-path, not a byte range.
+    #[test]
+    fn json_path_evidence_round_trips_through_json() {
+        let mut original = claim(0.9);
+        original.provenance.evidence = EvidenceLocation {
+            kind: "json".to_string(),
+            location: serde_json::json!({ "path": "$.b2b[14].inv[3].inum" }),
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: Claim = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.provenance.evidence.kind, "json");
+        assert_eq!(
+            parsed.provenance.evidence.location["path"],
+            serde_json::json!("$.b2b[14].inv[3].inum")
+        );
     }
 }

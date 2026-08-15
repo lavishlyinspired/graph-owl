@@ -746,6 +746,40 @@
         ],
         "type": "string"
       },
+      "Claim": {
+        "description": "One extracted assertion, before any policy has been applied to it.\n\nSubject and predicate are strings because the worker that produced them\nmay know nothing of this codebase's types. Validating them against the\nreal vocabulary is graph-owl's job, not the worker's — and doing it here\nrather than there is what makes decision 1 (ontology-constrained, never\nopen information extraction) enforceable against a worker nobody in this\nrepository wrote.",
+        "properties": {
+          "confidence": {
+            "description": "The worker's own confidence, `0.0..=1.0`.\n\n**A proposal, never a decision.** [`Disposition::for_confidence`]\ndecides what happens to it, in this process — so a worker cannot\nassert something below the threshold by claiming otherwise.",
+            "format": "double",
+            "type": "number"
+          },
+          "object": {
+            "description": "The claimed value.",
+            "type": "string"
+          },
+          "predicate": {
+            "description": "A predicate name from the Epic 1 vocabulary.",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance",
+            "description": "Who produced it, and from what."
+          },
+          "subject": {
+            "description": "The FQN of the entity this is about.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "predicate",
+          "object",
+          "confidence",
+          "provenance"
+        ],
+        "type": "object"
+      },
       "CreateAnnouncementRequest": {
         "properties": {
           "endsAt": {
@@ -842,6 +876,24 @@
         "required": [
           "reason",
           "deprecatedAt"
+        ],
+        "type": "object"
+      },
+      "DiscardedClaim": {
+        "description": "Why a claim was thrown away, kept so a run can be diagnosed rather than\nmerely counted.",
+        "properties": {
+          "claim": {
+            "$ref": "#/components/schemas/Claim",
+            "description": "The claim that was thrown away."
+          },
+          "reason": {
+            "description": "Why it was thrown away.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim",
+          "reason"
         ],
         "type": "object"
       },
@@ -1227,6 +1279,23 @@
           }
         ]
       },
+      "EvidenceLocation": {
+        "description": "Where a claim's evidence lives, for a source shape `TextSpan` cannot\nexpress.\n\n**Data, not a variant — the same trade `Provenance`'s `extractor` field\nalready makes.** `kind` names the shape (`\"text\"`, `\"tabular\"`, `\"json\"`,\nmore later) as an open string; `location`'s shape is a documented\nconvention per `kind`, not enforced by the Rust type system. A closed\nenum would need a recompile for every new source format a future worker\nintroduces — exactly what this epic's binding requirement (adding a\nworker must not change the Rust domain model) rules out.",
+        "properties": {
+          "kind": {
+            "description": "The shape of `location` — `\"text\"`, `\"tabular\"`, `\"json\"`, or a kind\na future worker introduces.",
+            "type": "string"
+          },
+          "location": {
+            "description": "The location itself, shaped per `kind`'s own convention. For\n`\"text\"`, this is a serialized [`TextSpan`]."
+          }
+        },
+        "required": [
+          "kind",
+          "location"
+        ],
+        "type": "object"
+      },
       "ExportPreview": {
         "description": "What an export would contain, without writing it — Phase 3 item 3.15's\npreview. Counts, not the elements themselves: a reader deciding whether\na scope is too broad needs the size, not the data a moment before\ndownloading it.",
         "properties": {
@@ -1244,6 +1313,29 @@
         "required": [
           "nodes",
           "edges"
+        ],
+        "type": "object"
+      },
+      "ExtractionResult": {
+        "description": "What one extraction run produced.\n\n**The wire contract between graph-owl and any worker.** A Python worker\nreturns exactly this shape as JSON; the in-process rule-based extractor\nreturns it as a value. Neither path is privileged, which is what makes\nthe boundary stable — the in-process extractor is not a shortcut around\nthe contract, it is a client of it.",
+        "properties": {
+          "claims": {
+            "description": "The claims extracted.",
+            "items": {
+              "$ref": "#/components/schemas/Claim"
+            },
+            "type": "array"
+          },
+          "discarded": {
+            "description": "**Discards are reported, not silent.** Decision 1 says anything that\ndoes not fit the model is discarded *with a reason*; a run that\nquietly dropped half its output would be indistinguishable from one\nthat found nothing.",
+            "items": {
+              "$ref": "#/components/schemas/DiscardedClaim"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "claims"
         ],
         "type": "object"
       },
@@ -1995,6 +2087,36 @@
         },
         "type": "object"
       },
+      "ParsedDocument": {
+        "description": "A document reduced to what every parser can agree on.\n\nDeliberately *not* an AST. Markdown, PDF, OCR and a chat export have\nnothing structural in common, and a representation rich enough for one\nis wrong for the others — but all of them can produce text, and all of\nthem can say which part of it a claim came from.",
+        "properties": {
+          "mediaType": {
+            "description": "A hint at the original medium (`markdown`, `pdf`, `chat`), carried\nas a string rather than an enum for the same reason the extractor's\nidentity is: the list is open, and it is owned by whoever writes the\nnext worker.",
+            "type": "string"
+          },
+          "sections": {
+            "description": "Optional structure a parser happened to recover — a heading, a\ncell, a speaker turn. Nothing downstream *requires* sections, so a\nparser that recovers none is not degraded, merely less specific.",
+            "items": {
+              "$ref": "#/components/schemas/Section"
+            },
+            "type": "array"
+          },
+          "sourceId": {
+            "description": "Stable identity of the source, used for idempotent re-ingestion and\nfor `capturedAs` (decision 5). A path, a URL, a ticket id — whatever\nthe worker can reproduce for the same document next time.",
+            "type": "string"
+          },
+          "text": {
+            "description": "The document reduced to plain text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceId",
+          "mediaType",
+          "text"
+        ],
+        "type": "object"
+      },
       "Post": {
         "description": "One message in a thread. Author is always the authenticated principal —\nnever client-supplied (Slice A's own trust boundary).",
         "properties": {
@@ -2193,6 +2315,40 @@
         ],
         "type": "object"
       },
+      "Provenance": {
+        "description": "Who produced a claim, and from what.\n\n**Identity as data, not as a variant.** `extractor` is a name a worker\nchooses for itself (`markdown-rules`, `gpt-5-extractor`, `tesseract-ocr`)\nand `extractor_version` distinguishes two runs of the same one. Adding a\nworker is therefore a deployment, not a schema migration — which is the\nwhole point, since the workers are the part of this epic that does not\nexist yet.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/components/schemas/EvidenceLocation",
+            "description": "Where in the source this claim was found. **A claim without its\nsource is unverifiable** (decision 5), so this is not optional — a\nworker that cannot say where a claim came from is telling you\nsomething about the claim."
+          },
+          "extractedAt": {
+            "description": "When extraction ran.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "extractor": {
+            "description": "The extractor's own chosen name.",
+            "type": "string"
+          },
+          "extractorVersion": {
+            "description": "The extractor's own version.",
+            "type": "string"
+          },
+          "sourceId": {
+            "description": "The document the claim came from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceId",
+          "extractor",
+          "extractorVersion",
+          "extractedAt",
+          "evidence"
+        ],
+        "type": "object"
+      },
       "RateLimit": {
         "description": "How many writes an agent may make in a window.\n\n**Per agent, per capability, per window** — not a global cap. A single\nrunaway agent must not be able to spend everybody else's budget, and a\nrunaway *loop* is usually confined to one capability, so a per-capability\nlimit stops it while leaving the agent's other work alive.",
         "properties": {
@@ -2387,6 +2543,76 @@
           }
         ]
       },
+      "ReviewDecision": {
+        "description": "A reviewer's decision on a queued claim — Epic 21 x Epic 42 decision 2.\n\n`Accept` and `Edit` both confirm the claim — it earns the same\nprojection a confident extractor's claim gets — and differ only in\nwhether the subject/predicate/object that get projected are the ones the\nextractor proposed or the ones the reviewer corrected them to. `Reject`\ncarries a `reason` for the same standing rule resolution's review queue\nalready enforces: an unreasoned rejection teaches the extractor nothing\nand is unauditable when someone asks about it later.",
+        "oneOf": [
+          {
+            "description": "The claim as extracted is correct.",
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "accept"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The claim is correct in substance but the extractor got a detail\nwrong — the reviewer's values are what get projected, not the\nextractor's.",
+            "properties": {
+              "object": {
+                "description": "The corrected object.",
+                "type": "string"
+              },
+              "outcome": {
+                "enum": [
+                  "edit"
+                ],
+                "type": "string"
+              },
+              "predicate": {
+                "description": "The corrected predicate.",
+                "type": "string"
+              },
+              "subject": {
+                "description": "The corrected subject.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject",
+              "predicate",
+              "object",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The claim does not belong in the graph at all.",
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reject"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "Why — required, not merely accepted.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ScopeRef": {
         "description": "What a grant is restricted to.\n\n`None` on [`AgentGrant::scope`] means the whole estate, which is a real and\nsometimes correct answer — but it is spelled as an explicit `None` rather\nthan an empty list, so nobody reads \"no scopes\" as \"no access\".",
         "properties": {
@@ -2397,6 +2623,26 @@
         },
         "required": [
           "fqnPrefix"
+        ],
+        "type": "object"
+      },
+      "Section": {
+        "description": "A piece of document structure a parser happened to recover.",
+        "properties": {
+          "heading": {
+            "description": "The section's heading, if it has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "span": {
+            "$ref": "#/components/schemas/TextSpan",
+            "description": "Where in the document this section lies."
+          }
+        },
+        "required": [
+          "span"
         ],
         "type": "object"
       },
@@ -2478,6 +2724,26 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "TextSpan": {
+        "description": "Where in a source document a claim came from.\n\nByte offsets rather than line/column: a PDF worker and an OCR worker\nhave no meaningful notion of a line, and every representation can agree\non \"this range of the extracted text\".",
+        "properties": {
+          "end": {
+            "description": "The byte offset just past the span's end.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "description": "The byte offset of the span's start.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
         "type": "object"
       },
       "Thread": {

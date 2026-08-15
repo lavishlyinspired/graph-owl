@@ -2260,6 +2260,15 @@ pub static ROUTES: &[Route] = &[
     graph_owl_lpg_io::JsonGraphEdge,
     graph_owl_lpg_io::JsonGraphView,
     graph_owl_api::ExportPreview,
+    graph_owl_core::extraction::Claim,
+    graph_owl_core::extraction::Provenance,
+    graph_owl_core::extraction::EvidenceLocation,
+    graph_owl_core::extraction::ExtractionResult,
+    graph_owl_core::extraction::DiscardedClaim,
+    graph_owl_core::extraction::ParsedDocument,
+    graph_owl_core::extraction::Section,
+    graph_owl_core::extraction::TextSpan,
+    graph_owl_core::extraction::ReviewDecision,
 )))]
 struct Components;
 

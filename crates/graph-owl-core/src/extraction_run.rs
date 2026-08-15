@@ -157,7 +157,7 @@ pub fn needs_extraction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extraction::{Provenance, TextSpan};
+    use crate::extraction::{EvidenceLocation, Provenance, TextSpan};
 
     fn claim() -> Claim {
         Claim {
@@ -170,7 +170,11 @@ mod tests {
                 extractor: "mention-rules".to_string(),
                 extractor_version: "1".to_string(),
                 extracted_at: Utc::now(),
-                evidence: TextSpan::new(4, 39),
+                evidence: EvidenceLocation {
+                    kind: "text".to_string(),
+                    location: serde_json::to_value(TextSpan::new(4, 39))
+                        .expect("TextSpan serializes"),
+                },
             },
         }
     }

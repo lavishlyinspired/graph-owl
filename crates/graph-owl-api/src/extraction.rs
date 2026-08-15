@@ -18,7 +18,9 @@
 use std::collections::{HashMap, HashSet};
 
 use graph_owl_connectors::extraction::constrain;
-use graph_owl_core::extraction::{Claim, Disposition, ExtractionResult, ParsedDocument};
+use graph_owl_core::extraction::{
+    Claim, Disposition, EvidenceLocation, ExtractionResult, ParsedDocument, TextSpan,
+};
 use graph_owl_core::extraction_run::{EXTRACTION_GRAPH, content_fingerprint};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_core::projection::entity_sid;
@@ -434,6 +436,12 @@ fn split_rejected(
 }
 
 fn record(run_id: Uuid, claim: &Claim, state: &str) -> QueuedClaimRecord {
+    // `evidence_start`/`evidence_end` are byte offsets into the run's own
+    // `source_text` — a shape only `kind: "text"` evidence has. A tabular or
+    // JSON location has no byte range in prose, so it stores as `(0, 0)`,
+    // the same sentinel `Catalog::extraction_evidence` already falls back to
+    // for a span that does not resolve.
+    let span = evidence_text_span(&claim.provenance.evidence).unwrap_or(TextSpan::new(0, 0));
     QueuedClaimRecord {
         id: Uuid::new_v4(),
         run_id,
@@ -441,12 +449,24 @@ fn record(run_id: Uuid, claim: &Claim, state: &str) -> QueuedClaimRecord {
         predicate: claim.predicate.clone(),
         object: claim.object.clone(),
         confidence: claim.confidence,
-        evidence_start: i32::try_from(claim.provenance.evidence.start).unwrap_or(i32::MAX),
-        evidence_end: i32::try_from(claim.provenance.evidence.end).unwrap_or(i32::MAX),
+        evidence_start: i32::try_from(span.start).unwrap_or(i32::MAX),
+        evidence_end: i32::try_from(span.end).unwrap_or(i32::MAX),
         state: state.to_string(),
         decided_by: None,
         reason: None,
     }
+}
+
+/// The [`TextSpan`] a `"text"`-kind evidence location names, if it has one.
+///
+/// `None` for a non-`"text"` `kind` or a malformed `location` — both are
+/// untrusted input the moment an external worker can produce them, the same
+/// standing this file already gives an out-of-range span.
+fn evidence_text_span(evidence: &EvidenceLocation) -> Option<TextSpan> {
+    if evidence.kind != "text" {
+        return None;
+    }
+    serde_json::from_value(evidence.location.clone()).ok()
 }
 
 /// The confidence a confirmed claim carries.
@@ -545,7 +565,7 @@ pub fn windowed_passage(source: &str, start: usize, end: usize) -> Option<Eviden
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_owl_core::extraction::{Provenance, TextSpan};
+    use graph_owl_core::extraction::Provenance;
 
     fn claim(subject: &str, predicate: &str, confidence: f64) -> Claim {
         Claim {
@@ -558,7 +578,11 @@ mod tests {
                 extractor: "markdown-rules".to_string(),
                 extractor_version: "1".to_string(),
                 extracted_at: chrono::Utc::now(),
-                evidence: TextSpan::new(0, 4),
+                evidence: EvidenceLocation {
+                    kind: "text".to_string(),
+                    location: serde_json::to_value(TextSpan::new(0, 4))
+                        .expect("TextSpan serializes"),
+                },
             },
         }
     }

@@ -13,7 +13,7 @@
 //! extractor below, which gets no exemption for being local.
 
 use graph_owl_core::extraction::{
-    Claim, DiscardedClaim, ExtractionResult, ParsedDocument, Provenance, TextSpan,
+    Claim, DiscardedClaim, EvidenceLocation, ExtractionResult, ParsedDocument, Provenance, TextSpan,
 };
 
 /// The predicates a claim may use.
@@ -144,7 +144,10 @@ impl ClaimExtractor for MentionExtractor {
                         extractor: self.name().to_string(),
                         extractor_version: self.version().to_string(),
                         extracted_at: chrono::Utc::now(),
-                        evidence: span,
+                        evidence: EvidenceLocation {
+                            kind: "text".to_string(),
+                            location: serde_json::to_value(span).expect("TextSpan serializes"),
+                        },
                     },
                 });
                 let _ = offset;
@@ -238,7 +241,11 @@ mod tests {
                 extractor: "test".to_string(),
                 extractor_version: "1".to_string(),
                 extracted_at: chrono::Utc::now(),
-                evidence: TextSpan::new(0, 1),
+                evidence: EvidenceLocation {
+                    kind: "text".to_string(),
+                    location: serde_json::to_value(TextSpan::new(0, 1))
+                        .expect("TextSpan serializes"),
+                },
             },
         }
     }

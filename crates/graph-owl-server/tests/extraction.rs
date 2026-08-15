@@ -91,7 +91,7 @@ fn submission(subject: &str, confidence: f64, text: &str) -> Value {
                     "extractor": "pdf-worker",
                     "extractorVersion": "1",
                     "extractedAt": "2026-08-02T00:00:00Z",
-                    "evidence": { "start": 4, "end": 18 },
+                    "evidence": { "kind": "text", "location": { "start": 4, "end": 18 } },
                 },
             }],
         },
@@ -270,7 +270,7 @@ async fn nested_table(app: &axum::Router) -> String {
 fn submission_spanning(subject: &str, confidence: f64, text: &str) -> Value {
     let mut payload = submission(subject, confidence, text);
     payload["result"]["claims"][0]["provenance"]["evidence"] =
-        json!({ "start": 0, "end": text.len() });
+        json!({ "kind": "text", "location": { "start": 0, "end": text.len() } });
     payload
 }
 
@@ -731,7 +731,7 @@ async fn every_missing_identity_field_is_reported_in_one_response() {
 
 use graph_owl_api::{Catalog, UpsertAsset};
 use graph_owl_core::extraction::{
-    Claim, ExtractionResult, ParsedDocument, Provenance, ReviewDecision, TextSpan,
+    Claim, EvidenceLocation, ExtractionResult, ParsedDocument, Provenance, ReviewDecision, TextSpan,
 };
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
 use graph_owl_core::{AssetKind, Principal, PrincipalKind};
@@ -790,7 +790,11 @@ fn chain(
                 extractor: "runbook-rules".to_string(),
                 extractor_version: "1".to_string(),
                 extracted_at: chrono::Utc::now(),
-                evidence: TextSpan::new(0, text.len()),
+                evidence: EvidenceLocation {
+                    kind: "text".to_string(),
+                    location: serde_json::to_value(TextSpan::new(0, text.len()))
+                        .expect("TextSpan serializes"),
+                },
             },
         })
         .collect();
