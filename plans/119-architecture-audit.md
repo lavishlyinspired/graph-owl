@@ -515,8 +515,87 @@ until this slice. Fixed by adding `"gstr2b"` to
 (`test_gstr2b_rows_also_carry_a_normalized_invoice_key`), 54 backend
 tests green.
 
-Still backend-only, as scoped above: no dedicated Map/Reconcile UI slot
-for a third upload yet. `INV-AUG-111` (GSTR-2B-only, no matching GSTR-1
-row in this fixture) remains a deliberate, honest gap — realistic partial
-2A/2B coverage, not a modeling gap, and `MissingInBooks` would catch it
-too once evidence for that specific invoice is loaded.
+**Correction, 16 August 2026**: the "no dedicated Map/Reconcile UI slot"
+line above was wrong — found live, testing the real browser flow, not by
+reading the frontend source first. The Map page already renders a
+dedicated "GSTR-2A / GSTR-1" tab, auto-detected from the third uploaded
+file's kind, with no frontend change needed at all; only the Upload page's
+own copy still says "Books & GSTR-2B" and needs updating. `INV-AUG-111`
+(GSTR-2B-only, no matching GSTR-1 row in this fixture) remains a
+deliberate, honest gap — realistic partial 2A/2B coverage, not a modeling
+gap, and `MissingInBooks` would catch it too once evidence for that
+specific invoice is loaded.
+
+## 9. Cutover: native findings are now the UI's primary source — 16 August 2026
+
+Requested directly, following §8a's parity demonstration: stop running
+`reconciliation.py`'s own tolerance/matching math as what the UI shows,
+and read from graph-owl's native findings instead — the reason §5b gave
+for keeping the dual path ("cutover only happens once parity is actually
+demonstrated") was satisfied by §8a's live verification.
+
+**The whole cutover is backend-only.** Read all three frontend pages
+(`ReconcilePage.jsx`, `IntelligencePage.jsx`, `ActPage.jsx`, 1210 lines
+total) before writing anything: every one of them consumes only
+`overview.stats`/`classifications`/`supplier_health`/`ims_actions`/
+`results` — reconciliation.py's own output *shape*, never its internal
+math. Keeping that shape and swapping what populates it meant zero
+frontend changes were needed, verified by testing the real upload → Map →
+Reconcile → Intelligence → Act flow in the browser after the change,
+not just by unit tests.
+
+**New module, `app/native_findings.py`.** A finding attaches to a books/
+2B/GSTR-1 row by `(gstin, invoice_no)`, read off the finding's own
+`evidence` list — every one of packs/gst's 13 finding queries projects
+`?gstin`/`?number`, even though which side's subject the finding names
+(`subject` field) differs by rule (a books IRI for most, a GSTR-1 IRI for
+`MissingInBooks`, which has no books row to anchor on). Keying on the
+evidence pair rather than `subject` is what let one function handle every
+label uniformly. The 4-bucket taxonomy (`matched`/`review`/`only_books`/
+`only_gstr2b`) is kept as-is — a bigger taxonomy would be a frontend
+change this slice did not make — with new finding labels folded into the
+closest existing bucket and the *specific* distinction carried in the
+`reason` string instead (`_STATUS_BY_LABEL`).
+
+**One invoice can carry more than one finding** — confirmed live:
+INV-AUG-114 is both `Gstr1NotIn2b` (not yet in GSTR-2B) and
+`BooksGstr1Mismatch` (books and GSTR-1 actually disagree on the amount).
+`_STATUS_PRIORITY` picks the value-disagreement finding's `review` bucket
+over the not-yet-available finding's `only_books` bucket when both match,
+because the disagreement is the more actionable fact; both reasons still
+show, joined, so nothing is silently dropped for losing the tie-break.
+
+**`reconciliation.py` is now a fallback, not primary** — matching the
+best-effort posture every other graph-owl integration point in this file
+already has (`_install_graphowl_pack`, `_ingest_to_graphowl`): if the
+native engine is unreachable, `_select_results` degrades to
+`rc.reconcile()` rather than breaking the app. `reconciliation.py`'s pure
+normalization helpers (`normalize_gstin`, `normalize_invoice_no`,
+`to_float`, `record_tax`, `_row_view`) are reused directly by
+`native_findings.py` rather than reimplemented — they were never the part
+this cutover objected to; the tolerance/matching *decision* was.
+
+**A real ordering bug this surfaced**: `/api/reconcile` used to fire
+`_run_graphowl_reconcile()` in a background thread *after* returning its
+response, which was fine when the native engine's findings were only a
+side channel nobody's response depended on. Now that they are the
+primary source, the endpoint has to wait for them — `/api/reconcile`
+first joins every ingest thread `/api/upload` started (the native engine
+can only find what has actually landed), then runs
+`_run_graphowl_reconcile()` synchronously, then calls `_select_results`.
+
+Verified live against a fresh database with the same 3-file GSTR-2A
+fixture as §8a: 14 rows (up from reconciliation.py's 13, since
+`MissingInBooks` surfaces INV-AUG-112, which reconciliation.py has no way
+to see at all), 7 matched, 2 review, 3 only-books, 2 only-portal — read
+correctly by Reconcile, Intelligence, and Act. 68 backend tests green
+(13 new in `test_native_findings.py`, 2 new in `test_main.py` for the
+`_select_results` fallback decision), including a manual mutation check
+on the priority-ordering logic.
+
+**Known limitation, not fixed in this slice**: the Reconcile table's
+"Inv (GSTR-2B)" column shows GSTR-1/2A data for a `MissingInBooks` row
+(INV-AUG-112) — the column header is inherited from reconciliation.py's
+two-document taxonomy and does not yet distinguish "authority data" by
+which authority document it came from. Accurate, not mislabeled data,
+but a column name that doesn't yet say "GSTR-2B or GSTR-1/2A."

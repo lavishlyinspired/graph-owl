@@ -17,7 +17,7 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, exporters, graphowl_client, reconciliation as rc, sample_data
+from . import ai, exporters, graphowl_client, native_findings, reconciliation as rc, sample_data
 
 app = FastAPI(title="RecoNow — Intelligence for Indirect Tax", version="1.0.0")
 
@@ -148,6 +148,7 @@ def _reset() -> None:
     SESSION["normalized"] = {}
     SESSION["graphowl"] = {}
     SESSION["graphowl_reconcile"] = None
+    SESSION["graphowl_ingest_threads"] = []
 
 
 def _auto_map(headers: list[str]) -> dict[str, int | None]:
@@ -261,12 +262,17 @@ def _install_graphowl_pack() -> None:
         print(f"[graphowl] law data import skipped — {exc}")
 
 
-def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> None:
+def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> threading.Thread:
     """Land this upload's rows in graph-owl as durable graph subjects, in
     a background thread so a slow or absent graph-owl never delays the
     upload response. Records what happened in SESSION["graphowl"], which
     `overview()` deliberately never reads — this is additive, not a
-    change to the existing response shape."""
+    change to the existing response shape.
+
+    Returns the thread so `/api/upload` can hand it to `/api/reconcile`,
+    which joins every ingest thread before asking graph-owl to reconcile —
+    the native engine can only find what has actually landed
+    (plans/119-architecture-audit.md §9)."""
 
     def _run() -> None:
         try:
@@ -288,7 +294,9 @@ def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> None:
         except graphowl_client.IngestError as exc:
             SESSION["graphowl"][kind] = {"error": str(exc)}
 
-    threading.Thread(target=_run, daemon=True).start()
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
 
 
 @app.get("/api/health")
@@ -391,10 +399,12 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
         kind_order.append(kind)
     if not SESSION["datasets"]:
         return {"ok": False, "error": "No valid files uploaded."}
+    SESSION["graphowl_ingest_threads"] = []
     for kind in ("books", "gstr2b", "gstr1"):
         if kind in SESSION["datasets"]:
             SESSION["mapping"][kind] = _auto_map(SESSION["datasets"][kind]["headers"])
-            _ingest_to_graphowl(kind, SESSION["datasets"][kind], SESSION["mapping"][kind])
+            thread = _ingest_to_graphowl(kind, SESSION["datasets"][kind], SESSION["mapping"][kind])
+            SESSION["graphowl_ingest_threads"].append(thread)
     return overview()
 
 
@@ -415,25 +425,62 @@ def save_mapping(payload: dict) -> dict:
     return {"ok": True}
 
 
+def _select_results(
+    books: list[dict],
+    portal: list[dict],
+    gstr1: list[dict],
+    graphowl_reconcile: dict,
+    tolerance: float,
+) -> list[dict]:
+    """The one decision point between the two reconciliation sources —
+    plans/119-architecture-audit.md §9, the cutover. Native findings are
+    primary now that parity is demonstrated (scripts/verify-reconcile-
+    parity.py); `reconciliation.py`'s own tolerance/matching math is kept
+    only as the same best-effort fallback every other graph-owl
+    integration point in this file already has — an unreachable or
+    not-yet-installed native engine must not break the app, matching
+    `_install_graphowl_pack`'s and `_ingest_to_graphowl`'s own reasoning."""
+    if graphowl_reconcile.get("error"):
+        return rc.reconcile(books, portal, tolerance=tolerance)
+    return native_findings.reconcile(books, portal, gstr1, graphowl_reconcile.get("findings", []))
+
+
 @app.post("/api/reconcile")
 def run_reconcile() -> dict:
+    # The native engine can only find what has actually landed — join
+    # every ingest thread /api/upload started before asking it to run.
+    # Ingestion is small CSV rows over localhost, so this is a bounded,
+    # short wait in the normal case; the timeout keeps a genuinely stuck
+    # ingest from hanging this endpoint forever.
+    for thread in SESSION.get("graphowl_ingest_threads", []):
+        thread.join(timeout=15)
+
     books = _normalize(SESSION["datasets"]["books"], SESSION["mapping"].get("books", {}))
     portal = _normalize(SESSION["datasets"]["gstr2b"], SESSION["mapping"].get("gstr2b", {}))
-    SESSION["normalized"] = {"books": books, "gstr2b": portal}
-    SESSION["results"] = rc.reconcile(books, portal, tolerance=SESSION["tolerance"])
-    threading.Thread(target=_run_graphowl_reconcile, daemon=True).start()
+    gstr1 = (
+        _normalize(SESSION["datasets"]["gstr1"], SESSION["mapping"].get("gstr1", {}))
+        if "gstr1" in SESSION["datasets"]
+        else []
+    )
+    SESSION["normalized"] = {"books": books, "gstr2b": portal, "gstr1": gstr1}
+
+    _run_graphowl_reconcile()
+    SESSION["results"] = _select_results(
+        books, portal, gstr1, SESSION["graphowl_reconcile"], SESSION["tolerance"]
+    )
     return overview()
 
 
 def _run_graphowl_reconcile() -> None:
-    """Dual-path, per plans/119-architecture-audit.md §5b step 4: the
-    native engine runs ALONGSIDE reconciliation.py here, not instead of
-    it — cutover (steps 6-7) only happens once parity is actually
-    demonstrated, not assumed. Best-effort and backgrounded, same as
-    ingestion: graph-owl may not have finished landing this upload yet
-    (ingestion is its own background thread, started at /api/upload) or
-    may not be running at all, and neither should block or fail the
-    Python-side reconciliation this endpoint already returns."""
+    """Runs graph-owl's native rule engine and records what it found in
+    SESSION["graphowl_reconcile"] — read by `_select_results` above (the
+    primary path, since the 16 August 2026 cutover) and by
+    `/api/graphowl/reconcile` (a diagnostic view of the same data).
+
+    Synchronous, not backgrounded — `/api/reconcile`'s response now
+    depends on this having finished. Still best-effort: graph-owl may not
+    be running at all, and that must degrade `_select_results` to the
+    Python fallback rather than fail the endpoint."""
     try:
         result = run_findings(graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
         findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)

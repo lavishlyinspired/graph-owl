@@ -15,7 +15,8 @@ this session's use of realistic sample data happened to surface.
 
 from __future__ import annotations
 
-from app.main import _auto_map
+from app.main import _auto_map, _select_results
+from app.reconciliation import STATUS_MATCHED
 
 
 def test_maps_gstr2b_style_tax_component_headers():
@@ -37,3 +38,49 @@ def test_still_maps_the_books_style_short_headers():
     assert mapping["igst"] == 1
     assert mapping["cgst"] == 2
     assert mapping["sgst"] == 3
+
+
+class TestSelectResultsCutsOverToNativeFindings:
+    """plans/119-architecture-audit.md §9 — reconciliation.py's own
+    tolerance/matching math is no longer the primary source `/api/reconcile`
+    returns. `_select_results` is the one decision point that chooses
+    between the two, kept small and pure so this decision has its own test
+    rather than being buried inside the endpoint."""
+
+    def _book(self, **overrides):
+        base = {
+            "invoice_no": "INV-1", "supplier_gstin": "27AAAFN2938K1Z2",
+            "supplier_name": "Nimbus", "taxable": 100000, "igst": 18000,
+            "cgst": 0, "sgst": 0, "cess": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_a_healthy_graphowl_reconcile_uses_native_findings(self):
+        # No findings at all for this invoice — native says Matched, which
+        # reconciliation.py's own tolerance math (never consulted here)
+        # would not necessarily agree with; using native's answer is the
+        # whole point of the cutover.
+        results = _select_results(
+            books=[self._book()],
+            portal=[self._book()],
+            gstr1=[],
+            graphowl_reconcile={"findings": []},
+            tolerance=1.0,
+        )
+        assert results[0]["status"] == STATUS_MATCHED
+
+    def test_graphowl_unreachable_falls_back_to_reconciliation_py(self):
+        # Best-effort, matching every other graph-owl integration point in
+        # this file: a laptop with no graph-owl running must not break the
+        # app, so an unreachable native engine degrades to the old
+        # Python-side math rather than returning nothing at all.
+        results = _select_results(
+            books=[self._book()],
+            portal=[self._book()],
+            gstr1=[],
+            graphowl_reconcile={"error": "connection refused"},
+            tolerance=1.0,
+        )
+        assert results[0]["status"] == STATUS_MATCHED
+        assert len(results) == 1
