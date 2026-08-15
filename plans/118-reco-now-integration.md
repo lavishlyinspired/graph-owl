@@ -1,7 +1,15 @@
-# Plan 118 — reco-now as a pack-owning integrator
+# Plan 118 — reco-now as a graph-owl integrator
 
 **Branch**: main (committed directly, per `CLAUDE.md`)
-**Status**: Slice 1 in progress, 15 August 2026.
+**Status**: Slice 1 done; Slice 2's native reconciliation done for 3 of
+`packs/gst`'s finding rules. **Title and Slice 1 setup below are
+historical** — reco-now started as (and this plan's title said)
+"pack-owning": it had its own `ext-apps/Reco/graphowl-pack/`. Consolidated
+into `packs/gst` directly on 16 August 2026 —
+`plans/119-architecture-audit.md` §7 has the full record and the
+reasoning. reco-now owns no pack; it ingests straight into `packs/gst`'s
+namespace. The setup steps below describe what Slice 1 did *then*, not
+the current file layout.
 **Depends on**: Epic 105 (`plans/105-domain-neutrality.md`) — the pack format, the
 generic loader, and the DN-3 acceptance bar this plan reuses rather than
 re-designs.

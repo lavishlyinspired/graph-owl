@@ -379,3 +379,90 @@ record — do not delete", covering `90-done-table-entity.md` and
 suggests a plan outside that convention needs the same treatment.
 
 No files were moved or deleted to produce this audit.
+
+## 7. Full consolidation: one GST pack, not two — 16 August 2026
+
+**Superseded §3.1/§5c/§6.1's "two pack registrations" architecture.** A
+direct question — "why maintain the GST ontology and pack.toml
+separately in the reco repo, why not just have one GST pack inside
+graph-owl/packs/gst" — was right, and the earlier reasoning for keeping
+two (namespace ownership for reco-now's 6 fields, finding attribution)
+didn't survive being checked against what those fields actually are:
+
+- **4 of the 6 "reco-now-only" fields are genuine GST-document concepts,
+  not one integrator's CSV format.** HSN code and note type are standard
+  fields on any GST invoice/return. IMS status is a real GSTR-2B/Invoice
+  Management System concept — the recipient's accept/reject/pending
+  decision on a filed invoice. A credit/debit note's original-invoice
+  reference is a GST document relationship. Only `voucherType`/
+  `voucherNumber` lean toward bookkeeping-system vocabulary rather than
+  statute vocabulary — kept alongside the other four rather than split
+  into a third pack for two fields.
+- **The attribution concern was theoretical, not load-bearing.**
+  `GET /findings?pack=gst` mixing reco-now's real findings with
+  `packs/gst`'s own demo-fixture findings only matters if both are ever
+  loaded into the same deployment — and reco-now's deployment already,
+  deliberately, never loads `packs/gst`'s fixtures
+  (`include_documents=False`). There is no actual mixing to attribute.
+
+**What changed:**
+
+- `packs/gst/ontology.ttl` and `pack.toml` gained the 6 predicates
+  directly (`hsnCode`, `imsStatus`, `noteType`, `originalInvoiceNumber`,
+  `voucherType`, `voucherNumber`) — see `ontology.ttl`'s own comment on
+  them for the per-field reasoning above, kept there rather than only
+  here so it survives independent of this plan file.
+- `ext-apps/Reco/graphowl-pack/` — pack.toml, ontology.ttl, the symlinked
+  queries and law files, its own `queries/README.md` — **deleted
+  entirely.** There is exactly one GST pack.
+- `ext-apps/Reco/backend/app/graphowl_client.py` — rewritten around a
+  single `NAMESPACE`/`PACK_ID = "gst"`; the `PREDICATES` table is a flat
+  `field -> local name` map again (no more `(prefix, local)` tuples,
+  nothing to route between two namespaces).
+- `main.py`'s `_install_graphowl_pack` — one `load_pack` call
+  (`include_documents=False`), plus a direct import of the 2 law
+  documents (`law/sections.ttl`, `law/rule-36-4.ttl`) read straight from
+  `packs/gst/law/` — still needed even with one pack, since
+  `include_documents=False` excludes *all* of `packs/gst`'s documents
+  (demo fixtures and law data alike; `load_pack` has no partial mode) and
+  the law data is not a fixture. `run_findings`/`GET /findings` now use
+  `graphowl_client.PACK_ID` ("gst") instead of "reco".
+
+**Verified unchanged, not just re-asserted**: fresh database,
+`ext-apps/Reco/scripts/verify-reconcile-parity.py` re-run end to end —
+identical result to the pre-consolidation run (`{total: 11, matched: 7,
+review: 1, only_books: 2, only_gstr2b: 1}`, the same 4 native findings).
+The reconciliation logic this whole exercise was protecting did not move.
+
+**What this does *not* change**: the `only_gstr2b` coverage gap (§5c) is
+still open — `MissingInBooks` still needs GSTR-1-shaped evidence reco-now
+doesn't ingest yet. See §8 for that, now folded together with a second,
+related ask: GSTR-2A support.
+
+## 8. Next: GSTR-2A support, which closes §5c's gap as a side effect
+
+Requested directly, and worth doing together rather than separately: add
+a third reco-now data source (GSTR-2A, the continuously-refreshed view of
+supplier filings, distinct from GSTR-2B's frozen monthly snapshot) for
+books-vs-2A-vs-2B reconciliation.
+
+**`packs/gst/ontology.ttl` already has the right model for this, and its
+own comment says why 2A gets no separate class**: *"There is deliberately
+no `gst:Gstr2aInvoice`. 2A is a revolving view over the same
+supplier-declared data this class already carries [`gst:Gstr1Invoice`];
+modelling both would give the graph two sources for one fact with no
+query that needs the distinction."* So reco-now's GSTR-2A upload should
+ingest as `gst:Gstr1Invoice` — reusing the existing class exactly as
+`packs/gst` already intends, not inventing a new one.
+
+**This is why it closes §5c's gap rather than needing new pack content.**
+`MissingInBooks`, `SupplierNotFiled`, `Gstr1NotIn2b`, and
+`BooksGstr1Mismatch` are already fully implemented in `packs/gst`,
+already registered, already reachable — they only ever needed
+`gst:Gstr1Invoice`-shaped data to exist in the store, which nothing in
+reco-now's upload flow has produced until now. Wiring a 2A upload is
+expected to unlock all four at once, not just the one named in §5c.
+
+Not designed or implemented in this session — named here so the next
+pass starts from packs/gst's own stated model rather than reinventing
+the 2A/2B distinction.

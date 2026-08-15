@@ -1,16 +1,17 @@
 """RED tests for reco-now's graph-owl ingestion client.
 
-plans/118-reco-now-integration.md Slice 1, corrected per
-plans/119-architecture-audit.md §3.1/§6: reco-now's pack is an EXTENSION of
-packs/gst, not a parallel copy of it. 11 of the 17 fields reuse `gst:`
-predicates and `gst:PurchaseInvoice`/`gst:Gstr2bInvoice` directly; only the
-6 fields packs/gst's ontology doesn't have get a `reco:` predicate.
+plans/118-reco-now-integration.md Slice 1, corrected twice per
+plans/119-architecture-audit.md — most recently (16 August 2026) by
+merging reco-now's own extension pack entirely into `packs/gst`. There is
+now exactly one GST pack; this client ingests everything under its
+namespace, `gst:`, with no second prefix and no second pack registration.
 
 Two layers, tested differently: `rows_to_turtle` is pure and gets plain
-unit tests; `import_document` talks HTTP and gets the same "a real local
-double, not a mock" discipline connectors/python/tests/test_loader.py
-already uses — not a live graph-owl-server, which is what the manual
-end-to-end verification step (Slice 1's "Done when") is for.
+unit tests; `import_document`/`list_findings` talk HTTP and get the same
+"a real local double, not a mock" discipline
+connectors/python/tests/test_loader.py already uses — not a live
+graph-owl-server, which is what the manual end-to-end verification step
+(and ext-apps/Reco/scripts/verify-reconcile-parity.py) is for.
 """
 
 from __future__ import annotations
@@ -25,16 +26,14 @@ import pytest
 
 from app.graphowl_client import IngestError, import_document, list_findings, rows_to_turtle
 
-#: Fields reco-now shares with packs/gst — asserted as `gst:` predicates.
-GST_PREDICATES = (
-    "invoiceNumber", "supplierGstin", "supplierName", "taxableValue",
-    "invoiceDate", "placeOfSupply", "reverseCharge",
+#: Every field this client asserts as a `gst:` predicate. `supplier_gstin`
+#: is deliberately excluded — it lands on the Supplier subject, not as a
+#: direct predicate on the invoice (TestCanonicalLinking covers that).
+ALL_PREDICATES = (
+    "invoiceNumber", "supplierName", "taxableValue", "invoiceDate",
+    "placeOfSupply", "hsnCode", "imsStatus", "reverseCharge", "noteType",
+    "voucherType", "originalInvoiceNumber", "voucherNumber",
     "igst", "cgst", "sgst", "cess",
-)
-#: The 6 fields packs/gst's ontology does not have — reco-now's own.
-RECO_PREDICATES = (
-    "hsnCode", "imsStatus", "noteType", "voucherType",
-    "voucherNumber", "originalInvoiceNumber",
 )
 
 
@@ -79,8 +78,8 @@ class TestRowsToTurtle:
         # asserted, every comparison against an ISO "20XX-01-01" provision
         # failed silently (no exception, just zero results), because "2"
         # sorts after "0" character-by-character. ISO YYYY-MM-DD is the
-        # only format both this pack's dates and packs/gst's law dates can
-        # be compared under with plain `<=`.
+        # only format both this pack's dates and its own law dates can be
+        # compared under with plain `<=`.
         turtle = rows_to_turtle([_row(invoice_date="07-08-2026")], "books")
         assert 'gst:invoiceDate "2026-08-07"' in turtle
         assert "07-08-2026" not in turtle
@@ -91,51 +90,53 @@ class TestRowsToTurtle:
         turtle = rows_to_turtle([_row(invoice_date="not-a-date")], "books")
         assert 'gst:invoiceDate "not-a-date"' in turtle
 
-    def test_fully_populated_row_carries_every_predicate_under_the_right_prefix(self):
+    def test_fully_populated_row_carries_every_predicate(self):
         turtle = rows_to_turtle([_row()], "books")
-        for predicate in GST_PREDICATES:
+        for predicate in ALL_PREDICATES:
             assert f"gst:{predicate}" in turtle, f"missing gst:{predicate}"
-        for predicate in RECO_PREDICATES:
-            assert f"reco:{predicate}" in turtle, f"missing reco:{predicate}"
 
-    def test_shared_fields_never_land_under_the_reco_prefix(self):
-        # The regression this fix exists for: a shared field must not be
-        # asserted twice under two unrelated predicates.
+    def test_nothing_is_ever_asserted_under_a_reco_prefix(self):
+        # Regression guard: the first two versions of this pack
+        # duplicated (v1) or partially duplicated (v2) packs/gst's own
+        # vocabulary under a separate reco: namespace before both were
+        # corrected. There is now exactly one pack and one prefix — this
+        # pins that down so it can't quietly come back a third time.
         turtle = rows_to_turtle([_row()], "books")
-        for predicate in GST_PREDICATES:
-            assert f"reco:{predicate}" not in turtle, f"gst:{predicate} duplicated as reco:{predicate}"
+        assert "reco:" not in turtle
+        assert "@prefix reco" not in turtle
 
-    def test_declares_both_prefixes(self):
+    def test_declares_the_gst_prefix_once(self):
         turtle = rows_to_turtle([_row()], "books")
+        assert turtle.count("@prefix gst:") == 1
         assert "@prefix gst: <https://graph-owl.dev/packs/gst#>" in turtle
-        assert "@prefix reco: <https://reconow.dev/pack#>" in turtle
 
-    def test_books_kind_mints_the_shared_gst_purchase_invoice_class(self):
+    def test_books_kind_mints_the_purchase_invoice_class(self):
         turtle = rows_to_turtle([_row()], "books")
         assert "a gst:PurchaseInvoice" in turtle
         assert "gst:Gstr2bInvoice" not in turtle
-        assert "reco:BooksInvoice" not in turtle  # the old, duplicated class
 
-    def test_gstr2b_kind_mints_the_shared_gst_2b_invoice_class(self):
+    def test_gstr2b_kind_mints_the_2b_invoice_class(self):
         turtle = rows_to_turtle([_row()], "gstr2b")
         assert "a gst:Gstr2bInvoice" in turtle
         assert "gst:PurchaseInvoice" not in turtle
-        assert "reco:PortalInvoice" not in turtle  # the old, duplicated class
 
     def test_unknown_kind_is_rejected(self):
         with pytest.raises(ValueError):
             rows_to_turtle([_row()], "not-a-real-kind")
 
     @pytest.mark.parametrize("blank", [None, "", float("nan")])
-    def test_absent_reco_field_is_omitted_not_written_as_a_blank_literal(self, blank):
+    def test_absent_field_is_omitted_not_written_as_a_blank_literal(self, blank):
         turtle = rows_to_turtle([_row(ims_status=blank, note_type=blank)], "books")
-        assert "reco:imsStatus" not in turtle
-        assert "reco:noteType" not in turtle
+        assert "gst:imsStatus" not in turtle
+        assert "gst:noteType" not in turtle
+        assert '""' not in turtle
 
     @pytest.mark.parametrize("blank", [None, "", float("nan")])
-    def test_absent_gst_field_is_also_omitted_not_written_as_a_blank_literal(self, blank):
-        # The omission rule applies uniformly regardless of which prefix a
-        # field ends up under — this pins that down explicitly.
+    def test_absent_field_is_omitted_regardless_of_which_one(self, blank):
+        # Every field goes through the same omission rule now that
+        # there's only one predicate table — this pins that down for a
+        # field that used to be gst:-mapped (supplierName) too, not just
+        # the ones that used to be reco:-mapped.
         turtle = rows_to_turtle([_row(supplier_name=blank, place_of_supply=blank)], "books")
         assert "gst:supplierName" not in turtle
         assert "gst:placeOfSupply" not in turtle
@@ -149,13 +150,11 @@ class TestRowsToTurtle:
         turtle = rows_to_turtle([_row(ims_status=None)], "books")
         assert "gst:supplierName" in turtle
         assert "gst:taxableValue" in turtle
-        assert "reco:imsStatus" not in turtle
+        assert "gst:imsStatus" not in turtle
 
     def test_quote_backslash_and_newline_are_escaped(self):
         # Actual value: O"Brien \ Textiles<newline>Unit 2 — a real supplier
-        # name and a real multi-line note can both hit this. supplierName
-        # is now a gst: field, so this also proves escaping isn't tied to
-        # one particular namespace's predicates.
+        # name and a real multi-line note can both hit this.
         turtle = rows_to_turtle(
             [_row(supplier_name='O"Brien \\ Textiles\nUnit 2')], "books"
         )
@@ -165,38 +164,6 @@ class TestRowsToTurtle:
         # An unescaped quote/backslash would corrupt Turtle parsing past
         # that point — one subject block proves it did not.
         assert turtle.count("a gst:PurchaseInvoice") == 1
-
-    def test_same_invoice_number_different_supplier_gives_distinct_subjects(self):
-        rows = [
-            _row(invoice_no="INV-9", supplier_gstin="27AAAFN2938K1Z2"),
-            _row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7"),
-        ]
-        turtle = rows_to_turtle(rows, "books")
-        # The per-source invoice subject specifically (not the Supplier or
-        # canonical blocks, which every row also emits now).
-        subjects = [
-            line for line in turtle.splitlines() if line.startswith("<https://reconow.dev/pack#books-")
-        ]
-        assert len(subjects) == 2
-        assert subjects[0] != subjects[1]
-
-    def test_subjects_are_minted_under_the_pack_s_own_registered_namespace(self):
-        # Regression: subjects were originally minted under a separate
-        # "https://reconow.dev/data/..." namespace, which POST
-        # /namespaces never declares — graph-owl refused every row with
-        # "not in a namespace this store recognises" (found by actually
-        # running the upload, not by reading the code). Only the pack's
-        # own NAMESPACE is ever registered, so every subject must live
-        # under it — the same shape packs/gst's own fixtures use
-        # (`gst:pr-INV-1001`, not a separate data prefix). Instance
-        # identity stays under reco:'s own namespace even though the
-        # *type* and most *predicates* are now gst: — a subject's IRI and
-        # its rdf:type are independent facts.
-        from app.graphowl_client import NAMESPACE
-
-        turtle = rows_to_turtle([_row()], "books")
-        subject_line = next(line for line in turtle.splitlines() if line.startswith("<"))
-        assert subject_line.startswith(f"<{NAMESPACE}")
 
     def test_a_real_non_nan_float_is_present_not_treated_as_absent(self):
         # pandas hands back float64 for a numeric column even when every
@@ -211,17 +178,30 @@ class TestRowsToTurtle:
         # truly empty — `value == ""` (no strip) would let this through
         # as a recorded-blank fact instead of an absent one.
         turtle = rows_to_turtle([_row(note_type="   ")], "books")
-        assert "reco:noteType" not in turtle
+        assert "gst:noteType" not in turtle
 
     def test_invoice_number_with_slashes_is_percent_encoded_in_the_subject(self):
         # Real GST invoice numbers commonly look like "INF/23-24/0456" —
         # an un-encoded "/" would silently change the IRI's path shape.
         turtle = rows_to_turtle([_row(invoice_no="INF/23-24/0456")], "books")
         subject_line = next(
-            line for line in turtle.splitlines() if line.startswith("<https://reconow.dev/pack#books-")
+            line for line in turtle.splitlines() if line.startswith("<https://graph-owl.dev/packs/gst#books-")
         )
         assert "INF/23-24/0456" not in subject_line
         assert "INF%2F23-24%2F0456" in subject_line
+
+    def test_same_invoice_number_different_supplier_gives_distinct_subjects(self):
+        rows = [
+            _row(invoice_no="INV-9", supplier_gstin="27AAAFN2938K1Z2"),
+            _row(invoice_no="INV-9", supplier_gstin="29AAECK4410L1Z7"),
+        ]
+        turtle = rows_to_turtle(rows, "books")
+        subjects = [
+            line for line in turtle.splitlines()
+            if line.startswith("<https://graph-owl.dev/packs/gst#books-")
+        ]
+        assert len(subjects) == 2
+        assert subjects[0] != subjects[1]
 
 
 class TestCanonicalLinking:
@@ -230,40 +210,33 @@ class TestCanonicalLinking:
     walk a real graph shape: a canonical subject linked to each per-source
     invoice via gst:recordedIn/gst:reflectedIn, and each per-source invoice
     linked to a real gst:Supplier subject via gst:issuedBy (confirmed by
-    reading amount-mismatch.sparql/tax-head-mismatch.sparql/
-    missing-in-gstr2b.sparql in full — not assumed from field-level
-    vocabulary compatibility, which is what the first pass at this got
-    wrong). Without this, every one of packs/gst's finding queries would
-    silently match zero of reco-now's subjects."""
+    reading the queries in full, not assumed from field-level vocabulary
+    compatibility). Without this, every one of packs/gst's finding queries
+    would silently match zero of reco-now's subjects."""
 
     def test_supplier_subject_is_a_gst_supplier_with_its_gstin(self):
         turtle = rows_to_turtle([_row(supplier_gstin="27AAAFN2938K1Z2")], "books")
         assert "a gst:Supplier" in turtle
         assert 'gst:supplierGstin "27AAAFN2938K1Z2"' in turtle
 
-    def test_supplier_gstin_no_longer_lands_directly_on_the_invoice(self):
-        # It now lives on the Supplier subject, reached via gst:issuedBy —
+    def test_supplier_gstin_lands_exactly_once_on_the_supplier_not_the_invoice(self):
+        # It lives on the Supplier subject, reached via gst:issuedBy —
         # matching packs/gst's own queries (`?supplier gst:supplierGstin
-        # ?gstin`, never `?purchase gst:supplierGstin ?gstin`). Asserting
-        # it in both places would be exactly the kind of redundant,
-        # unrelated-looking duplication plans/119-architecture-audit.md
-        # §3.1 already found and fixed once.
+        # ?gstin`, never `?purchase gst:supplierGstin ?gstin`).
         turtle = rows_to_turtle([_row()], "books")
-        # supplierGstin must appear exactly once in the whole document —
-        # on the Supplier subject — not additionally on the invoice.
         assert turtle.count("gst:supplierGstin") == 1
 
     def test_the_invoice_carries_an_issuedby_edge_to_the_supplier(self):
         turtle = rows_to_turtle([_row(supplier_gstin="27AAAFN2938K1Z2")], "books")
-        assert "gst:issuedBy <https://reconow.dev/pack#supplier-27AAAFN2938K1Z2>" in turtle
+        assert "gst:issuedBy <https://graph-owl.dev/packs/gst#supplier-27AAAFN2938K1Z2>" in turtle
 
     def test_a_books_row_links_its_canonical_subject_via_recordedin(self):
         turtle = rows_to_turtle(
             [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "books"
         )
         assert (
-            "<https://reconow.dev/pack#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
-            "    gst:recordedIn <https://reconow.dev/pack#books-27AAAFN2938K1Z2-INV-AUG-101> ."
+            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "    gst:recordedIn <https://graph-owl.dev/packs/gst#books-27AAAFN2938K1Z2-INV-AUG-101> ."
         ) in turtle
         assert "gst:reflectedIn" not in turtle
 
@@ -272,8 +245,8 @@ class TestCanonicalLinking:
             [_row(invoice_no="INV-AUG-101", supplier_gstin="27AAAFN2938K1Z2")], "gstr2b"
         )
         assert (
-            "<https://reconow.dev/pack#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
-            "    gst:reflectedIn <https://reconow.dev/pack#gstr2b-27AAAFN2938K1Z2-INV-AUG-101> ."
+            "<https://graph-owl.dev/packs/gst#invoice-27AAAFN2938K1Z2-INV-AUG-101>\n"
+            "    gst:reflectedIn <https://graph-owl.dev/packs/gst#gstr2b-27AAAFN2938K1Z2-INV-AUG-101> ."
         ) in turtle
         assert "gst:recordedIn" not in turtle
 
@@ -303,13 +276,13 @@ class TestCanonicalLinking:
         assert 'gst:taxAmount "3960"' in turtle
 
     def test_gstr2b_rows_do_not_carry_a_combined_tax_amount(self):
-        # None of the 3 findings wired in this slice (PotentialMismatch,
+        # None of the 3 findings wired so far (PotentialMismatch,
         # AmountMismatch, TaxHeadMismatch) read gst:taxAmount off the
         # Gstr2bInvoice side — only itc-not-available/reverse-charge do,
-        # and those are deferred (Reco has no itcAvailable field at all,
-        # and its reverse_charge values are "Yes"/"No" text, not the "R"/
-        # "N" codes those queries filter on). Asserting a field nothing
-        # reads is speculative scope, not a fix.
+        # and those are deferred (no itcAvailable field, and reverseCharge
+        # values are "Yes"/"No" text, not the "R"/"N" codes those queries
+        # filter on). Asserting a field nothing reads is speculative
+        # scope, not a fix.
         turtle = rows_to_turtle([_row(igst=3960, cgst=0, sgst=0, cess=0)], "gstr2b")
         assert "gst:taxAmount" not in turtle
 
@@ -384,13 +357,13 @@ class TestImportDocument:
     def test_posts_turtle_with_source_and_format_query_params(self):
         received: list[dict] = []
         with _server(received) as url:
-            result = import_document(url, "reco-books-upload-1", "@prefix reco: <x> .\n")
+            result = import_document(url, "gst-books-upload-1", "@prefix gst: <x> .\n")
         assert len(received) == 1
         call = received[0]
         assert call["path"] == "/graph/import/rdf"
-        assert call["query"]["source"] == "reco-books-upload-1"
+        assert call["query"]["source"] == "gst-books-upload-1"
         assert call["query"]["format"] == "turtle"
-        assert call["raw"] == b"@prefix reco: <x> .\n"
+        assert call["raw"] == b"@prefix gst: <x> .\n"
         assert result == {"landed": ["x"], "skipped": [], "rejected": []}
 
     def test_sends_bearer_token_when_given(self):
@@ -417,13 +390,13 @@ class TestImportDocument:
 
 
 class TestListFindings:
-    def test_gets_findings_scoped_to_the_reco_pack(self):
+    def test_gets_findings_scoped_to_the_gst_pack(self):
         received: list[dict] = []
         sample = [{"id": "f1", "label": "gst:AmountMismatch", "subject": "x"}]
         with _server(received, findings_response=sample) as url:
             result = list_findings(url)
         assert received[0]["path"] == "/findings"
-        assert received[0]["query"]["pack"] == "reco"
+        assert received[0]["query"]["pack"] == "gst"
         assert result == sample
 
     def test_sends_bearer_token_when_given(self):

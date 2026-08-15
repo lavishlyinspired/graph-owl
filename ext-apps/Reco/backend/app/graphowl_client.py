@@ -1,17 +1,21 @@
-"""reco-now's own client for its graph-owl pack — an EXTENSION of
-packs/gst, not a parallel copy of it.
+"""reco-now's own client for graph-owl's canonical GST pack.
 
-plans/118-reco-now-integration.md, Slice 1; corrected per
-plans/119-architecture-audit.md §3.1/§6. The first version of this module
-(15 August 2026) minted `reco:invoiceNumber`, `reco:supplierGstin`, etc. —
-11 predicates that duplicate ones `packs/gst` already registers — under an
-unrelated namespace nothing relates back to the pack that has them. Fixed
-by reusing `gst:` directly for every field packs/gst already carries, and
-registering `reco:` predicates only for the 6 it doesn't
-(`graphowl-pack/pack.toml`). Row subjects mint `gst:PurchaseInvoice`/
-`gst:Gstr2bInvoice` as their type for the same reason — packs/gst's
-ontology already draws exactly reco-now's books/gstr2b distinction
-("taxpayer's register" / "as filed by the supplier").
+plans/118-reco-now-integration.md, Slice 1; corrected twice per
+plans/119-architecture-audit.md. First correction (§3.1): stop
+re-declaring predicates `packs/gst` already has under an unrelated
+namespace. Second, larger correction (16 August 2026, this version): stop
+maintaining a *second* pack at all. reco-now had its own
+`graphowl-pack/pack.toml` registering 6 fields (`hsnCode`, `imsStatus`,
+`noteType`, `originalInvoiceNumber`, `voucherType`, `voucherNumber`)
+`packs/gst` didn't carry — but none of the six turned out to be specific
+to how reco-now's own CSVs happen to be shaped; four are genuine
+GST-document fields (HSN code, IMS status, note type, an original invoice
+reference) and the other two are common bookkeeping vocabulary, not
+reco-now's invention. Merged into `packs/gst/ontology.ttl` and
+`pack.toml` directly, so there is exactly one GST pack, one file to keep
+in sync as the domain grows, and this module now ingests entirely under
+`packs/gst`'s own namespace — no `reco:` predicates, no second pack
+registration, no second `POST /packs/{id}/reconcile` call.
 
 stdlib `urllib` only, matching this repo's own convention for every
 graph-owl Python client (`connectors/python/graph_owl_packs/loader.py`'s
@@ -22,11 +26,11 @@ Two responsibilities, kept separate because one is pure and one is not:
 - `rows_to_turtle` — normalized rows in, one RDF subject per row out.
   No I/O, so every case in it is a fast unit test.
 - `import_document` — one `POST /graph/import/rdf` call, landing a
-  Turtle document under a caller-named source. Installing packs/gst and
-  then this pack (order matters — see `main.py`'s `_install_graphowl_pack`)
-  is a one-time step at backend startup using the already-shipped,
-  already-tested `graph_owl_packs.loader.load_pack` — this module does
-  not reimplement that.
+  Turtle document under a caller-named source. Installing `packs/gst`'s
+  vocabulary (namespace + predicates, no demo fixtures — `main.py`'s
+  `_install_graphowl_pack`) is a one-time step at backend startup using
+  the already-shipped, already-tested `graph_owl_packs.loader.load_pack`
+  — this module does not reimplement that.
 """
 
 from __future__ import annotations
@@ -39,13 +43,13 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
-#: Must match graphowl-pack/pack.toml's [pack] table.
-NAMESPACE = "https://reconow.dev/pack#"
-#: The pack this one extends. Must be loaded first — see main.py.
-GST_NAMESPACE = "https://graph-owl.dev/packs/gst#"
+#: The one pack this whole module speaks — graph-owl's own canonical GST
+#: pack. Must match `packs/gst/pack.toml`'s `[pack]` table exactly.
+PACK_ID = "gst"
+NAMESPACE = "https://graph-owl.dev/packs/gst#"
 
 #: reco-now's own two dataset kinds (main.py's `kind` values) -> the
-#: *shared* gst: class each becomes. Not reco-now's own class: packs/gst's
+#: `packs/gst` class each becomes — not reco-now's own class: the
 #: ontology already draws this exact distinction ("Purchase invoice
 #: (taxpayer's register)" / "GSTR-2B invoice (as filed by the supplier)").
 CLASS_BY_KIND = {
@@ -53,32 +57,31 @@ CLASS_BY_KIND = {
     "gstr2b": "gst:Gstr2bInvoice",
 }
 
-#: Row field (main.py's FIELD_LABELS keys) -> (namespace prefix, predicate
-#: local name). 11 of the 17 fields reuse a `gst:` predicate packs/gst
-#: already registers; only the 6 packs/gst does not have get `reco:`.
-#: Matches graphowl-pack/pack.toml's [[predicates]] and ontology.ttl
-#: exactly, as one table, so they cannot drift silently against each other.
-#: `supplier_gstin` is deliberately not here — packs/gst's own finding
-#: queries read it off the *Supplier* subject (`?supplier gst:supplierGstin
-#: ?gstin`), reached via `gst:issuedBy`, never as a direct literal on the
-#: invoice. `rows_to_turtle` asserts it once, on the Supplier subject.
-PREDICATES: dict[str, tuple[str, str]] = {
-    "invoice_no": ("gst", "invoiceNumber"),
-    "supplier_name": ("gst", "supplierName"),
-    "taxable": ("gst", "taxableValue"),
-    "invoice_date": ("gst", "invoiceDate"),
-    "place_of_supply": ("gst", "placeOfSupply"),
-    "hsn": ("reco", "hsnCode"),
-    "ims_status": ("reco", "imsStatus"),
-    "reverse_charge": ("gst", "reverseCharge"),
-    "note_type": ("reco", "noteType"),
-    "voucher_type": ("reco", "voucherType"),
-    "original_invoice_no": ("reco", "originalInvoiceNumber"),
-    "voucher_no": ("reco", "voucherNumber"),
-    "igst": ("gst", "igst"),
-    "cgst": ("gst", "cgst"),
-    "sgst": ("gst", "sgst"),
-    "cess": ("gst", "cess"),
+#: Row field (main.py's FIELD_LABELS keys) -> `gst:` predicate local
+#: name. Matches `packs/gst/pack.toml`'s `[[predicates]]` and
+#: `ontology.ttl` exactly, as one table, so they cannot drift silently
+#: against each other. `supplier_gstin` is deliberately not here —
+#: `packs/gst`'s own finding queries read it off the *Supplier* subject
+#: (`?supplier gst:supplierGstin ?gstin`), reached via `gst:issuedBy`,
+#: never as a direct literal on the invoice. `rows_to_turtle` asserts it
+#: once, on the Supplier subject.
+PREDICATES: dict[str, str] = {
+    "invoice_no": "invoiceNumber",
+    "supplier_name": "supplierName",
+    "taxable": "taxableValue",
+    "invoice_date": "invoiceDate",
+    "place_of_supply": "placeOfSupply",
+    "hsn": "hsnCode",
+    "ims_status": "imsStatus",
+    "reverse_charge": "reverseCharge",
+    "note_type": "noteType",
+    "voucher_type": "voucherType",
+    "original_invoice_no": "originalInvoiceNumber",
+    "voucher_no": "voucherNumber",
+    "igst": "igst",
+    "cgst": "cgst",
+    "sgst": "sgst",
+    "cess": "cess",
 }
 
 
@@ -134,16 +137,13 @@ def _subject_iri(kind: str, row: dict) -> str:
     text; an exact-string subject key would silently merge their rows
     into one graph subject.
 
-    **Minted under `NAMESPACE` itself, not a separate data namespace.**
-    `POST /namespaces` (in `_install_graphowl_pack`) declares exactly one
-    namespace for this pack; `Sid::from_iri` refuses any IRI outside a
-    namespace it has a registered code for, and a second, undeclared
-    `.../data/...` namespace is exactly such an IRI — confirmed against a
-    live server (400, "not in a namespace this store recognises"), not
-    inferred by reading the resolver. `packs/gst`'s own fixtures follow
-    the identical pattern (`gst:pr-INV-1001`, not a separate `gst-data:`
-    prefix) — one registered namespace covers both the pack's vocabulary
-    and its instance data."""
+    **Minted under `packs/gst`'s own namespace**, alongside its own
+    fixture subjects (`gst:pr-INV-1001` etc.) but never colliding with
+    them — this module's local names always start `books-`/`gstr2b-`/
+    `supplier-`/`invoice-`, `packs/gst`'s own fixtures never do. Reco-now's
+    deployment never loads those fixtures anyway (`include_documents=False`,
+    `main.py`), so the only reason this matters is defence in depth, not
+    day-to-day correctness."""
     gstin = quote(str(row.get("supplier_gstin") or "").strip(), safe="")
     invoice_no = quote(str(row.get("invoice_no") or "").strip(), safe="")
     return f"{NAMESPACE}{kind}-{gstin}-{invoice_no}"
@@ -201,7 +201,7 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     if not rows:
         return ""
 
-    lines = [f"@prefix gst: <{GST_NAMESPACE}> .", f"@prefix reco: <{NAMESPACE}> .", ""]
+    lines = [f"@prefix gst: <{NAMESPACE}> .", ""]
     for row in rows:
         subject = _subject_iri(kind, row)
         gstin_raw = row.get("supplier_gstin")
@@ -224,13 +224,13 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
         lines.append(f"<{canonical}>\n    {link_predicate} <{subject}> .\n")
 
         triples = [f"a {CLASS_BY_KIND[kind]}", f"gst:issuedBy <{supplier}>"]
-        for field, (prefix, predicate) in PREDICATES.items():
+        for field, predicate in PREDICATES.items():
             value = row.get(field)
             if not _is_present(value):
                 continue
             if field == "invoice_date":
                 value = _normalize_date(value)
-            triples.append(f"{prefix}:{predicate} {_turtle_string(value)}")
+            triples.append(f"gst:{predicate} {_turtle_string(value)}")
         if kind == "books":
             # Only PotentialMismatch (of the findings wired so far) reads
             # gst:taxAmount, and only off the PurchaseInvoice side.
@@ -270,8 +270,8 @@ def import_document(
 
 
 def list_findings(server: str, token: str | None = None) -> list:
-    """`GET /findings?pack=reco` — every finding this pack's registered
-    rules have recorded, evidence included. Read-only and not admin-gated
+    """`GET /findings?pack=gst` — every finding graph-owl's native engine
+    has recorded, evidence included. Read-only and not admin-gated
     server-side (`crates/graph-owl-server/src/lib.rs`'s own comment: "an
     operator who cannot see the queue cannot do it"), so this needs no
     special principal beyond whatever `token` main.py already carries.
@@ -281,7 +281,7 @@ def list_findings(server: str, token: str | None = None) -> list:
     `IngestError` if the server refuses or is unreachable.
     """
     base = server.rstrip("/")
-    url = f"{base}/findings?pack=reco"
+    url = f"{base}/findings?pack={PACK_ID}"
     request = urllib.request.Request(url, method="GET")
     if token:
         request.add_header("authorization", f"Bearer {token}")
@@ -297,5 +297,5 @@ def list_findings(server: str, token: str | None = None) -> list:
 
 
 __all__ = [
-    "IngestError", "PREDICATES", "import_document", "list_findings", "rows_to_turtle",
+    "IngestError", "PACK_ID", "PREDICATES", "import_document", "list_findings", "rows_to_turtle",
 ]

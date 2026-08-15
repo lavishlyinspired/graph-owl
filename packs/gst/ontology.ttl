@@ -149,3 +149,26 @@ gst:generatedFor  rdf:type gst:Property ; gst:label "generated for" .
 # When the authority generated the statement — optional, since no current
 # source has been confirmed to carry it.
 gst:generatedDate rdf:type gst:Property ; gst:label "date the authority generated this statement" .
+
+# **Genuine GST-document fields, not one integrator's customization** —
+# added when ext-apps/Reco (a real purchase-register/GSTR-2B tool) turned
+# out to need them, and merged here rather than kept as a separate
+# extension pack once it was clear none of the six is specific to how
+# that one application happens to format a CSV
+# (plans/119-architecture-audit.md's consolidation note, 16 August 2026).
+# HSN code and note type are standard fields on any GST invoice/return;
+# IMS status is a real GSTR-2B/Invoice Management System concept (the
+# recipient's accept/reject/pending decision on a filed invoice); a
+# credit/debit note referencing its original invoice number is a GST
+# document relationship, not an accounting-software one. Only
+# voucherType/voucherNumber lean toward bookkeeping-system vocabulary
+# rather than statute vocabulary, and are kept alongside the other four
+# rather than split out again — a fifth chokepoint for two fields is a
+# worse trade than four genuinely-GST fields sharing a home with two
+# bookkeeping ones.
+gst:hsnCode              rdf:type gst:Property ; gst:label "HSN code" .
+gst:imsStatus            rdf:type gst:Property ; gst:label "IMS status (accept/reject/pending decision on a filed invoice)" .
+gst:noteType             rdf:type gst:Property ; gst:label "note type (credit note / debit note)" .
+gst:originalInvoiceNumber rdf:type gst:Property ; gst:label "original invoice number (for a credit or debit note)" .
+gst:voucherType          rdf:type gst:Property ; gst:label "voucher type (bookkeeping system)" .
+gst:voucherNumber        rdf:type gst:Property ; gst:label "voucher number (bookkeeping system)" .

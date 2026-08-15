@@ -28,13 +28,11 @@ app = FastAPI(title="RecoNow — Intelligence for Indirect Tax", version="1.0.0"
 # SESSION, not a replacement for it.
 GRAPH_OWL_SERVER = os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080")
 GRAPH_OWL_TOKEN = os.environ.get("GRAPH_OWL_TOKEN")
-GRAPH_OWL_PACK_DIR = Path(__file__).resolve().parents[2] / "graphowl-pack"
-# reco-now's pack extends this one (plans/119-architecture-audit.md §3.1) —
-# it asserts gst: predicates directly rather than duplicating them, so
-# packs/gst's predicates must be registered before reco-now's own pack
-# installs, and before any upload is ingested. Reaches outside ext-apps/
-# on purpose: this app lives inside the graph-owl monorepo specifically to
-# compose with the platform's own reference pack, not fork it.
+# reco-now has no pack of its own — it ingests directly into graph-owl's
+# canonical packs/gst (plans/119-architecture-audit.md, 16 August 2026
+# consolidation). Reaches outside ext-apps/ on purpose: this app lives
+# inside the graph-owl monorepo specifically to compose with the
+# platform's own reference pack, not fork it.
 GST_PACK_DIR = Path(__file__).resolve().parents[4] / "packs" / "gst"
 
 app.add_middleware(
@@ -217,29 +215,40 @@ def _startup() -> None:
 
 def _install_graphowl_pack() -> None:
     """Declare packs/gst's *vocabulary* (namespace, predicates, ontology —
-    not its demo fixtures), then reco-now's own — in that order, because
-    `graphowl_client.rows_to_turtle` asserts gst: predicates directly
-    (plans/119-architecture-audit.md §3.1) and `POST /graph/import/rdf`
-    refuses any flake whose predicate is not yet registered.
+    not its demo fixtures). reco-now has no pack of its own
+    (plans/119-architecture-audit.md, 16 August 2026 consolidation) — it
+    ingests directly under packs/gst's namespace, using the same
+    predicates the pack's own finding queries read.
 
-    **`include_documents=False` on the gst load is load-bearing, not an
-    optimisation.** The native reconcile engine has no per-source data
-    isolation (`Catalog::reconcile_pack` runs each rule's SPARQL over the
-    whole store); packs/gst's own `[[documents]]` are its planted
+    **`include_documents=False` is load-bearing, not an optimisation.**
+    The native reconcile engine has no per-source data isolation
+    (`Catalog::reconcile_pack` runs each rule's SPARQL over the whole
+    store); packs/gst's own `[[documents]]` include its planted
     INV-1001..INV-2002 demo scenarios, and loading them into reco-now's
     deployment would put graph-owl's own demo invoices into every
     reconciliation reco-now runs. Vocabulary composition is wanted here,
-    not the data.
+    not the data — the law data amount-mismatch.sparql actually needs
+    (`law/sections.ttl`, `law/rule-36-4.ttl`) is not a demo fixture and
+    loads with everything else in `packs/gst/pack.toml`'s `[[documents]]`.
 
-    Both loads use the one-time step `load_pack` already does for
-    packs/gst and packs/hospitality, reused here rather than
-    reimplemented. Idempotent (loading a pack twice is a no-op), so this
-    runs on every startup, not just the first."""
+    Uses the one-time step `load_pack` already does for packs/gst and
+    packs/hospitality, reused here rather than reimplemented. Idempotent
+    (loading a pack twice is a no-op), so this runs on every startup, not
+    just the first."""
     try:
         load_pack(GST_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN, include_documents=False)
-        load_pack(GRAPH_OWL_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        # The law data amount-mismatch.sparql needs, imported directly —
+        # `include_documents=False` above excludes it along with the demo
+        # fixtures, since `load_pack` has no partial-document mode. Same
+        # source names packs/gst's own manifest uses, read from its own
+        # directory: not a copy, the canonical file.
+        for name, source in (("sections.ttl", "gst-law"), ("rule-36-4.ttl", "gst-law-rule-36-4")):
+            text = (GST_PACK_DIR / "law" / name).read_text(encoding="utf-8")
+            graphowl_client.import_document(GRAPH_OWL_SERVER, source, text, GRAPH_OWL_TOKEN)
     except LoadError as exc:
         print(f"[graphowl] pack install skipped — {exc}")
+    except graphowl_client.IngestError as exc:
+        print(f"[graphowl] law data import skipped — {exc}")
 
 
 def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> None:
@@ -408,7 +417,7 @@ def _run_graphowl_reconcile() -> None:
     may not be running at all, and neither should block or fail the
     Python-side reconciliation this endpoint already returns."""
     try:
-        result = run_findings("reco", GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        result = run_findings(graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
         findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
         SESSION["graphowl_reconcile"] = {
             "evaluated": result.evaluated,

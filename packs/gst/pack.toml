@@ -210,6 +210,29 @@ value_type = 0
 [[predicates]]
 name = "generatedDate"
 
+# Merged in from ext-apps/Reco's own extension pack, 16 August 2026 —
+# genuine GST-document fields a real purchase-register/GSTR-2B consumer
+# needed that this pack was simply missing, not one integrator's
+# customization. See ontology.ttl's comment on these six for the
+# per-field reasoning.
+[[predicates]]
+name = "hsnCode"
+
+[[predicates]]
+name = "imsStatus"
+
+[[predicates]]
+name = "noteType"
+
+[[predicates]]
+name = "originalInvoiceNumber"
+
+[[predicates]]
+name = "voucherType"
+
+[[predicates]]
+name = "voucherNumber"
+
 [[matching.blocking]]
 strategy = "normalized"
 fields = ["gst:supplierGstin", "gst:invoiceNumber"]
