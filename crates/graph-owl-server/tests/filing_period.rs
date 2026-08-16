@@ -129,6 +129,26 @@ SELECT ?period ?periodLabel WHERE {
 ORDER BY ?periodLabel
 ";
 
+/// Plan 107 Slice 4's own real, silent prerequisite: a console picker
+/// needs to know which periods *exist* before a human can pick one, and
+/// none of Slices 1-3's queries answer that — each takes a period as
+/// input, none lists them. Unlike every other query in this file, this
+/// one has **no placeholder at all**: it takes no bindings, matching
+/// `run_pack_query`'s already-supported empty-bindings case (`RunPackQuery
+/// ::bindings` defaults to an empty map, and a query declaring zero
+/// `{{...}}` names requires none).
+const PERIOD_LIST: &str = r"
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?period ?periodLabel WHERE {
+  GRAPH ?g {
+    ?period a gst:FilingPeriod ;
+            gst:period ?periodLabel .
+  }
+}
+ORDER BY ?periodLabel
+";
+
 async fn call(
     app: &axum::Router,
     method: &str,
@@ -241,6 +261,7 @@ async fn seed_two_periods_and_three_subjects(app: &axum::Router) {
                 { "name": "period-summary", "query": PERIOD_SUMMARY },
                 { "name": "period-diff", "query": PERIOD_DIFF },
                 { "name": "period-history", "query": PERIOD_HISTORY },
+                { "name": "period-list", "query": PERIOD_LIST },
             ],
         }),
     )
@@ -594,4 +615,35 @@ async fn period_history_for_an_unlinked_subject_is_empty_not_an_error() {
 
     let rows = body["rows"].as_array().expect("rows array");
     assert!(rows.is_empty(), "{body}");
+}
+
+/// `period-list` — Plan 107 Slice 4's real prerequisite: every
+/// `FilingPeriod` this pack has, in order, no binding required. The
+/// shared seed declares exactly two (`2020-07`, `2026-07`).
+#[tokio::test]
+async fn period_list_reports_every_filing_period_no_binding_required() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-list/run",
+        serde_json::json!({ "bindings": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 2, "{body}");
+    assert_eq!(rows[0]["periodLabel"], "\"2020-07\"", "{body}");
+    assert_eq!(
+        rows[0]["period"], "<https://graph-owl.dev/packs/gst#period-2020-07>",
+        "{body}"
+    );
+    assert_eq!(rows[1]["periodLabel"], "\"2026-07\"", "{body}");
+    assert_eq!(
+        rows[1]["period"], "<https://graph-owl.dev/packs/gst#period-2026-07>",
+        "{body}"
+    );
 }

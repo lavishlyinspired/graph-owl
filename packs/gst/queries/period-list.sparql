@@ -1,0 +1,26 @@
+# Every `FilingPeriod` this pack has, in order — the real, silent
+# prerequisite Plan 107 Slice 4's console picker needs: `period-summary`/
+# `period-diff`/`period-history` (Slices 1-3) each take a period as
+# input, none lists which ones exist.
+#
+# **No caller-supplied placeholder at all** — unlike every other query in
+# this pack, this one takes no bindings, matching `run_pack_query`'s
+# already-supported empty-bindings case.
+#
+# CAUTION for whoever edits this file: `placeholder_names` (the
+# `graph-owl-api` function that finds a registered query's required
+# bindings) scans the *whole* query text, comments included — writing a
+# double-brace placeholder form in a comment, even descriptively, demands
+# that binding here too. This has now bitten `period-summary.sparql`,
+# `period-diff.sparql`, and this file — avoid double braces in prose
+# entirely across every query in this pack.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?period ?periodLabel WHERE {
+  GRAPH ?g {
+    ?period a gst:FilingPeriod ;
+            gst:period ?periodLabel .
+  }
+}
+ORDER BY ?periodLabel

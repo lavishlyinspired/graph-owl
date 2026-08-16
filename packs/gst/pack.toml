@@ -828,6 +828,14 @@ name = "period-history"
 path = "queries/period-history.sparql"
 label = "Every filing period one subject belongs to, in order"
 
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Plan 107 Slice 4's own
+# console picker prerequisite: which periods exist at all.
+[[queries]]
+name = "period-list"
+path = "queries/period-list.sparql"
+label = "Every filing period this pack has"
+
 [console]
 
 # **What this pack looks like on the reconciliation page — declared here, not
