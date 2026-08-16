@@ -297,6 +297,10 @@ install — this is the test the whole slice exists to pass.
 4. TS: `tsc`/lint clean on touched files.
 
 ---
-*Delete this file when Slice 4 ships and Plan 120's own tracker entry for
-Slice C is recorded — knowledge moves to `plans/DEMOS.md` and `CLAUDE.md`,
-matching this project's standing convention.*
+
+**Status: complete, all 4 slices shipped 16 August 2026.** Kept as historical
+record rather than deleted — this project's actual convention (`plans/90-*`,
+`91-*`, `108-*`, `111-*`, `112-*`, `113-*` are all shipped and still present),
+not the generic planning-skill default of deleting a plan file once its work
+lands. `plans/DEMOS.md`'s Plan 120 entry is the authoritative summary; this
+file is the detailed record behind it.
