@@ -4,7 +4,7 @@ import { statusColor, statusLabel } from "../format.js";
 export function Button({ children, variant = "primary", className = "", ...props }) {
   const styles = {
     primary:
-      "bg-matcha-green text-matcha-bg hover:bg-matcha-green/90 disabled:bg-matcha-bg-tertiary disabled:text-matcha-text-tertiary disabled:cursor-not-allowed",
+      "bg-matcha-accent text-matcha-bg hover:bg-matcha-accent/90 disabled:bg-matcha-bg-tertiary disabled:text-matcha-text-tertiary disabled:cursor-not-allowed",
     outline:
       "border border-matcha-border text-matcha-text-primary hover:bg-matcha-bg-secondary disabled:text-matcha-text-tertiary disabled:cursor-not-allowed",
     ghost:
@@ -66,7 +66,7 @@ export function Tabs({ tabs, active, onChange }) {
           className={[
             "px-3 py-2 text-sm font-medium -mb-px border-b-2 transition-colors",
             active === tab.key
-              ? "text-matcha-green border-matcha-green"
+              ? "text-matcha-accent border-matcha-accent"
               : "text-matcha-text-tertiary border-transparent hover:text-matcha-text-secondary",
           ].join(" ")}
         >
@@ -81,7 +81,7 @@ export function LoadingScreen() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-matcha-bg">
       <svg
-        className="animate-spin text-matcha-green"
+        className="animate-spin text-matcha-accent"
         width="24"
         height="24"
         viewBox="0 0 24 24"

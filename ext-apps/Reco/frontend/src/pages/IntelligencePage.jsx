@@ -44,7 +44,7 @@ function WorkingPaperWizard({ stats }) {
     return (
       <Card className="p-6">
         <div className="flex items-center gap-2 mb-4">
-          <Wand2 size={18} className="text-matcha-green" />
+          <Wand2 size={18} className="text-matcha-accent" />
           <h3 className="font-semibold">GSTR-3B Working Paper Wizard</h3>
         </div>
         <p className="text-sm text-matcha-text-secondary mb-5">
@@ -54,7 +54,7 @@ function WorkingPaperWizard({ stats }) {
           <p className="font-medium text-matcha-text-secondary mb-2">Intelligence</p>
           I've analyzed your reconciliation data. Here's what I can auto-compute:
           <ul className="mt-2 space-y-1 text-matcha-text-secondary">
-            <li>• 4A5 Part A (GSTR-2B matched): <span className="font-mono text-matcha-green">{auto.a5}</span> from {stats.matched} matched invoices</li>
+            <li>• 4A5 Part A (GSTR-2B matched): <span className="font-mono text-matcha-accent">{auto.a5}</span> from {stats.matched} matched invoices</li>
             <li>• 4B2 Excess (in 2B, not in books): <span className="font-mono">{auto.excess}</span> invoices to reverse</li>
             <li>• 4C Net ITC will be calculated automatically</li>
           </ul>
@@ -81,7 +81,7 @@ function WorkingPaperWizard({ stats }) {
   return (
     <Card className="p-6">
       <div className="flex items-center gap-2 mb-4">
-        <Wand2 size={18} className="text-matcha-green" />
+        <Wand2 size={18} className="text-matcha-accent" />
         <h3 className="font-semibold">GSTR-3B Working Paper</h3>
       </div>
       <div className="bg-matcha-bg border border-matcha-border rounded-lg p-4 text-sm text-matcha-text-primary leading-relaxed">
@@ -95,7 +95,7 @@ function WorkingPaperWizard({ stats }) {
       <div className="mt-4 space-y-3">
         <div className="flex items-center justify-between text-sm">
           <span className="text-matcha-text-secondary">4A5 Part A — eligible ITC</span>
-          <span className="font-mono text-matcha-green">{auto.a5}</span>
+          <span className="font-mono text-matcha-accent">{auto.a5}</span>
         </div>
         <div className="flex items-center justify-between text-sm">
           <span className="text-matcha-text-secondary">4B2 Excess — reverse</span>
@@ -103,7 +103,7 @@ function WorkingPaperWizard({ stats }) {
         </div>
         <div className="flex items-center justify-between text-sm font-medium border-t border-matcha-border pt-2">
           <span>4C Net ITC</span>
-          <span className="font-mono text-matcha-green">{auto.net}</span>
+          <span className="font-mono text-matcha-accent">{auto.net}</span>
         </div>
       </div>
       <div className="flex items-center gap-3 mt-5">
@@ -132,7 +132,7 @@ export default function IntelligencePage({ overview, onBack, onAct }) {
   const itcAtRisk = (nonFiling?.itc ?? 0) + (discrepancy?.itc ?? 0);
 
   const distribution = [
-    { label: "Matched", value: stats.matched ?? 0, barColor: "bg-matcha-green" },
+    { label: "Matched", value: stats.matched ?? 0, barColor: "bg-matcha-accent" },
     { label: "Mismatched", value: stats.review ?? 0, barColor: "bg-matcha-amber" },
     { label: "Only Books", value: stats.only_books ?? 0, barColor: "bg-matcha-red" },
     { label: "Only Portal", value: stats.only_gstr2b ?? 0, barColor: "bg-matcha-blue" },
@@ -145,7 +145,7 @@ export default function IntelligencePage({ overview, onBack, onAct }) {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card className="p-5">
           <h3 className="font-semibold text-matcha-text-secondary">Overall Match Rate</h3>
-          <p className="text-3xl font-bold mt-3 font-mono text-matcha-green">{stats.match_rate}%</p>
+          <p className="text-3xl font-bold mt-3 font-mono text-matcha-accent">{stats.match_rate}%</p>
         </Card>
         <Card className="p-5">
           <h3 className="font-semibold text-matcha-text-secondary">Total Invoices</h3>
@@ -176,7 +176,7 @@ export default function IntelligencePage({ overview, onBack, onAct }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card className="p-5">
           <div className="flex items-center gap-2 mb-4">
-            <TrendingUp size={16} className="text-matcha-green" />
+            <TrendingUp size={16} className="text-matcha-accent" />
             <h3 className="font-semibold">Match Distribution</h3>
           </div>
           <div className="flex items-center justify-between mb-3">
@@ -225,7 +225,7 @@ export default function IntelligencePage({ overview, onBack, onAct }) {
             {classifications.map((item) => (
               <Card key={item.key} className="p-5">
                 <div className="flex items-center gap-2 mb-2">
-                  <Scale size={16} className="text-matcha-green" />
+                  <Scale size={16} className="text-matcha-accent" />
                   <h3 className="font-semibold">{item.title}</h3>
                 </div>
                 <div className="flex items-baseline gap-2">

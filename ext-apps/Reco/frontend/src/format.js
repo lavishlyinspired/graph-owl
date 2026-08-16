@@ -31,7 +31,7 @@ export function statusLabel(status) {
 
 export function statusColor(status) {
   return {
-    matched: "text-matcha-green border-matcha-green/30 bg-matcha-green-surface",
+    matched: "text-matcha-accent border-matcha-accent/30 bg-matcha-accent-surface",
     review: "text-matcha-amber border-matcha-amber/30 bg-matcha-amber/10",
     only_books: "text-matcha-red border-matcha-red/30 bg-matcha-red/10",
     only_gstr2b: "text-matcha-blue border-matcha-blue/30 bg-matcha-blue/10",

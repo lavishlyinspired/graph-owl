@@ -47,7 +47,7 @@ function Markdown({ text }) {
     // H2
     if (line.startsWith("## ")) {
       elements.push(
-        <h3 key={i} className="text-lg font-semibold text-matcha-green mt-5 mb-2">
+        <h3 key={i} className="text-lg font-semibold text-matcha-accent mt-5 mb-2">
           {renderInline(line.slice(3))}
         </h3>
       );
@@ -93,7 +93,7 @@ function Markdown({ text }) {
         <ul key={`ul-${i}`} className="space-y-1 my-2">
           {items.map((item, j) => (
             <li key={j} className="flex gap-2 text-sm text-matcha-text-secondary leading-relaxed">
-              <span className="text-matcha-green shrink-0 mt-0.5">•</span>
+              <span className="text-matcha-accent shrink-0 mt-0.5">•</span>
               <span>{renderInline(item)}</span>
             </li>
           ))}
@@ -132,7 +132,7 @@ function renderInline(text) {
     }
     if (part.startsWith("`") && part.endsWith("`")) {
       return (
-        <code key={i} className="font-mono text-matcha-green bg-matcha-bg px-1 rounded text-xs">
+        <code key={i} className="font-mono text-matcha-accent bg-matcha-bg px-1 rounded text-xs">
           {part.slice(1, -1)}
         </code>
       );
@@ -287,7 +287,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
       {tab === "working_paper" && (
         <Card className="p-6 max-w-2xl">
           <div className="flex items-center gap-2 mb-3">
-            <FileText size={18} className="text-matcha-green" />
+            <FileText size={18} className="text-matcha-accent" />
             <h3 className="text-xl font-semibold">CA-Ready Working Paper</h3>
           </div>
           <p className="text-sm text-matcha-text-secondary mb-6">
@@ -297,7 +297,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
           {/* Stats summary */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
             {[
-              { label: "Matched", value: stats.matched, color: "text-matcha-green" },
+              { label: "Matched", value: stats.matched, color: "text-matcha-accent" },
               { label: "Mismatched", value: stats.review, color: "text-matcha-amber" },
               { label: "Only Books", value: stats.only_books, color: "text-matcha-red" },
               { label: "Only Portal", value: stats.only_gstr2b, color: "text-matcha-blue" },
@@ -331,7 +331,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
           {summary && (
             <div className="bg-matcha-bg border border-matcha-border rounded-lg p-4 mt-3">
               <p className="text-xs uppercase tracking-wider text-matcha-text-tertiary mb-2 flex items-center gap-1.5">
-                <Sparkles size={12} className="text-matcha-green" /> AI Summary
+                <Sparkles size={12} className="text-matcha-accent" /> AI Summary
               </p>
               <p className="text-sm text-matcha-text-secondary leading-relaxed">{summary}</p>
               <button
@@ -349,7 +349,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
       {tab === "follow_ups" && (
         <Card className="p-6 max-w-3xl">
           <div className="flex items-center gap-2 mb-3">
-            <MessageSquare size={18} className="text-matcha-green" />
+            <MessageSquare size={18} className="text-matcha-accent" />
             <h3 className="text-xl font-semibold">Supplier Follow-Up Messages</h3>
           </div>
           <p className="text-sm text-matcha-text-secondary mb-6">
@@ -371,7 +371,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
                   </div>
                   <div className="h-1.5 bg-matcha-bg rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-matcha-green rounded-full transition-all"
+                      className="h-full bg-matcha-accent rounded-full transition-all"
                       style={{ width: `${(progress.done / progress.total) * 100}%` }}
                     />
                   </div>
@@ -405,7 +405,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
                       onClick={() => copyMessage(i, m.message)}
                     >
                       {copied === i ? (
-                        <Check size={14} className="text-matcha-green" />
+                        <Check size={14} className="text-matcha-accent" />
                       ) : (
                         <Copy size={14} />
                       )}
@@ -426,7 +426,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
       {tab === "ims" && (
         <div className="max-w-3xl space-y-4">
           <div className="flex items-center gap-2 mb-2">
-            <Landmark size={18} className="text-matcha-green" />
+            <Landmark size={18} className="text-matcha-accent" />
             <h3 className="text-xl font-semibold">IMS Action Recommendations</h3>
           </div>
           <p className="text-sm text-matcha-text-secondary">
@@ -455,7 +455,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
                 </span>
               </div>
               <p className="text-sm text-matcha-text-secondary">{action.action}</p>
-              <p className="text-sm text-matcha-green mt-2">{action.note}</p>
+              <p className="text-sm text-matcha-accent mt-2">{action.note}</p>
               {action.invoices && action.invoices.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-1">
                   {action.invoices.slice(0, 8).map((inv, j) => (
@@ -484,7 +484,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
           <Card className="p-6">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                <FileText size={18} className="text-matcha-green" />
+                <FileText size={18} className="text-matcha-accent" />
                 <h3 className="text-xl font-semibold">Client Report</h3>
               </div>
               {report && (
@@ -495,7 +495,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
                     onClick={copyReport}
                   >
                     {reportCopied ? (
-                      <Check size={13} className="text-matcha-green" />
+                      <Check size={13} className="text-matcha-accent" />
                     ) : (
                       <Copy size={13} />
                     )}
@@ -545,7 +545,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
 
             {reporting && (
               <div className="mt-4 flex items-center gap-3 text-sm text-matcha-text-secondary">
-                <Loader2 size={16} className="animate-spin text-matcha-green" />
+                <Loader2 size={16} className="animate-spin text-matcha-accent" />
                 AI is writing your report — this usually takes 15–30 seconds…
               </div>
             )}
@@ -563,7 +563,7 @@ export default function ActPage({ overview, onBack, onRestart }) {
               <span>Also available via API:</span>
               <button
                 onClick={() => api.download("/api/export/report.md")}
-                className="text-matcha-green hover:underline text-xs font-mono"
+                className="text-matcha-accent hover:underline text-xs font-mono"
               >
                 GET /api/export/report.md
               </button>

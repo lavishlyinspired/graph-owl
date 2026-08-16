@@ -216,7 +216,7 @@ export default function MapPage({ overview, onMapped, onBack }) {
                         onChange={(e) =>
                           setRowSel((prev) => ({ ...prev, [active]: Number(e.target.value) }))
                         }
-                        className="bg-matcha-bg border border-matcha-border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:border-matcha-green"
+                        className="bg-matcha-bg border border-matcha-border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:border-matcha-accent"
                       >
                         {previewRows.map((_, i) => (
                           <option key={i} value={i}>R{i + 1}</option>
@@ -236,7 +236,7 @@ export default function MapPage({ overview, onMapped, onBack }) {
                                 e.target.value === "" ? null : Number(e.target.value)
                               )
                             }
-                            className="bg-matcha-bg border border-matcha-border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:border-matcha-green w-full"
+                            className="bg-matcha-bg border border-matcha-border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:border-matcha-accent w-full"
                           >
                             <option value="">Not mapped</option>
                             {headers.map((header, ci) => (
@@ -249,7 +249,7 @@ export default function MapPage({ overview, onMapped, onBack }) {
                         {field.multi && (
                           <button
                             onClick={() => addColumn(field.key)}
-                            className="inline-flex items-center gap-1 text-xs text-matcha-green hover:underline self-start"
+                            className="inline-flex items-center gap-1 text-xs text-matcha-accent hover:underline self-start"
                           >
                             <Plus size={12} /> Add column
                           </button>

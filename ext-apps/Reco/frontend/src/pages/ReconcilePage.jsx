@@ -80,9 +80,9 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Reconciliation Results</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Findings</h1>
           <p className="text-matcha-text-secondary mt-2">
-            Review matches and mismatches below
+            Review findings and evidence below
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -100,7 +100,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card className="p-5">
-          <div className="flex items-center gap-2 text-matcha-green">
+          <div className="flex items-center gap-2 text-matcha-accent">
             <ShieldCheck size={18} />
             <h3 className="font-semibold text-matcha-text-primary">ITC Confirmed Safe</h3>
           </div>
@@ -124,7 +124,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
         <Card className="p-5 flex flex-col justify-between">
           <h3 className="font-semibold text-matcha-text-primary">Match Rate</h3>
           <div className="flex items-end justify-between mt-3">
-            <p className="text-3xl font-bold font-mono text-matcha-green">{stats.match_rate}%</p>
+            <p className="text-3xl font-bold font-mono text-matcha-accent">{stats.match_rate}%</p>
             <div className="text-right text-xs text-matcha-text-tertiary">
               <div>{stats.matched} matched</div>
               <div>{rows.length} total</div>
@@ -132,7 +132,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
           </div>
           <div className="mt-3 h-2 rounded-full bg-matcha-bg overflow-hidden">
             <div
-              className="h-full bg-matcha-green rounded-full transition-all"
+              className="h-full bg-matcha-accent rounded-full transition-all"
               style={{ width: `${stats.match_rate}%` }}
             />
           </div>
@@ -151,7 +151,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
               className={[
                 "px-3 py-1.5 rounded-full border text-sm font-medium transition-colors",
                 filter === f.key
-                  ? "bg-matcha-green-surface border-matcha-green text-matcha-green"
+                  ? "bg-matcha-accent-surface border-matcha-accent text-matcha-accent"
                   : "border-matcha-border text-matcha-text-secondary hover:text-matcha-text-primary",
               ].join(" ")}
             >
@@ -168,7 +168,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
                 setPage(0);
               }}
               placeholder="Search by GSTIN, supplier, invoice number..."
-              className="bg-matcha-bg border border-matcha-border rounded-lg pl-8 pr-3 py-1.5 text-sm w-72 focus:outline-none focus:border-matcha-green"
+              className="bg-matcha-bg border border-matcha-border rounded-lg pl-8 pr-3 py-1.5 text-sm w-72 focus:outline-none focus:border-matcha-accent"
             />
           </div>
         </div>
@@ -207,7 +207,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
                     {row.imsStatus !== "—" ? (
                       <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
                         row.imsStatus === "Accepted"
-                          ? "bg-matcha-green/10 border-matcha-green/30 text-matcha-green"
+                          ? "bg-matcha-accent/10 border-matcha-accent/30 text-matcha-accent"
                           : row.imsStatus === "Rejected"
                           ? "bg-matcha-red/10 border-matcha-red/30 text-matcha-red"
                           : "bg-matcha-bg border-matcha-border text-matcha-text-tertiary"
@@ -247,7 +247,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
                 }}
                 className={[
                   "px-2 py-0.5 rounded text-xs",
-                  pageSize === size ? "text-matcha-green bg-matcha-green-surface" : "hover:text-matcha-text-primary",
+                  pageSize === size ? "text-matcha-accent bg-matcha-accent-surface" : "hover:text-matcha-text-primary",
                 ].join(" ")}
               >
                 {size}
@@ -281,7 +281,7 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
 
         <Card className="p-5">
           <h3 className="font-semibold">Net ITC for GSTR-3B Table 4</h3>
-          <p className="text-3xl font-bold mt-3 font-mono text-matcha-green">{inrFormat(netItc)}</p>
+          <p className="text-3xl font-bold mt-3 font-mono text-matcha-accent">{inrFormat(netItc)}</p>
           <div className="mt-4 space-y-2 text-sm">
             <div className="flex justify-between text-matcha-text-secondary">
               <span>Gross ITC (matched invoices)</span>

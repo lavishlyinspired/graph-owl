@@ -78,16 +78,16 @@ export default function UploadPage({ onDataLoaded }) {
       {/* Upload drop zone */}
       <Card
         className={`p-8 border-2 border-dashed transition-colors cursor-pointer ${
-          dragging ? "border-matcha-green bg-matcha-green-surface/50" : "border-matcha-border hover:border-matcha-green/40"
+          dragging ? "border-matcha-accent bg-matcha-accent-surface/50" : "border-matcha-border hover:border-matcha-accent/40"
         }`}
         {...dropProps}
         onClick={() => fileRef.current?.click()}
       >
         <div className="flex flex-col items-center text-center py-6">
           <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-5 transition-colors ${
-            dragging ? "bg-matcha-green/20" : "bg-matcha-bg"
+            dragging ? "bg-matcha-accent/20" : "bg-matcha-bg"
           }`}>
-            <UploadCloud size={32} className="text-matcha-green" />
+            <UploadCloud size={32} className="text-matcha-accent" />
           </div>
           <p className="text-lg font-semibold">Drop your files here</p>
           <p className="text-matcha-text-tertiary mt-1 mb-2">or click anywhere in this box to browse</p>
@@ -177,7 +177,7 @@ export default function UploadPage({ onDataLoaded }) {
             step="1"
             value={tolerance}
             onChange={(e) => setTolerance(Number(e.target.value))}
-            className="w-24 bg-matcha-bg border border-matcha-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-matcha-green"
+            className="w-24 bg-matcha-bg border border-matcha-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-matcha-accent"
           />
         </div>
       </Card>

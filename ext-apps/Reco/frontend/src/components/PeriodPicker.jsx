@@ -13,7 +13,7 @@ export default function PeriodPicker({ month, year, onChange }) {
         <select
           value={month}
           onChange={(e) => onChange(e.target.value, year)}
-          className="appearance-none bg-matcha-bg-secondary border border-matcha-border rounded-lg pl-3 pr-8 py-1.5 text-sm text-matcha-text-primary focus:outline-none focus:border-matcha-green cursor-pointer"
+          className="appearance-none bg-matcha-bg-secondary border border-matcha-border rounded-lg pl-3 pr-8 py-1.5 text-sm text-matcha-text-primary focus:outline-none focus:border-matcha-accent cursor-pointer"
         >
           {MONTHS.map((m) => (
             <option key={m} value={m}>{m}</option>
@@ -25,7 +25,7 @@ export default function PeriodPicker({ month, year, onChange }) {
         <select
           value={year}
           onChange={(e) => onChange(month, Number(e.target.value))}
-          className="appearance-none bg-matcha-bg-secondary border border-matcha-border rounded-lg pl-3 pr-8 py-1.5 text-sm text-matcha-text-primary focus:outline-none focus:border-matcha-green cursor-pointer"
+          className="appearance-none bg-matcha-bg-secondary border border-matcha-border rounded-lg pl-3 pr-8 py-1.5 text-sm text-matcha-text-primary focus:outline-none focus:border-matcha-accent cursor-pointer"
         >
           {YEARS.map((y) => (
             <option key={y} value={y}>{y}</option>

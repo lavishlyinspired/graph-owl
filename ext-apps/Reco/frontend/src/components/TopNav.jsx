@@ -3,7 +3,7 @@ import { RotateCcw } from "lucide-react";
 const STEPS = [
   { key: "upload", label: "Upload" },
   { key: "map", label: "Map" },
-  { key: "reconcile", label: "Reconcile" },
+  { key: "reconcile", label: "Investigate" },
   { key: "intelligence", label: "Intelligence" },
   { key: "act", label: "Act" },
 ];
@@ -11,7 +11,7 @@ const STEPS = [
 const STEP_HINTS = {
   upload: "You're on Upload",
   map: "You're on Map",
-  reconcile: "You're on Reconcile",
+  reconcile: "You're on Investigate",
   intelligence: "You're on Intelligence",
   act: "You're on Act",
 };
@@ -19,7 +19,7 @@ const STEP_HINTS = {
 const PAGE_HINTS = {
   upload: "Use the upload box below to add your files",
   map: "Map your columns in the editor below",
-  reconcile: "Review matches and mismatches below",
+  reconcile: "Review findings and evidence below",
   intelligence: "View insights and analysis below",
   act: "Download reports and take action below",
 };
@@ -31,12 +31,15 @@ export default function TopNav({ page, hasData, disabled, onNavigate, onRestart 
         <div className="h-14 flex items-center gap-4">
           <button
             onClick={onRestart}
-            className="flex items-center gap-2 text-matcha-green hover:text-matcha-green/80 font-semibold tracking-tight"
+            className="flex items-center gap-2 text-matcha-accent hover:text-matcha-accent/80 font-semibold tracking-tight"
           >
             <span className="text-lg">🔄</span>
             <span className="text-xl">RecoNow</span>
             <RotateCcw size={14} className="text-matcha-text-tertiary" />
           </button>
+          <span className="hidden sm:inline text-[10px] uppercase tracking-wider text-matcha-text-tertiary">
+            powered by GraphOWL
+          </span>
 
           <nav className="flex items-center gap-1 ml-2 flex-1">
             {STEPS.map((step) => {
@@ -50,7 +53,7 @@ export default function TopNav({ page, hasData, disabled, onNavigate, onRestart 
                   className={[
                     "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
                     isCurrent
-                      ? "bg-matcha-green-surface text-matcha-green"
+                      ? "bg-matcha-accent-surface text-matcha-accent"
                       : isDisabled
                         ? "text-matcha-text-tertiary cursor-not-allowed"
                         : "text-matcha-text-secondary hover:text-matcha-text-primary hover:bg-matcha-bg-secondary",
