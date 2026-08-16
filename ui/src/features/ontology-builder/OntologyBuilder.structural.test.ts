@@ -143,3 +143,29 @@ describe("the namespace filter", () => {
     expect(source).toMatch(/const ALL_NAMESPACES = "__all__"/);
   });
 });
+
+/** Plan 120 Slice H — the standalone Workbench route (SPARQL + Cypher) is
+ *  gone; `WorkbenchPanel` (extracted unchanged from `App.tsx`'s old
+ *  `WorkbenchPage`) now renders as a third tab here, beside Visual and Code,
+ *  because querying the vocabulary and querying the graph it describes are
+ *  the same activity. `routes.structural.test.ts` already proves `App.tsx`
+ *  has no dangling `section === "workbench"` check; this proves the tab that
+ *  replaces it is actually wired up. */
+describe("the Workbench tab — Plan 120 Slice H", () => {
+  it("imports WorkbenchPanel and mounts it as a tab, not a route", () => {
+    expect(source).toMatch(/import\s*\{\s*WorkbenchPanel\s*\}\s*from\s*"\.\/WorkbenchPanel"/);
+    expect(source).toMatch(/<TabsTrigger value="workbench">/);
+    expect(source).toMatch(/<TabsContent value="workbench"/);
+  });
+
+  it("passes the query panel the same asOf and colors props the rest of the builder uses", () => {
+    const panel = source.match(/<TabsContent value="workbench"[\s\S]*?<\/TabsContent>/);
+    expect(panel).not.toBeNull();
+    expect(panel![0]).toMatch(/<WorkbenchPanel\s+colors=\{colors\}\s+asOf=\{asOf\}\s*\/>/);
+  });
+
+  it("accepts asOf as a prop rather than reaching for it some other way", () => {
+    expect(source).toMatch(/asOf:\s*string \| null/);
+    expect(source).toMatch(/OntologyBuilder\(\{\s*colors,\s*asOf\s*\}:\s*OntologyBuilderProps\)/);
+  });
+});

@@ -27,7 +27,10 @@ export const ROUTES = [
   "reconciliation",
   "explore",
   "governance",
-  "workbench",
+  // Plan 120 Slice H: no longer a route of its own — Workbench (SPARQL +
+  // Cypher) merged into a tab inside "ontology-builder", the same domain
+  // the queries are usually written to explore, rather than a separate
+  // destination a reader has to navigate away to reach.
   "vocabulary",
   "review",
   "obligations",

@@ -59,6 +59,7 @@ import {
   relationshipById,
   toFlowElements,
 } from "./flowModel";
+import { WorkbenchPanel } from "./WorkbenchPanel";
 import {
   exportModel,
   importModel,
@@ -127,6 +128,7 @@ const COPY = {
   packLoadFailed: "Could not load that pack's ontology.",
   visualTab: "Visual",
   codeTab: "Code",
+  workbenchTab: "Workbench",
   check: "Check",
   save: "Save",
   checkedTitle: "Would be accepted",
@@ -160,6 +162,10 @@ const FORMAT_OPTIONS: { value: ExportFormat; label: string }[] = (
 
 interface OntologyBuilderProps {
   readonly colors: Colors;
+  /** Threaded through to the Workbench tab's SPARQL/Cypher queries — Plan
+   *  120 Slice H. `null` means "now", matching every other consumer of the
+   *  app's global time-travel clock. */
+  readonly asOf: string | null;
 }
 
 function FilterIcon() {
@@ -195,7 +201,7 @@ function UploadIcon() {
   );
 }
 
-export function OntologyBuilder({ colors }: OntologyBuilderProps) {
+export function OntologyBuilder({ colors, asOf }: OntologyBuilderProps) {
   const [model, setModel] = useState<OntologyModel>(() => loadModel());
   const [layout, setLayout] = useState<LayoutName>("radial");
   const [edgeStyle, setEdgeStyle] = useState<EdgeStyle>("polyline");
@@ -475,6 +481,7 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
               <TabsTrigger value="code" onClick={() => loadCodeTab(codeFormat)}>
                 {COPY.codeTab}
               </TabsTrigger>
+              <TabsTrigger value="workbench">{COPY.workbenchTab}</TabsTrigger>
             </TabsList>
           </div>
 
@@ -691,6 +698,14 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
                   : `${COPY.saveErrorTitle}: ${saveResult.message}`}
               </p>
             )}
+          </TabsContent>
+
+          {/* Plan 120 Slice H — SPARQL/Cypher over the same graph, as a tab
+              beside Visual/Code rather than a separate "Workbench"
+              destination. Extracted unchanged from App.tsx's own
+              WorkbenchPage (Plan 111 Slice B). */}
+          <TabsContent value="workbench" className="mt-0 flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-4">
+            <WorkbenchPanel colors={colors} asOf={asOf} />
           </TabsContent>
         </Tabs>
       </div>

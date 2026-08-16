@@ -56,7 +56,6 @@ import {
   Row,
   SafetyCertificateOutlined,
   SearchOutlined,
-  Segmented,
   Select,
   ShareAltOutlined,
   Sider,
@@ -90,7 +89,6 @@ import {
   type GraphEdge,
   type Overview,
   type SearchFacets,
-  type SparqlResult,
   type ValidationRun,
   ApiError,
   api,
@@ -155,28 +153,11 @@ import {
   groupByAsset,
   localName,
 } from "./governance/queue";
-import {
-  type Solution,
-  alignmentBadgeLabel,
-  columns as resultColumns,
-  display as displayTerm,
-  graphShape,
-  toGraph,
-  verdict,
-} from "./workbench/results";
 import { GraphCanvas } from "./graph/GraphCanvas";
 import { PathFinder } from "./graph/PathFinder";
 import { filterParam, kindsFromAnalytics, whyEmpty } from "./graph/edgeFilter";
 import { ConnectivityPanel } from "./graph/ConnectivityPanel";
 import { Disagreements } from "./memory/Disagreements";
-import {
-  type Drafts,
-  type Language,
-  defaultQuery,
-  isLanguage,
-  keepDrafts,
-  pastTenseNote,
-} from "./workbench/language";
 import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
 import { ReasoningPanel } from "./features/reasoning/ReasoningPanel";
@@ -196,7 +177,6 @@ type Section =
   | "explore"
   | "connectors"
   | "governance"
-  | "workbench"
   | "vocabulary"
   | "review"
   | "obligations"
@@ -2058,292 +2038,6 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
   );
 }
 
-/** The SPARQL workbench — Epic 41.
- *
- *  Three things on one screen, and the second is the one that makes the others
- *  usable: the query, **what the engine decided to read**, and the results.
- *  An author who cannot see the plan cannot tell a query that is inherently
- *  expensive from one that is a single triple pattern away from being cheap.
- */
-function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; asOf: string | null }) {
-  // Plan 111 Slice B. `POST /cypher` had no console caller at all before
-  // this — a property-graph query language implemented end to end and
-  // reachable only with curl.
-  const [language, setLanguageRaw] = useState<Language>(() => {
-    const saved = readParam("lang");
-    return isLanguage(saved) ? saved : "sparql";
-  });
-  const [query, setQuery] = useState(() => defaultQuery(language));
-  // Per-language drafts. Toggling to look at the other language and back
-  // must not silently discard real work.
-  const [drafts, setDrafts] = useState<Drafts>({});
-  const [result, setResult] = useState<SparqlResult | null>(null);
-  const [running, setRunning] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-  const [asGraph, setAsGraph] = useState(false);
-
-  const setLanguage = (next: Language) => {
-    const kept = keepDrafts(drafts, language, query);
-    setDrafts(kept);
-    setQuery(kept[next] ?? defaultQuery(next));
-    setLanguageRaw(next);
-    writeParam("lang", next === "sparql" ? null : next);
-    // A result answered in the other language beside a query in this one
-    // would be attributed to the wrong text. Clearing is the honest reset.
-    setResult(null);
-    setFailed(null);
-  };
-
-  const run = async () => {
-    setRunning(true);
-    setFailed(null);
-    try {
-      // Both routes render the identical outcome envelope server-side, which
-      // is what lets one results table serve both without knowing which ran.
-      setResult(
-        language === "cypher" ? await api.cypher(query, asOf) : await api.sparql(query, asOf),
-      );
-    } catch (error) {
-      // A parse error is the author's to fix and belongs on screen verbatim —
-      // "query failed" sends them guessing at which line.
-      setFailed(error instanceof ApiError ? error.problem.detail ?? error.problem.title : "the query did not run");
-      setResult(null);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  const asOfNote = pastTenseNote(asOf);
-
-  const rows: Solution[] = useMemo(() => [...(result?.rows ?? [])], [result]);
-  const shape = useMemo(() => graphShape(rows), [rows]);
-  const notes = useMemo(
-    () =>
-      result
-        ? verdict(rows, {
-            truncated: result.truncated,
-            factsScanned: result.factsScanned,
-            plan: result.plan,
-            silencedFailures: result.silencedFailures,
-          })
-        : null,
-    [result, rows],
-  );
-
-  return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <div>
-        {/* level 2, matching Overview's own top-level heading — this page
-            sits directly under the app's h1, and level 4 here (found by
-            this slice's own axe check, the first to run against this
-            route) skipped two levels with nothing at 2 or 3 in between. */}
-        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
-          Workbench
-        </Title>
-        <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
-          SPARQL or Cypher over the same catalog graph, filtered to what you may
-          see. The plan shows what the engine read to answer you.
-        </Paragraph>
-      </div>
-
-      <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      {/* **Two languages, one graph, one results table.** The server renders
-          both through the identical outcome envelope, which is what lets the
-          plan, the budget and the error shape below be written once. */}
-      <Segmented
-        value={language}
-        aria-label="Query language"
-        onChange={(value) => setLanguage(value as Language)}
-        options={[
-          { label: "SPARQL", value: "sparql" },
-          { label: "Cypher", value: "cypher" },
-        ]}
-      />
-      {/* A result from the past that looks like a result from now is the one
-          failure this surface cannot afford: historical and stale data are
-          indistinguishable on screen unless something says which this is. */}
-      {asOfNote && <Alert type="warning" showIcon message={asOfNote} />}
-      <Input.TextArea
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        autoSize={{ minRows: 5, maxRows: 16 }}
-        spellCheck={false}
-        style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 13 }}
-      />
-
-      <Space>
-        <Button type="primary" loading={running} onClick={() => void run()}>
-          Run
-        </Button>
-        {result && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {rows.length} row{rows.length === 1 ? "" : "s"} · {result.factsScanned} facts read
-          </Text>
-        )}
-        {/* Epic 101 Slice E: result-level, not per-row — spareval gives no
-            hook to attribute one bound row to the SERVICE call that produced
-            it, only the query as a whole (see the plan's own scope note). */}
-        {result && result.federatedEndpoints.length > 0 && (
-          <Tooltip title="This answer includes data fetched live from these SERVICE endpoints.">
-            <span>
-              {result.federatedEndpoints.map((endpoint) => (
-                <Tag key={endpoint} color="blue">
-                  federated: {endpoint}
-                </Tag>
-              ))}
-            </span>
-          </Tooltip>
-        )}
-        {/* Epic 104's console criterion: "on any cross-vocabulary result the
-            alignment that made it reachable is inspectable — a result that
-            crossed an approximate match must be distinguishable from one
-            that did not, and not by colour alone." The tag's own text
-            (`alignmentBadgeLabel`) carries curated-vs-computed and, for a
-            computed match, its confidence — colour here is a supplementary
-            cue, never the only signal. The tooltip is what makes it
-            *inspectable*: the alignment's own left/right terms, source
-            detail, and directionality, without cluttering the results
-            table itself. */}
-        {result &&
-          result.alignmentsUsed.map((entry) => (
-            <Tooltip
-              key={entry.subject}
-              title={
-                <>
-                  {entry.left ?? "?"} → {entry.right ?? "?"}
-                  {entry.sourceDetail ? ` · ${entry.sourceDetail}` : ""}
-                  {entry.lossyReverse ? " · lossy walking back from right to left" : ""}
-                </>
-              }
-            >
-              <Tag color={entry.sourceKind === "computed" ? "gold" : "purple"}>
-                {alignmentBadgeLabel(entry)}
-              </Tag>
-            </Tooltip>
-          ))}
-      </Space>
-
-      {failed && <Alert type="error" showIcon message="The query did not run" description={failed} />}
-
-      {notes?.warnings.map((warning) => (
-        <Alert key={warning} type="warning" showIcon message={warning} />
-      ))}
-
-      {result && (
-        <Card size="small" title="Plan">
-          {/* One line per scan. A single `? ? ?` is the whole graph, and that
-              is exactly the entry worth seeing. */}
-          {result.plan.map((scan, i) => (
-            <div key={`${scan}-${i}`}>
-              <Text code style={{ fontSize: 12 }}>
-                {scan}
-              </Text>
-            </div>
-          ))}
-          {result.plan.length === 0 && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              No scan was needed.
-            </Text>
-          )}
-        </Card>
-      )}
-
-      {result && rows.length > 0 && (
-        <>
-          <Space>
-            <Button size="small" type={asGraph ? "default" : "primary"} onClick={() => setAsGraph(false)}>
-              Table
-            </Button>
-            {/* Offered only when the results *are* triples. Drawing arbitrary
-                columns as nodes asserts a relationship the query never
-                returned, and a picture is believed more readily than a table. */}
-            <Tooltip
-              title={
-                shape ? undefined : "These results are not triples, so there is no honest graph to draw."
-              }
-            >
-              <Button
-                size="small"
-                disabled={!shape}
-                type={asGraph ? "primary" : "default"}
-                onClick={() => setAsGraph(true)}
-              >
-                Graph
-              </Button>
-            </Tooltip>
-          </Space>
-
-          {asGraph && shape ? (
-            <Card size="small" styles={{ body: { height: 420, padding: 0 } }}>
-              <ReactFlow
-                nodes={toGraph(rows, shape).nodes.map((node, i) => ({
-                  id: node.id,
-                  position: { x: (i % 5) * 190, y: Math.floor(i / 5) * 110 },
-                  data: { label: node.label },
-                  style: {
-                    background: colors.surface,
-                    border: `1px solid ${colors.border}`,
-                    borderRadius: 8,
-                    fontSize: 12,
-                    padding: 6,
-                  },
-                }))}
-                edges={toGraph(rows, shape).edges.map((edge, i) => ({
-                  id: `${edge.from}-${edge.to}-${i}`,
-                  source: edge.from,
-                  target: edge.to,
-                  label: edge.label,
-                }))}
-                fitView
-                proOptions={{ hideAttribution: true }}
-              >
-                <Background />
-                <Controls />
-              </ReactFlow>
-            </Card>
-          ) : (
-            <Table
-              size="small"
-              rowKey={(_, i) => String(i)}
-              dataSource={rows.map((row, i) => ({ ...row, __i: i }))}
-              pagination={{ pageSize: 25, size: "small" }}
-              columns={resultColumns(rows, result.variables).map((name) => ({
-                title: name,
-                dataIndex: name,
-                key: name,
-                render: (value: string | undefined) =>
-                  value === undefined ? (
-                    // An unbound variable is not an empty string. `OPTIONAL`
-                    // produces exactly this, and rendering it blank makes
-                    // "no value" indistinguishable from "the empty value".
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      unbound
-                    </Text>
-                  ) : (
-                    <Tooltip title={value}>
-                      <Text style={{ fontSize: 12 }}>{displayTerm(value)}</Text>
-                    </Tooltip>
-                  ),
-              }))}
-            />
-          )}
-        </>
-      )}
-
-      {result && rows.length === 0 && !failed && (
-        <Card>
-          <Paragraph type="secondary" style={{ margin: 0 }}>
-            The query ran and matched nothing. That is an answer — it read{" "}
-            {result.factsScanned} facts to establish it.
-          </Paragraph>
-        </Card>
-      )}
-      </Space>
-    </Space>
-  );
-}
-
-
 /** Institutional memory about one entity — Epic 31 recall, Epic 41 Slice E
  *  on screen.
  *
@@ -3948,7 +3642,6 @@ function AppShell() {
       named === "explore" ||
       named === "overview" ||
       named === "governance" ||
-      named === "workbench" ||
       named === "vocabulary" ||
       named === "review" ||
       // "obligations" was missing here until now — a cold load or
@@ -4382,7 +4075,6 @@ function AppShell() {
                     icon: <SafetyCertificateOutlined />,
                     label: "Governance",
                   },
-                  { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
                   { key: "vocabulary", icon: <BookOutlined />, label: "Vocabulary" },
                   { key: "review", icon: <MergeOutlined />, label: "Review" },
                   { key: "obligations", icon: <CalendarOutlined />, label: "Obligations" },
@@ -4482,13 +4174,13 @@ function AppShell() {
               ) : section === "reconciliation" ? (
                 <ReconciliationWorkspace
                   onReview={() => setSection("review")}
-                  onWorkbench={() => setSection("workbench")}
+                  // Plan 120 Slice H: Workbench is now a tab inside Ontology
+                  // Builder, not its own destination.
+                  onWorkbench={() => setSection("ontology-builder")}
                   onVocabulary={() => setSection("vocabulary")}
                 />
               ) : section === "governance" ? (
                 <GovernancePage colors={colors} />
-              ) : section === "workbench" ? (
-                <WorkbenchPage colors={colors} asOf={asOf} />
               ) : section === "vocabulary" ? (
                 <VocabularySection />
               ) : section === "review" ? (
@@ -4500,7 +4192,7 @@ function AppShell() {
               ) : section === "admin" ? (
                 <AdminPage colors={colors} setSection={setSection} />
               ) : section === "ontology-builder" ? (
-                <OntologyBuilder colors={colors} />
+                <OntologyBuilder colors={colors} asOf={asOf} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">
