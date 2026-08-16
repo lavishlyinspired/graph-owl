@@ -820,6 +820,14 @@ name = "period-diff"
 path = "queries/period-diff.sparql"
 label = "What belongs to one filing period and not another"
 
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Plan 107 Slice 3: a subject's
+# full period history, ordered.
+[[queries]]
+name = "period-history"
+path = "queries/period-history.sparql"
+label = "Every filing period one subject belongs to, in order"
+
 [console]
 
 # **What this pack looks like on the reconciliation page — declared here, not

@@ -1,0 +1,43 @@
+# "Show this subject across every period it's appeared in" — Plan 107
+# Slice 3 (`plans/107-filing-period.md`), the third example from the
+# plan's own trigger.
+#
+# `belongsToPeriod` was declared `many = false`, but that flag turned out
+# to be enforced only *within one import batch* (found by direct test
+# against the running server, not assumed): asserting two values for the
+# same subject in a single `/graph/import/rdf` call gets the whole
+# subject rejected, but two separate imports each asserting one value
+# land without conflict — a genuinely multi-period subject is real and
+# buildable this way even though none of the current fixtures happen to
+# have one. This query reads directly off the edge rather than needing
+# the heavier canonical-`Invoice` multi-hop path (`recordedIn`/
+# `appearsIn`/`reflectedIn`) that would be the only way to reach multiple
+# periods if the edge were genuinely single-valued.
+#
+# **Two `GRAPH` blocks, joined on `?period`**, the same cross-graph shape
+# `provision-in-force.sparql` and `period-summary.sparql` already use:
+# the subject's own `belongsToPeriod` edges live in whichever fixture
+# graph landed that subject, and each `FilingPeriod`'s own `gst:period`
+# literal lives in `filing-periods.ttl`'s separate graph.
+#
+# **Ordered by the period's own literal, not its IRI.** They currently
+# sort identically (`period-YYYY-MM` embeds the same `YYYY-MM`), but the
+# literal is what "in period order" actually means; sorting the IRI would
+# be sorting an implementation detail that happens to agree.
+#
+# A subject with no `belongsToPeriod` edge at all returns an empty row
+# set — `run_pack_query`'s own established absent-vs-empty convention,
+# matching `period-summary.sparql` and `period-diff.sparql`.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?period ?periodLabel WHERE {
+  VALUES ?subject { <{{subject}}> }
+  GRAPH ?g {
+    ?subject gst:belongsToPeriod ?period .
+  }
+  GRAPH ?pg {
+    ?period gst:period ?periodLabel .
+  }
+}
+ORDER BY ?periodLabel

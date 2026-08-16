@@ -91,6 +91,44 @@ SELECT DISTINCT ?subject ?type ?onlyIn WHERE {
 ORDER BY ?onlyIn ?subject
 ";
 
+/// Plan 107 Slice 3 — "show this subject across every period it's
+/// appeared in", the third example from the plan's own trigger.
+/// `belongsToPeriod` was declared `many = false`, but that flag turned
+/// out to be advisory only (found by direct test against the running
+/// server, not assumed): a second `belongsToPeriod` assertion for an
+/// already-linked subject lands without error, so a genuinely
+/// multi-period subject is a real, buildable case even though none of
+/// the real fixtures happen to have one yet — this query reads directly
+/// off the edge rather than needing the heavier canonical-`Invoice`
+/// multi-hop path (`recordedIn`/`appearsIn`/`reflectedIn`) that would be
+/// the only way to reach multiple periods if the edge were genuinely
+/// single-valued.
+///
+/// **Two `GRAPH` blocks, joined on `?period`**, the same cross-graph
+/// shape `provision-in-force.sparql` and `period-summary.sparql` already
+/// use: the subject's own `belongsToPeriod` edges live in whichever
+/// fixture graph landed that subject, and each `FilingPeriod`'s own
+/// `gst:period` literal lives in `filing-periods.ttl`'s separate graph.
+///
+/// **Ordered by the period's own literal, not its IRI.** They currently
+/// sort identically (`period-YYYY-MM` embeds the same `YYYY-MM`), but the
+/// literal is what "in period order" actually means; sorting the IRI
+/// would be sorting an implementation detail that happens to agree.
+const PERIOD_HISTORY: &str = r"
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?period ?periodLabel WHERE {
+  VALUES ?subject { <{{subject}}> }
+  GRAPH ?g {
+    ?subject gst:belongsToPeriod ?period .
+  }
+  GRAPH ?pg {
+    ?period gst:period ?periodLabel .
+  }
+}
+ORDER BY ?periodLabel
+";
+
 async fn call(
     app: &axum::Router,
     method: &str,
@@ -202,6 +240,7 @@ async fn seed_two_periods_and_three_subjects(app: &axum::Router) {
             "queries": [
                 { "name": "period-summary", "query": PERIOD_SUMMARY },
                 { "name": "period-diff", "query": PERIOD_DIFF },
+                { "name": "period-history", "query": PERIOD_HISTORY },
             ],
         }),
     )
@@ -429,4 +468,130 @@ async fn period_diff_against_itself_does_not_double_count_rows() {
         "period-2020-07 has 2 real subjects; asking to diff it against \
          itself must not report each one twice: {body}"
     );
+}
+
+/// Plan 107 Slice 3's own acceptance example: a subject linked to more
+/// than one period is reported in period order, oldest first — proved
+/// against a subject deliberately given its edges in **reverse**
+/// chronological order, so a passing test can only mean the query's own
+/// `ORDER BY` did the sorting, not accidental insertion order.
+///
+/// **Two separate imports, not one turtle blob with two triples.** Found
+/// by running this exact test, not assumed: `belongsToPeriod` is
+/// declared `many = false`, and that turns out to be enforced *within
+/// one import batch* — asserting two values for the same subject in a
+/// single `/graph/import/rdf` call gets the **whole subject** rejected
+/// ("this batch asserts more than one value"), not just the extra value,
+/// so the first attempt at this test silently landed nothing and
+/// `period-history` correctly reported zero rows for a subject that was
+/// never actually in the graph. Splitting into two sequential imports (a
+/// real caller doing this over two separate uploads, not a single
+/// request) is what actually produces the multi-period subject the
+/// query needs to prove itself against.
+#[tokio::test]
+async fn period_history_reports_every_period_a_subject_belongs_to_in_order() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let first = r"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:pr-INV-3099 rdf:type gst:PurchaseInvoice ;
+            gst:belongsToPeriod gst:period-2026-07 .
+    ";
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-filing-period-history-test-1&format=turtle",
+        "text/turtle",
+        first.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first import: {body}");
+
+    let second = r"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+
+        gst:pr-INV-3099 gst:belongsToPeriod gst:period-2020-07 .
+    ";
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-filing-period-history-test-2&format=turtle",
+        "text/turtle",
+        second.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second import: {body}");
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-history/run",
+        serde_json::json!({
+            "bindings": { "subject": "https://graph-owl.dev/packs/gst#pr-INV-3099" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 2, "{body}");
+    assert_eq!(rows[0]["periodLabel"], "\"2020-07\"", "{body}");
+    assert_eq!(
+        rows[0]["period"], "<https://graph-owl.dev/packs/gst#period-2020-07>",
+        "{body}"
+    );
+    assert_eq!(rows[1]["periodLabel"], "\"2026-07\"", "{body}");
+    assert_eq!(
+        rows[1]["period"], "<https://graph-owl.dev/packs/gst#period-2026-07>",
+        "{body}"
+    );
+}
+
+/// A subject with exactly one period reports exactly one row — the
+/// common case, not just the multi-period one.
+#[tokio::test]
+async fn period_history_for_a_single_period_subject_reports_one_row() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-history/run",
+        serde_json::json!({
+            "bindings": { "subject": "https://graph-owl.dev/packs/gst#pr-INV-1099" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["periodLabel"], "\"2020-07\"", "{body}");
+}
+
+/// A subject with no `belongsToPeriod` edge at all — `run_pack_query`'s
+/// own established absent-vs-empty convention, matching `period-summary`
+/// and `period-diff`.
+#[tokio::test]
+async fn period_history_for_an_unlinked_subject_is_empty_not_an_error() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-history/run",
+        serde_json::json!({
+            "bindings": { "subject": "https://graph-owl.dev/packs/gst#pr-INV-9999" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert!(rows.is_empty(), "{body}");
 }
