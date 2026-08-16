@@ -52,7 +52,13 @@ import { RelationshipPanel } from "./RelationshipPanel";
 import { SupportingVocabulary } from "./SupportingVocabulary";
 import { OntologyCanvas, type EdgeStyle, type LayoutName } from "./OntologyCanvas";
 import { loadModel, saveModel } from "./state";
-import { entityById, relationshipById, toFlowElements } from "./flowModel";
+import {
+  entityById,
+  filterModelByNamespace,
+  namespacesIn,
+  relationshipById,
+  toFlowElements,
+} from "./flowModel";
 import {
   exportModel,
   importModel,
@@ -107,6 +113,8 @@ const COPY = {
   sources: "Sources",
   layout: "Layout",
   edges: "Edges",
+  namespace: "Namespace",
+  allNamespaces: "All namespaces",
   format: "Format",
   filter: "Filter",
   resetView: "Reset view",
@@ -140,6 +148,11 @@ const EDGE_OPTIONS: { value: EdgeStyle; label: string }[] = [
   { value: "polyline", label: "Polyline" },
   { value: "orthogonal", label: "Orthogonal" },
 ];
+
+/** A real namespace is always an IRI, so this can never collide with one —
+ *  the sentinel Radix's `Select` needs since it has no native "unselected"
+ *  value, standing in for `namespaceFilter === null` ("all namespaces"). */
+const ALL_NAMESPACES = "__all__";
 
 const FORMAT_OPTIONS: { value: ExportFormat; label: string }[] = (
   Object.keys(FORMAT_LABELS) as ExportFormat[]
@@ -186,6 +199,9 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
   const [model, setModel] = useState<OntologyModel>(() => loadModel());
   const [layout, setLayout] = useState<LayoutName>("radial");
   const [edgeStyle, setEdgeStyle] = useState<EdgeStyle>("polyline");
+  /** `null` means "all namespaces" — the filter's own default, and the same
+   *  value `filterModelByNamespace` treats as unfiltered. Plan 120 Slice B. */
+  const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
   const [format, setFormat] = useState<ExportFormat>("json");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resetToken, setResetToken] = useState(0);
@@ -263,7 +279,14 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
     // Runs once on mount — the effect body itself decides liveness.
   }, []);
 
-  const elements = useMemo(() => toFlowElements(model), [model]);
+  /** Every namespace an entity in this model actually has — hidden from
+   *  the filter control entirely when empty, matching this codebase's own
+   *  "a filter with nothing to filter is noise" rule. */
+  const availableNamespaces = useMemo(() => namespacesIn(model), [model]);
+  const elements = useMemo(
+    () => toFlowElements(filterModelByNamespace(model, namespaceFilter)),
+    [model, namespaceFilter],
+  );
 
   const selectedEntity = useMemo(
     () => (selectedId ? entityById(model, selectedId) ?? null : null),
@@ -514,6 +537,37 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
                       ))}
                     </SelectContent>
                   </Select>
+                  {/* Plan 120 Slice B — restored after commit 5cd2fd4 dropped
+                      it merging OntologyEditor.tsx's Check/Save logic into
+                      this file without carrying the filter over. Hidden
+                      entirely when the model has no namespaced entity yet —
+                      a filter with one option ("all") that changes nothing
+                      is noise, not a control. */}
+                  {availableNamespaces.length > 0 && (
+                    <>
+                      <span className="text-xs uppercase tracking-wide" style={{ color: colors.textSubtle }}>
+                        {COPY.namespace}
+                      </span>
+                      <Select
+                        value={namespaceFilter ?? ALL_NAMESPACES}
+                        onValueChange={(v) =>
+                          setNamespaceFilter(typeof v === "string" && v !== ALL_NAMESPACES ? v : null)
+                        }
+                      >
+                        <SelectTrigger className="w-[160px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={ALL_NAMESPACES}>{COPY.allNamespaces}</SelectItem>
+                          {availableNamespaces.map((ns) => (
+                            <SelectItem key={ns} value={ns}>
+                              {ns}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </>
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button

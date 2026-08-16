@@ -47,7 +47,7 @@ export function AddEntityTypeDialog({ model, onChange }: AddEntityTypeDialogProp
 
   const submit = () => {
     if (!name.trim()) return;
-    onChange(addEntityType(model, { name, displayName, description, color }));
+    onChange(addEntityType(model, { name, displayName, description, color, namespace: null }));
     setOpen(false);
     reset();
   };

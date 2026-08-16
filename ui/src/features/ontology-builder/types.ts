@@ -39,6 +39,12 @@ export interface EntityType {
   /** A colour hex for the diagram node. */
   readonly color: string;
   readonly attributes: readonly Attribute[];
+  /** The IRI prefix this class was declared under, when it came from an
+   *  imported document (`namespaceOf` in `flowModel.ts`) — `null` for an
+   *  entity added by hand in the builder, which has no source document to
+   *  take one from. Plan 120 Slice B: what the namespace filter narrows
+   *  the graph view by. */
+  readonly namespace: string | null;
 }
 
 export interface Relationship {

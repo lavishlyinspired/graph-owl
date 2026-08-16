@@ -115,3 +115,31 @@ describe("OntologyBuilder canvas control layout — Plan 117", () => {
     expect(header![0]).toMatch(/handleImport/);
   });
 });
+
+/** Plan 120 Slice B — the namespace-filtered graph view, restored after
+ *  commit `5cd2fd4` dropped it merging the deleted `OntologyEditor.tsx`'s
+ *  Check/Save logic into this file's Code tab without carrying the filter
+ *  over. `flowModel.test.ts` proves `namespaceOf`/`namespacesIn`/
+ *  `filterModelByNamespace` themselves; this proves the component actually
+ *  wires them into what gets rendered. */
+describe("the namespace filter", () => {
+  it("narrows the elements the canvas actually receives, not just some unused state", () => {
+    expect(source).toMatch(/filterModelByNamespace\(model, namespaceFilter\)/);
+    expect(source).toMatch(/toFlowElements\(filterModelByNamespace/);
+  });
+
+  it("offers every namespace the loaded model actually has, plus an 'all' option", () => {
+    expect(source).toMatch(/namespacesIn\(model\)/);
+    expect(source).toMatch(/COPY\.allNamespaces/);
+  });
+
+  it("is hidden entirely when the model has no namespaced entity yet, not shown with one dead option", () => {
+    const control = source.match(/availableNamespaces\.length > 0 && \([\s\S]*?\n\s*\)\)\}/);
+    expect(control).not.toBeNull();
+    expect(control![0]).toMatch(/ALL_NAMESPACES/);
+  });
+
+  it("a real namespace can never collide with the 'all' sentinel — every namespace is an IRI", () => {
+    expect(source).toMatch(/const ALL_NAMESPACES = "__all__"/);
+  });
+});

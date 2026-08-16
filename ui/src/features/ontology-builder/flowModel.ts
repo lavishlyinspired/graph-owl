@@ -66,3 +66,54 @@ export function relationshipById(model: OntologyModel, id: string): Relationship
 export function entityById(model: OntologyModel, id: string): EntityType | undefined {
   return model.entityTypes.find((e) => e.id === id);
 }
+
+/** An IRI's own namespace prefix — the last `#`, else the last `/`, else
+ *  the whole string when neither separator exists. Plan 120 Slice B: the
+ *  identical algorithm the deleted `ontologyDocument.ts`'s `namespaceOf`
+ *  used, restored rather than reinvented. */
+export function namespaceOf(iri: string): string {
+  const hash = iri.lastIndexOf("#");
+  if (hash !== -1) return iri.slice(0, hash + 1);
+  const slash = iri.lastIndexOf("/");
+  return slash !== -1 ? iri.slice(0, slash + 1) : iri;
+}
+
+/** Every distinct namespace an entity in this model was declared under,
+ *  sorted. A manually added entity (`namespace: null`) contributes nothing
+ *  — it has no namespace to offer the filter a choice of. */
+export function namespacesIn(model: OntologyModel): readonly string[] {
+  const namespaces = new Set<string>();
+  for (const entity of model.entityTypes) {
+    if (entity.namespace !== null) namespaces.add(entity.namespace);
+  }
+  return [...namespaces].sort();
+}
+
+/** The model narrowed to one namespace's own entities, for the graph
+ *  view's namespace filter — Plan 120 Slice B. `null` means "all
+ *  namespaces" and returns the model unchanged, matching the filter's own
+ *  "no selection" default.
+ *
+ *  **A relationship survives only when both endpoints do.** The old,
+ *  triple-level filter (`ontologyDocument.ts`, deleted) kept an edge when
+ *  either its subject or its predicate matched; entities and relationships
+ *  are separate collections now, and a relationship has no namespace of
+ *  its own to test — an edge pointing at a node the filter just hid would
+ *  be a dangling reference the canvas cannot draw correctly, so both ends
+ *  must stay for the edge to stay. */
+export function filterModelByNamespace(
+  model: OntologyModel,
+  namespace: string | null,
+): OntologyModel {
+  if (namespace === null) return model;
+  const keptIds = new Set(
+    model.entityTypes.filter((e) => e.namespace === namespace).map((e) => e.id),
+  );
+  return {
+    ...model,
+    entityTypes: model.entityTypes.filter((e) => keptIds.has(e.id)),
+    relationships: model.relationships.filter(
+      (r) => keptIds.has(r.fromEntityTypeId) && keptIds.has(r.toEntityTypeId),
+    ),
+  };
+}

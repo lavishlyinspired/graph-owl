@@ -8,6 +8,7 @@
 
 import type { Cardinality, OntologyModel, Relationship } from "./types";
 import { EMPTY_MODEL, addEntityType, addRelationship, nextEntityColor } from "./state";
+import { namespaceOf } from "./flowModel";
 
 export type ExportFormat = "json" | "ttl" | "owl" | "jsonld" | "ntriples";
 
@@ -402,6 +403,7 @@ function triplesToModel(triples: ParsedTriple[]): OntologyModel {
       displayName: cls.label || cls.iri.split(/[#/]/).pop() || "Entity",
       description: cls.comment,
       color: cls.color ?? nextEntityColor(index),
+      namespace: namespaceOf(cls.iri),
     });
     classMap.set(cls.iri, model.entityTypes[model.entityTypes.length - 1]!.id);
   });
@@ -483,6 +485,7 @@ export function importJsonLd(text: string): OntologyModel {
         displayName: label || id.split(/[#/]/).pop() || "Entity",
         description: comment,
         color: seeAlso ?? nextEntityColor(classIndex),
+        namespace: namespaceOf(id),
       });
       classIndex += 1;
       classMap.set(id, model.entityTypes[model.entityTypes.length - 1]!.id);

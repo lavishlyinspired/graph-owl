@@ -17,6 +17,7 @@ function sampleModel(): OntologyModel {
     displayName: "Customer",
     description: "A customer",
     color: "#2A78D6",
+    namespace: null,
   });
   const customerId = model.entityTypes[0]!.id;
   model = addEntityType(model, {
@@ -24,6 +25,7 @@ function sampleModel(): OntologyModel {
     displayName: "Order",
     description: "A purchase order",
     color: "#16A34A",
+    namespace: null,
   });
   const orderId = model.entityTypes[1]!.id;
   model = addRelationship(model, {

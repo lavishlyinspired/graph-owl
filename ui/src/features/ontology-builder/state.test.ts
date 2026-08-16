@@ -26,6 +26,7 @@ function modelWithEntity(name: string): OntologyModel {
     displayName: name,
     description: "",
     color: "#000000",
+    namespace: null,
   });
 }
 
@@ -53,6 +54,7 @@ describe("entity type CRUD", () => {
       displayName: "Order",
       description: "",
       color: "#000000",
+      namespace: null,
     });
     model = addRelationship(model, {
       fromEntityTypeId: model.entityTypes[0]!.id,
@@ -98,6 +100,7 @@ describe("relationship CRUD", () => {
       displayName: "Order",
       description: "",
       color: "#000000",
+      namespace: null,
     });
     model = addRelationship(model, {
       fromEntityTypeId: model.entityTypes[0]!.id,
@@ -156,6 +159,7 @@ describe("import/export", () => {
       displayName: "Order",
       description: "",
       color: "#000000",
+      namespace: null,
     });
     const json = JSON.stringify(model);
     const imported = importJson(json);
