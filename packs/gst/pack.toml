@@ -811,6 +811,15 @@ name = "period-summary"
 path = "queries/period-summary.sparql"
 label = "Everything belonging to one filing period"
 
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Plan 107 Slice 2, the
+# narrowest real cross-period question: which subjects belong to exactly
+# one of two named periods.
+[[queries]]
+name = "period-diff"
+path = "queries/period-diff.sparql"
+label = "What belongs to one filing period and not another"
+
 [console]
 
 # **What this pack looks like on the reconciliation page — declared here, not

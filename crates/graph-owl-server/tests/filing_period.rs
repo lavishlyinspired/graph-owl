@@ -52,6 +52,45 @@ SELECT ?subject ?type WHERE {
 ORDER BY ?subject
 ";
 
+/// Plan 107 Slice 2 — "what changed between period A and period B", for
+/// the narrowest real case: which subjects belong to exactly one of the
+/// two. Resolved directly (grill-me is user-invocable only) in favor of
+/// generalizing `period-summary`'s own mechanism over an invoice-lifecycle
+/// reading of "status": a `PurchaseInvoice` belongs to exactly one period
+/// by construction (`gst:period` is set once), so diffing "invoices in A"
+/// against "invoices in B" is trivially disjoint for that subject type —
+/// the query earns its keep for subjects that can legitimately exist for
+/// one period and not another, like a `Gstr1Filing` a supplier submitted
+/// in July and never in August.
+///
+/// **`VALUES ?onlyIn { <{{periodA}}> <{{periodB}}> }` — two rows, not
+/// `UNION`.** Both are supported by the query engine (`GraphPattern::
+/// Union`/`GraphPattern::Values` in `graph-owl-query`'s pushdown analysis),
+/// but no query in this pack had used multi-row `VALUES` before this one;
+/// `provision-in-force.sparql`'s own single-row `VALUES ?invoice
+/// { <{{invoice}}> }` is the closest precedent, extended by one row rather
+/// than introducing an unproven-in-this-pack construct where a simpler one
+/// already does the job — each row is tried against the same graph
+/// pattern in turn, tagging `?onlyIn` with whichever period bound it.
+///
+/// **`SELECT DISTINCT`, found by the RED test, not assumed.** Asking to
+/// diff a period against itself binds the same IRI to `?onlyIn` twice —
+/// plain SPARQL `SELECT` does not deduplicate, so without `DISTINCT`
+/// every real subject in that period comes back **twice**, silently
+/// doubling an answer a caller has every reason to trust.
+const PERIOD_DIFF: &str = r"
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT DISTINCT ?subject ?type ?onlyIn WHERE {
+  VALUES ?onlyIn { <{{periodA}}> <{{periodB}}> }
+  GRAPH ?g {
+    ?subject gst:belongsToPeriod ?onlyIn ;
+             a ?type .
+  }
+}
+ORDER BY ?onlyIn ?subject
+";
+
 async fn call(
     app: &axum::Router,
     method: &str,
@@ -160,11 +199,14 @@ async fn seed_two_periods_and_three_subjects(app: &axum::Router) {
         "POST",
         "/packs/gst/queries",
         serde_json::json!({
-            "queries": [{ "name": "period-summary", "query": PERIOD_SUMMARY }],
+            "queries": [
+                { "name": "period-summary", "query": PERIOD_SUMMARY },
+                { "name": "period-diff", "query": PERIOD_DIFF },
+            ],
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "declare period-summary: {body}");
+    assert_eq!(status, StatusCode::OK, "declare period queries: {body}");
 }
 
 /// The walking skeleton's own acceptance example: `run_pack_query(gst,
@@ -272,5 +314,119 @@ async fn the_pre_existing_period_literal_still_binds_directly_unaffected_by_the_
     assert_eq!(
         rows[0]["invoice"], "<https://graph-owl.dev/packs/gst#pr-INV-1099>",
         "{body}"
+    );
+}
+
+/// Plan 107 Slice 2's own acceptance example, adapted to bind periods by
+/// IRI (Slice 1's own precedent, not a bare string): every subject
+/// belonging to `2020-07` is reported tagged `onlyIn` that period, every
+/// subject belonging to `2026-07` tagged the other way, and nothing is
+/// reported for a subject belonging to neither — the generalized reading
+/// of "silence is the signal" this slice's chosen design implements.
+#[tokio::test]
+async fn period_diff_tags_every_subject_with_which_of_the_two_periods_it_belongs_to() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-diff/run",
+        serde_json::json!({
+            "bindings": {
+                "periodA": "https://graph-owl.dev/packs/gst#period-2020-07",
+                "periodB": "https://graph-owl.dev/packs/gst#period-2026-07",
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 3, "{body}");
+    let by_subject: std::collections::BTreeMap<&str, &str> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["subject"].as_str().expect("subject"),
+                row["onlyIn"].as_str().expect("onlyIn"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_subject.get("<https://graph-owl.dev/packs/gst#pr-INV-1099>"),
+        Some(&"<https://graph-owl.dev/packs/gst#period-2020-07>"),
+        "{body}"
+    );
+    assert_eq!(
+        by_subject.get("<https://graph-owl.dev/packs/gst#g1filing-INV-1099>"),
+        Some(&"<https://graph-owl.dev/packs/gst#period-2020-07>"),
+        "{body}"
+    );
+    assert_eq!(
+        by_subject.get("<https://graph-owl.dev/packs/gst#pr-INV-2099>"),
+        Some(&"<https://graph-owl.dev/packs/gst#period-2026-07>"),
+        "{body}"
+    );
+}
+
+/// Two periods neither of which has any linked subject — `period-diff`
+/// stays consistent with `period-summary`'s own absent-vs-empty
+/// convention rather than inventing a different failure mode for the
+/// two-period case.
+#[tokio::test]
+async fn period_diff_between_two_unknown_periods_is_empty_not_an_error() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-diff/run",
+        serde_json::json!({
+            "bindings": {
+                "periodA": "https://graph-owl.dev/packs/gst#period-1999-01",
+                "periodB": "https://graph-owl.dev/packs/gst#period-1999-02",
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert!(rows.is_empty(), "{body}");
+}
+
+/// **The edge case a naive two-row `VALUES` invites**: asking to "diff" a
+/// period against itself must not double every row just because the same
+/// IRI was bound twice. Not in the plan's own acceptance examples — added
+/// because the RED-phase mutator scan flags "duplicate input rows" as
+/// exactly the kind of boundary a `VALUES`-based query can get wrong
+/// silently.
+#[tokio::test]
+async fn period_diff_against_itself_does_not_double_count_rows() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/period-diff/run",
+        serde_json::json!({
+            "bindings": {
+                "periodA": "https://graph-owl.dev/packs/gst#period-2020-07",
+                "periodB": "https://graph-owl.dev/packs/gst#period-2020-07",
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "period-2020-07 has 2 real subjects; asking to diff it against \
+         itself must not report each one twice: {body}"
     );
 }

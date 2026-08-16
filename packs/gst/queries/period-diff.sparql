@@ -1,0 +1,52 @@
+# "What changed between period A and period B" — Plan 107 Slice 2
+# (`plans/107-filing-period.md`), the narrowest real case: which subjects
+# belong to exactly one of the two named periods, tagged with which.
+#
+# **Resolved by direct question, not invented**: a `PurchaseInvoice`
+# belongs to exactly one period by construction (`gst:period` is set
+# once, never moves), so diffing "invoices in A" against "invoices in B"
+# is trivially disjoint for that subject type — the answer earns its keep
+# for subjects that can legitimately exist for one period and not
+# another, like a `Gstr1Filing` a supplier submitted in July and never in
+# August. A different reading (comparing an invoice's own GSTR-2B
+# reflection timing across periods) was considered and set aside as a
+# bigger, later slice — this one generalizes `period-summary.sparql`'s
+# own mechanism rather than modeling invoice lifecycle state.
+#
+# **Two `VALUES` rows below, not `UNION`.** Both are supported by the
+# query engine, but no query in this pack had used multi-row `VALUES`
+# before this one; `provision-in-force.sparql`'s own single-row
+# `VALUES ?invoice { ... }` binding is the closest precedent, extended by
+# one row rather than introducing an unproven-in-this-pack construct
+# where a simpler one already does the job — each row is tried against
+# the same graph pattern in turn, tagging `?onlyIn` with whichever period
+# bound it.
+#
+# CAUTION for whoever edits this file: `placeholder_names` (the
+# `graph-owl-api` function that finds a registered query's required
+# bindings) scans the *whole* query text, comments included — writing a
+# placeholder's double-brace form in a comment, even to name a
+# *different* query's placeholder, silently demands that binding here
+# too. This bit `period-summary.sparql` once already; avoid double
+# braces in this file's prose entirely.
+#
+# **`SELECT DISTINCT`, found by the RED test, not assumed.** Asking to
+# diff a period against itself binds the same IRI to `?onlyIn` twice —
+# plain SPARQL `SELECT` does not deduplicate, so without `DISTINCT` every
+# real subject in that period comes back **twice**, silently doubling an
+# answer a caller has every reason to trust.
+#
+# Two periods with no linked subject at all return an empty row set —
+# `run_pack_query`'s own established absent-vs-empty convention, matching
+# `period-summary.sparql`, not a `NotFound` error.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT DISTINCT ?subject ?type ?onlyIn WHERE {
+  VALUES ?onlyIn { <{{periodA}}> <{{periodB}}> }
+  GRAPH ?g {
+    ?subject gst:belongsToPeriod ?onlyIn ;
+             a ?type .
+  }
+}
+ORDER BY ?onlyIn ?subject
