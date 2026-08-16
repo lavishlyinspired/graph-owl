@@ -1,0 +1,38 @@
+# "This month vs. last" without the caller naming an exact period
+# literal — Plan 107 Slice 5 (`plans/107-filing-period.md`).
+#
+# **Deliberately not calendar arithmetic** (subtracting one month from
+# `"2020-07"` to get `"2020-06"`): the plan's own Defers column rules
+# out "calendar-locale reasoning", and subtracting a literal month could
+# resolve to a period that was never filed, giving a caller a period IRI
+# `period-summary.sparql` correctly reports as empty rather than the
+# answer they actually wanted. Instead this returns every `FilingPeriod`
+# whose own label sorts strictly before the given one, most recent
+# first — "previous" means the closest period that genuinely *exists*,
+# and a caller wanting exactly one takes the first row.
+#
+# `gst:period` values are plain string literals, and SPARQL's `<` on
+# simple literals is lexical/codepoint comparison per spec, which sorts
+# a zero-padded `YYYY-MM` string chronologically for free — the same
+# property `provision-in-force.sparql`'s own `FILTER (?effectiveFrom <=
+# ?date)` already relies on for date-shaped strings.
+#
+# A period IRI that has nothing before it (the earliest one, or one
+# naming no `FilingPeriod` at all) returns an empty row set —
+# `run_pack_query`'s own established absent-vs-empty convention, not a
+# `NotFound` error.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?previous ?previousLabel WHERE {
+  VALUES ?period { <{{period}}> }
+  GRAPH ?g1 {
+    ?period gst:period ?thisLabel .
+  }
+  GRAPH ?g2 {
+    ?previous a gst:FilingPeriod ;
+              gst:period ?previousLabel .
+  }
+  FILTER (?previousLabel < ?thisLabel)
+}
+ORDER BY DESC(?previousLabel)

@@ -149,6 +149,40 @@ SELECT ?period ?periodLabel WHERE {
 ORDER BY ?periodLabel
 ";
 
+/// Plan 107 Slice 5 — "this month vs. last" without the caller naming an
+/// exact period literal. Deliberately **not** calendar arithmetic
+/// (subtracting one month from `"2020-07"` to get `"2020-06"`): the
+/// plan's own Defers column rules out "calendar-locale reasoning", and
+/// subtracting a literal month could resolve to a period that was never
+/// filed, giving a caller a period IRI `period-summary` correctly
+/// reports as empty rather than the answer they actually wanted. Instead
+/// this returns every `FilingPeriod` whose own label sorts strictly
+/// before the given one, most recent first — "previous" means the
+/// closest period that genuinely *exists*, and a caller wanting exactly
+/// one takes the first row. `gst:period` values are plain string
+/// literals (`gst:period-2020-06 < gst:period-2020-07`... no — the
+/// **labels** `"2020-06" < "2020-07"`), and SPARQL's `<` on simple
+/// literals is lexical/codepoint comparison per spec, which sorts a
+/// zero-padded `YYYY-MM` string chronologically for free — the same
+/// property `provision-in-force.sparql`'s own `FILTER (?effectiveFrom
+/// <= ?date)` already relies on for date-shaped strings.
+const PERIODS_BEFORE: &str = r"
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?previous ?previousLabel WHERE {
+  VALUES ?period { <{{period}}> }
+  GRAPH ?g1 {
+    ?period gst:period ?thisLabel .
+  }
+  GRAPH ?g2 {
+    ?previous a gst:FilingPeriod ;
+              gst:period ?previousLabel .
+  }
+  FILTER (?previousLabel < ?thisLabel)
+}
+ORDER BY DESC(?previousLabel)
+";
+
 async fn call(
     app: &axum::Router,
     method: &str,
@@ -262,6 +296,7 @@ async fn seed_two_periods_and_three_subjects(app: &axum::Router) {
                 { "name": "period-diff", "query": PERIOD_DIFF },
                 { "name": "period-history", "query": PERIOD_HISTORY },
                 { "name": "period-list", "query": PERIOD_LIST },
+                { "name": "periods-before", "query": PERIODS_BEFORE },
             ],
         }),
     )
@@ -644,6 +679,109 @@ async fn period_list_reports_every_filing_period_no_binding_required() {
     assert_eq!(rows[1]["periodLabel"], "\"2026-07\"", "{body}");
     assert_eq!(
         rows[1]["period"], "<https://graph-owl.dev/packs/gst#period-2026-07>",
+        "{body}"
+    );
+}
+
+/// Plan 107 Slice 5's own acceptance example: given `2020-07` and
+/// `2026-07` both present, "compare to previous period" from `2026-07`
+/// resolves to `2020-07` without the caller naming it — the shared
+/// seed's own two periods already prove this without any extra data.
+#[tokio::test]
+async fn periods_before_finds_the_only_earlier_period() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/periods-before/run",
+        serde_json::json!({
+            "bindings": { "period": "https://graph-owl.dev/packs/gst#period-2026-07" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["previousLabel"], "\"2020-07\"", "{body}");
+    assert_eq!(
+        rows[0]["previous"], "<https://graph-owl.dev/packs/gst#period-2020-07>",
+        "{body}"
+    );
+}
+
+/// The earliest period has nothing before it — `run_pack_query`'s own
+/// established absent-vs-empty convention, matching every other query in
+/// this file.
+#[tokio::test]
+async fn periods_before_the_earliest_period_is_empty_not_an_error() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/periods-before/run",
+        serde_json::json!({
+            "bindings": { "period": "https://graph-owl.dev/packs/gst#period-2020-07" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert!(rows.is_empty(), "{body}");
+}
+
+/// **The closest existing period wins, not merely "any earlier one".**
+/// Three periods, with the third imported after the shared seed so a
+/// passing test cannot be explained by insertion order alone:
+/// `periods-before` on `2026-08` must put `2026-07` first, not
+/// `2020-07` — proving `ORDER BY DESC(?previousLabel)` actually orders
+/// rather than just filtering.
+#[tokio::test]
+async fn periods_before_orders_the_closest_period_first() {
+    let (app, _container, _) = test_app().await;
+    seed_two_periods_and_three_subjects(&app).await;
+
+    let turtle = r"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:period-2026-08 rdf:type gst:FilingPeriod ;
+            gst:period '2026-08' .
+    ";
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-filing-period-third&format=turtle",
+        "text/turtle",
+        turtle.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import: {body}");
+
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/queries/periods-before/run",
+        serde_json::json!({
+            "bindings": { "period": "https://graph-owl.dev/packs/gst#period-2026-08" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 2, "{body}");
+    assert_eq!(
+        rows[0]["previous"], "<https://graph-owl.dev/packs/gst#period-2026-07>",
+        "the closest period must be first: {body}"
+    );
+    assert_eq!(
+        rows[1]["previous"], "<https://graph-owl.dev/packs/gst#period-2020-07>",
         "{body}"
     );
 }

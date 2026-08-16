@@ -836,6 +836,14 @@ name = "period-list"
 path = "queries/period-list.sparql"
 label = "Every filing period this pack has"
 
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Plan 107 Slice 5: "this month
+# vs. last" without naming an exact period literal.
+[[queries]]
+name = "periods-before"
+path = "queries/periods-before.sparql"
+label = "Every filing period before this one, most recent first"
+
 [console]
 
 # **What this pack looks like on the reconciliation page — declared here, not
