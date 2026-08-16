@@ -15,7 +15,8 @@ this session's use of realistic sample data happened to surface.
 
 from __future__ import annotations
 
-from app.main import _auto_map, _select_results
+from app import graphowl_client, main
+from app.main import _auto_map, _ingest_to_graphowl, _select_results
 from app.reconciliation import STATUS_MATCHED
 
 
@@ -84,3 +85,66 @@ class TestSelectResultsCutsOverToNativeFindings:
         )
         assert results[0]["status"] == STATUS_MATCHED
         assert len(results) == 1
+
+
+class TestIngestUsesAStableSourceReplacedOnEveryUpload:
+    """Plan 120 Slice D — confirmed root cause of totals that grew across
+    every upload a session ever made: `_ingest_to_graphowl` minted a fresh
+    random source per call, so a re-upload never replaced the last one, it
+    only added a new named graph beside it. Now: one stable source per
+    kind, deleted immediately before each import."""
+
+    def _dataset(self) -> dict:
+        return {
+            "headers": ["Invoice No", "GSTIN"],
+            "rows": [{"Invoice No": "INV-1", "GSTIN": "27AAAFN2938K1Z2"}],
+        }
+
+    def _mapping(self) -> dict:
+        return {"invoice_no": 0, "supplier_gstin": 1}
+
+    def test_deletes_the_stable_source_before_importing_it(self, monkeypatch):
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            graphowl_client,
+            "delete_document",
+            lambda server, source, token=None: calls.append(("delete", source)) or {"deleted": 0},
+        )
+        monkeypatch.setattr(
+            graphowl_client,
+            "import_document",
+            lambda server, source, turtle, token=None: calls.append(("import", source))
+            or {"landed": [], "skipped": [], "rejected": []},
+        )
+        main.SESSION["graphowl"] = {}
+
+        thread = _ingest_to_graphowl("books", self._dataset(), self._mapping())
+        thread.join()
+
+        assert calls == [("delete", "reco-books"), ("import", "reco-books")], (
+            "delete must run, and against the same source import then uses, "
+            f"before the import: {calls}"
+        )
+
+    def test_the_source_is_the_same_across_repeated_uploads_of_the_same_kind(self, monkeypatch):
+        sources: list[str] = []
+        monkeypatch.setattr(
+            graphowl_client,
+            "delete_document",
+            lambda server, source, token=None: {"deleted": 0},
+        )
+        monkeypatch.setattr(
+            graphowl_client,
+            "import_document",
+            lambda server, source, turtle, token=None: sources.append(source)
+            or {"landed": [], "skipped": [], "rejected": []},
+        )
+        main.SESSION["graphowl"] = {}
+
+        _ingest_to_graphowl("books", self._dataset(), self._mapping()).join()
+        _ingest_to_graphowl("books", self._dataset(), self._mapping()).join()
+
+        assert sources == ["reco-books", "reco-books"], (
+            "a random suffix here is exactly the bug this slice fixes — two "
+            f"uploads of the same kind must land in the same graph: {sources}"
+        )

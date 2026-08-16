@@ -66,3 +66,5 @@ __pycache__/
 # Pack loader: editable-install metadata, same as the worker and SDK above.
 /connectors/python/*.egg-info/
 .git/credentials
+research
+/research

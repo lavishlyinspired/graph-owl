@@ -272,16 +272,28 @@ def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> threading.Th
     Returns the thread so `/api/upload` can hand it to `/api/reconcile`,
     which joins every ingest thread before asking graph-owl to reconcile —
     the native engine can only find what has actually landed
-    (plans/119-architecture-audit.md §9)."""
+    (plans/119-architecture-audit.md §9).
+
+    **One stable source per kind, deleted immediately before every
+    import** (plans/120-domain-agnostic-console-and-investigation-
+    workspace.md, Slice D) — not a fresh random source per upload, which
+    was the confirmed root cause of totals that grew across every upload a
+    session ever made: `POST /graph/import/rdf` only dedupes *within* one
+    source's own import graph, so a new random name every time meant a
+    re-upload never replaced anything, it only added a parallel copy every
+    finding query's unbound `GRAPH ?g { }` pattern then matched alongside
+    the original. Deleting first, under the same stable name, makes a
+    re-upload a genuine replacement."""
 
     def _run() -> None:
         try:
             normalized = _normalize(dataset, mapping)
             turtle = graphowl_client.rows_to_turtle(normalized, kind)
+            source = f"reco-{kind}"
             if not turtle:
                 SESSION["graphowl"][kind] = {"landed": 0, "skipped": 0, "rejected": []}
                 return
-            source = f"reco-{kind}-{uuid.uuid4().hex[:8]}"
+            graphowl_client.delete_document(GRAPH_OWL_SERVER, source, GRAPH_OWL_TOKEN)
             result = graphowl_client.import_document(
                 GRAPH_OWL_SERVER, source, turtle, GRAPH_OWL_TOKEN
             )

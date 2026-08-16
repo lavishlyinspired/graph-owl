@@ -101,7 +101,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/jsonl", get(export_json_lines))
         .route("/graph/export/json-graph", get(export_json_graph))
         .route("/graph/export/rdf", get(export_rdf))
-        .route("/graph/import/rdf", post(import_rdf))
+        .route(
+            "/graph/import/rdf",
+            post(import_rdf).delete(delete_import_route),
+        )
         .route("/namespaces", post(declare_namespace).get(list_namespaces))
         .route("/predicates", post(define_predicate))
         .route("/findings", get(list_findings).post(record_findings))
@@ -9502,6 +9505,55 @@ async fn import_rdf(
             )
             .await?,
     ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RdfDeleteQuery {
+    source: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DeleteImportOutcome {
+    deleted: u64,
+}
+
+/// `DELETE /graph/import/rdf?source=...` — Plan 120 Slice D
+/// (`plans/120-domain-agnostic-console-and-investigation-workspace.md`).
+///
+/// [`Catalog::delete_import`] has existed since it was needed internally by
+/// `save_rdf_edit` (an ontology-editor flow) — this route is the same
+/// "finished capability, no caller" gap [`import_rdf`] itself used to be.
+/// Without it, a consumer wanting "replace what this source landed" (rather
+/// than accumulate a new import graph per upload — reco-now's own bug,
+/// found the same way `import_rdf`'s dedup trap was: by reading real
+/// query results, not by reasoning about the code) has no way to reach it
+/// over HTTP.
+///
+/// Same admin gate and the same `source` forgery guard as [`import_rdf`],
+/// for the identical reason: this writes (retracts) straight into a named
+/// graph, bypassing asset-level authorization.
+async fn delete_import_route(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<RdfDeleteQuery>,
+) -> Result<Json<DeleteImportOutcome>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+
+    let source = query.source.trim();
+    if !is_usable_import_source(source) {
+        return Err(AppError::Validation(vec![FieldError::new(
+            "source",
+            FieldErrorCode::Value,
+            "`source` names the import graph, so it must be 1–64 characters of \
+             letters, digits, `-` or `_` — anything else could address a graph \
+             this delete does not own",
+        )]));
+    }
+
+    let deleted = catalog.delete_import(source).await?;
+    Ok(Json(DeleteImportOutcome { deleted }))
 }
 
 #[derive(Debug, serde::Deserialize)]

@@ -344,6 +344,41 @@ def import_document(
         raise IngestError(f"POST {url} was unreachable: {unreachable.reason}") from unreachable
 
 
+def delete_document(server: str, source: str, token: str | None = None) -> dict:
+    """`DELETE /graph/import/rdf?source=...` — drops every triple `source`
+    has ever landed. Plan 120 Slice D
+    (`plans/120-domain-agnostic-console-and-investigation-workspace.md`):
+    called immediately before `import_document` for the same source on
+    every upload, so a re-upload *replaces* what that source last landed
+    instead of accumulating alongside it under a fresh random source name
+    — the confirmed root cause of totals that grew across every upload a
+    session ever made, never just reflecting the latest one.
+
+    A source with nothing landed yet (the first upload of a kind) is not
+    an error — the server reports `{"deleted": 0}` — so this is safe to
+    call unconditionally, with no "is this the first upload" check needed
+    here.
+
+    # Raises
+
+    `IngestError` if the server refuses or is unreachable.
+    """
+    base = server.rstrip("/")
+    url = f"{base}/graph/import/rdf?source={quote(source, safe='')}"
+    request = urllib.request.Request(url, method="DELETE")
+    if token:
+        request.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as refused:
+        detail = refused.read().decode("utf-8", errors="replace")
+        raise IngestError(f"DELETE {url} failed: HTTP {refused.code} {detail}") from refused
+    except urllib.error.URLError as unreachable:
+        raise IngestError(f"DELETE {url} was unreachable: {unreachable.reason}") from unreachable
+
+
 def list_findings(server: str, token: str | None = None) -> list:
     """`GET /findings?pack=gst` — every finding graph-owl's native engine
     has recorded, evidence included. Read-only and not admin-gated
@@ -372,5 +407,6 @@ def list_findings(server: str, token: str | None = None) -> list:
 
 
 __all__ = [
-    "IngestError", "PACK_ID", "PREDICATES", "import_document", "list_findings", "rows_to_turtle",
+    "IngestError", "PACK_ID", "PREDICATES", "delete_document", "import_document",
+    "list_findings", "rows_to_turtle",
 ]

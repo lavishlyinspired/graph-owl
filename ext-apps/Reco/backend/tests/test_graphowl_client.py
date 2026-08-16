@@ -24,7 +24,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from app.graphowl_client import IngestError, import_document, list_findings, rows_to_turtle
+from app.graphowl_client import (
+    IngestError,
+    delete_document,
+    import_document,
+    list_findings,
+    rows_to_turtle,
+)
 
 #: Every field this client asserts as a `gst:` predicate. `supplier_gstin`
 #: is deliberately excluded — it lands on the Supplier subject, not as a
@@ -421,6 +427,44 @@ class TestGstr1Ingestion:
         assert turtle.count("a gst:Gstr1Filing") == 1
 
 
+class TestDeleteDocument:
+    """Plan 120 Slice D: a stable per-kind source is deleted before each
+    re-upload, so totals reflect only the latest data rather than
+    accumulating across every upload a session has ever made."""
+
+    def test_sends_delete_with_source_query_param(self):
+        received: list[dict] = []
+        with _server(received) as url:
+            result = delete_document(url, "reco-books")
+        assert len(received) == 1
+        call = received[0]
+        assert call["path"] == "/graph/import/rdf"
+        assert call["query"]["source"] == "reco-books"
+        assert result == {"deleted": 2}
+
+    def test_sends_bearer_token_when_given(self):
+        received: list[dict] = []
+        with _server(received) as url:
+            delete_document(url, "reco-books", token="abc123")
+        assert received[0]["auth"] == "Bearer abc123"
+
+    def test_omits_authorization_header_when_no_token_given(self):
+        received: list[dict] = []
+        with _server(received) as url:
+            delete_document(url, "reco-books")
+        assert received[0]["auth"] is None
+
+    def test_server_error_raises_ingest_error_naming_the_status(self):
+        received: list[dict] = []
+        with _server(received, fail=True) as url:
+            with pytest.raises(IngestError, match="500"):
+                delete_document(url, "reco-books")
+
+    def test_unreachable_server_raises_ingest_error(self):
+        with pytest.raises(IngestError):
+            delete_document("http://127.0.0.1:1", "reco-books")
+
+
 def _handler(received: list[dict], fail: bool, findings_response: list | None = None):
     class Scripted(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
@@ -464,6 +508,27 @@ def _handler(received: list[dict], fail: bool, findings_response: list | None = 
             body = json.dumps(findings_response if findings_response is not None else []).encode(
                 "utf-8"
             )
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_DELETE(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            received.append(
+                {
+                    "path": parsed.path,
+                    "query": {k: v[0] for k, v in parse_qs(parsed.query).items()},
+                    "raw": b"",
+                    "auth": self.headers.get("authorization"),
+                }
+            )
+            if fail:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'{"detail":"deliberate failure"}')
+                return
+            body = json.dumps({"deleted": 2}).encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.end_headers()
