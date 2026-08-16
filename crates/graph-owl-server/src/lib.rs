@@ -2986,12 +2986,39 @@ async fn graph_context_route(
         )
         .await?;
 
-    Ok(Json(json!({
-        "nodes": context.nodes.iter().map(|node| json!({
+    // Plan 121 Slice 2: the same `[console.labels]` resolution
+    // `finding_evidence_graph` already applies, reused rather than
+    // reimplemented — `SubjectExplorer` walks *any* subject through this
+    // route, not only a finding's own, so a bare id here is the same defect
+    // in a different screen. `semantic_type` is resolved here purely as the
+    // resolution's own key and is not itself added to the response; this
+    // route's node shape stays `{id, iri, sources, label}`.
+    let namespaces = catalog.namespaces().await.unwrap_or_default();
+    let mut console_cache = std::collections::HashMap::new();
+    let mut nodes = Vec::with_capacity(context.nodes.len());
+    for node in &context.nodes {
+        let semantic_type = catalog
+            .node_semantic_type(&node.id)
+            .await
+            .unwrap_or_default();
+        let label = resolve_node_label(
+            &catalog,
+            &namespaces,
+            &mut console_cache,
+            &node.id,
+            semantic_type.as_deref(),
+        )
+        .await;
+        nodes.push(json!({
             "id": node.id.id,
             "iri": node.id.to_iri(),
             "sources": node.sources,
-        })).collect::<Vec<_>>(),
+            "label": label,
+        }));
+    }
+
+    Ok(Json(json!({
+        "nodes": nodes,
         "edges": context.edges.iter().map(|e| json!({
             "from": e.from.id,
             "to": e.to.id,

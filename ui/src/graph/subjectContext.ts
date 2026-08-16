@@ -22,6 +22,29 @@ export interface SubjectNodeRow {
   readonly sources: readonly string[];
 }
 
+/** The `names` map `nodeRows`/`edgeRows` render through — Plan 121 Slice 2.
+ *  Before this, only the clicked seed ever had a real name; every walked
+ *  neighbour fell through to `nodeLabel`'s bare-id fallback even when the
+ *  server had already resolved one via `[console.labels]`
+ *  ({@link GraphContext}'s own `label` field).
+ *
+ *  **The seed's own given label always wins for the seed's own id** —
+ *  it is set last, unconditionally, so a caller passing in a label it
+ *  already resolved some other way (the findings queue's own subject
+ *  label, say) is never second-guessed by this function. */
+export function namesFromContext(
+  seed: string,
+  seedLabel: string,
+  context: GraphContext | null,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const node of context?.nodes ?? []) {
+    if (node.label) names.set(node.id, node.label);
+  }
+  names.set(seed, seedLabel);
+  return names;
+}
+
 /** One row per node, named through the same known-name-else-identifier rule
  *  `paths.ts`'s `nodeLabel` already commits to — reused rather than
  *  re-implemented, so the two surfaces cannot drift into disagreeing about

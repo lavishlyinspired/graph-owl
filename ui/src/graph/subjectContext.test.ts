@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { edgeRows, nodeRows, summarize } from "./subjectContext";
+import { edgeRows, namesFromContext, nodeRows, summarize } from "./subjectContext";
 import type { GraphContext } from "../api";
 
 const context = (overrides?: Partial<GraphContext>): GraphContext => ({
   nodes: [
-    { id: "1024:invoice-1", iri: "https://graph-owl.dev/packs/gst#invoice-1", sources: ["gst-purchase-register"] },
-    { id: "1024:supplier-1", iri: "https://graph-owl.dev/packs/gst#supplier-1", sources: ["gst-gstr2b", "gst-purchase-register"] },
+    {
+      id: "1024:invoice-1",
+      iri: "https://graph-owl.dev/packs/gst#invoice-1",
+      sources: ["gst-purchase-register"],
+      label: null,
+    },
+    {
+      id: "1024:supplier-1",
+      iri: "https://graph-owl.dev/packs/gst#supplier-1",
+      sources: ["gst-gstr2b", "gst-purchase-register"],
+      label: null,
+    },
   ],
   edges: [{ from: "1024:invoice-1", to: "1024:supplier-1", relationship: "issuedBy", derived: false }],
   truncated: false,
@@ -38,6 +48,40 @@ describe("rendering a subject's neighbourhood as a list", () => {
    *  applied here through the same function rather than a second copy of it. */
   it("falls back to the bare id rather than inventing a name", () => {
     expect(nodeRows(context(), new Map())[0]!.label).toBe("1024:invoice-1");
+  });
+});
+
+describe("namesFromContext — Plan 121 Slice 2", () => {
+  it("includes a walked neighbour's own resolved label, not just the seed's", () => {
+    const withLabel = context({
+      nodes: [
+        context().nodes[0]!,
+        { ...context().nodes[1]!, label: "Nimbus Freight Logistics" },
+      ],
+    });
+    const names = namesFromContext("1024:invoice-1", "INV-1001", withLabel);
+    expect(names.get("1024:supplier-1")).toBe("Nimbus Freight Logistics");
+  });
+
+  it("the seed's own given label always wins for the seed's own id", () => {
+    const withConflictingSeedLabel = context({
+      nodes: [
+        { ...context().nodes[0]!, label: "Some Other Name" },
+        context().nodes[1]!,
+      ],
+    });
+    const names = namesFromContext("1024:invoice-1", "INV-1001", withConflictingSeedLabel);
+    expect(names.get("1024:invoice-1")).toBe("INV-1001");
+  });
+
+  it("omits a node with no resolved label, leaving it to nodeLabel's own fallback", () => {
+    const names = namesFromContext("1024:invoice-1", "INV-1001", context());
+    expect(names.has("1024:supplier-1")).toBe(false);
+  });
+
+  it("still names the seed when the context has not loaded yet", () => {
+    const names = namesFromContext("1024:invoice-1", "INV-1001", null);
+    expect(names).toEqual(new Map([["1024:invoice-1", "INV-1001"]]));
   });
 });
 

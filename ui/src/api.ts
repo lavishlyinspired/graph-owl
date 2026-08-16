@@ -587,6 +587,11 @@ export interface GraphContext {
     readonly id: string;
     readonly iri: string | null;
     readonly sources: readonly string[];
+    /** A pack's own `[console.labels]` literal for this node's class —
+     *  Plan 120 Slice C / Plan 121 Slice 2, the same resolution the
+     *  evidence-graph route already applies. `null` for a class no
+     *  installed pack declared one for. */
+    readonly label: string | null;
   }[];
   readonly edges: readonly {
     readonly from: string;

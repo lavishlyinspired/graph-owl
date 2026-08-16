@@ -19,7 +19,7 @@ import { Alert, Card, Select, Space, Tag, Typography } from "./../components/ui/
 import { ApiError, api, type GraphContext } from "../api";
 import { palette } from "../theme";
 import { filterParam, kindsFromAnalytics, whyEmpty } from "./edgeFilter";
-import { edgeRows, nodeRows, summarize } from "./subjectContext";
+import { edgeRows, namesFromContext, nodeRows, summarize } from "./subjectContext";
 import { ConnectivityPanel } from "./ConnectivityPanel";
 import { ReasoningView } from "./ReasoningView";
 
@@ -89,7 +89,7 @@ export function SubjectExplorer({
     };
   }, [seed, hops]);
 
-  const names = new Map<string, string>([[seed, label]]);
+  const names = namesFromContext(seed, label, context);
   const emptyReason = context
     ? whyEmpty({ selected, hasAnyEdge: kinds.length > 0, edgesShown: context.edges.length })
     : null;

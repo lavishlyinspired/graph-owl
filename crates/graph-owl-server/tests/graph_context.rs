@@ -330,3 +330,161 @@ async fn the_filter_narrows_connectivity_for_a_bare_subject_too() {
         "the adjustedBy-only neighbour is excluded from the filtered analytics too: {body}",
     );
 }
+
+/// Plan 121 Slice 2 — the same `[console.labels]` resolution Slice 1 wired
+/// into the evidence-graph route reaches `/graph/context` too, since
+/// `SubjectExplorer` (Explore's graph view) walks *any* subject through this
+/// route, not only a finding's own subject.
+///
+/// **Points `GRAPH_OWL_PACKS_DIR` at this repo's real `packs/` directory**,
+/// the same pattern `pack_install.rs`'s own tests use — a synthetic
+/// namespace (every other test in this file) has no `[console.labels]` to
+/// resolve against, so proving the mechanism here needs the real, shipped
+/// `gst` manifest and its real `declaredBy: "pack:gst"` provenance.
+mod real_gst_pack {
+    use std::path::PathBuf;
+
+    use crate::common::{json_body, test_app};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn real_packs_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packs")
+    }
+
+    /// Every test in this module writes the identical value, so a
+    /// concurrent write from another test in this same process can only
+    /// ever race to the same outcome — the same reasoning `pack_install.rs`
+    /// already documents for its own copy of this helper.
+    fn set_packs_dir_to_the_real_one() {
+        unsafe {
+            std::env::set_var("GRAPH_OWL_PACKS_DIR", real_packs_dir());
+        }
+    }
+
+    async fn seed_a_named_supplier_two_hops_from_an_invoice(app: &axum::Router) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "iri": "https://graph-owl.dev/packs/gst#",
+                            "declaredBy": "pack:gst",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert!(response.status().is_success(), "declare the gst namespace");
+
+        for (name, value_type) in [("issuedBy", 0), ("supplierGstin", 1), ("supplierName", 1)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/predicates")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "namespace": 1024, "name": name,
+                                "valueType": value_type, "many": false,
+                            })
+                            .to_string(),
+                        ))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should be handled");
+            assert!(response.status().is_success(), "declare {name}");
+        }
+
+        let turtle = r#"
+            @prefix gst: <https://graph-owl.dev/packs/gst#> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+            gst:invoice-1 gst:issuedBy gst:supplier-1 .
+            gst:supplier-1 rdf:type gst:Supplier ;
+                gst:supplierGstin "29AACCG0527D1Z8" ;
+                gst:supplierName "Nimbus Freight Logistics" .
+        "#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graph/import/rdf?source=gst-purchase-register&format=turtle")
+                    .header("content-type", "text/turtle")
+                    .body(Body::from(turtle.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(status, StatusCode::OK, "import: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_walked_neighbour_shows_its_declared_label_not_its_bare_id() {
+        set_packs_dir_to_the_real_one();
+        let (app, _container, _connection_string) = test_app().await;
+        seed_a_named_supplier_two_hops_from_an_invoice(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graph/context")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "seed": "1024:invoice-1", "direction": "outgoing", "hops": 1,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let nodes = body["nodes"].as_array().expect("nodes array");
+        let supplier = nodes
+            .iter()
+            .find(|n| n["id"] == "supplier-1")
+            .unwrap_or_else(|| panic!("supplier node present: {nodes:?}"));
+        assert_eq!(
+            supplier["label"],
+            json!("Nimbus Freight Logistics"),
+            "a walked neighbour must resolve its label the same way the evidence \
+             graph does, not just the seed a caller already knew the name of: \
+             {supplier:?}"
+        );
+
+        // The negative case: the invoice's own class has no [console.labels]
+        // entry, so it degrades to null rather than fabricating one.
+        let invoice = nodes
+            .iter()
+            .find(|n| n["id"] == "invoice-1")
+            .unwrap_or_else(|| panic!("invoice node present: {nodes:?}"));
+        assert_eq!(
+            invoice["label"],
+            serde_json::Value::Null,
+            "an untyped subject must degrade to null: {invoice:?}"
+        );
+    }
+}

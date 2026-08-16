@@ -143,7 +143,29 @@ the new `Catalog` method under `--lib`, scoped to `graph-owl-api`).
 **Done when**: criteria met, mutation report reviewed, verified live against
 the real reco-now upload (Supplier evidence-graph node shows the real name).
 
-### Slice 2: The Explore graph view (`SubjectExplorer`) shows every node's label, not just the seed
+### Slice 2 — shipped
+
+`resolve_node_label` (already mutation-tested clean in Slice 1) reused as-is
+— `graph_context_route` now resolves `semantic_type` and calls it per node,
+adding `label` to `/graph/context`'s response. Client: `GraphContext.nodes[i]`
+gains `label`; `subjectContext.ts`'s new `namesFromContext(seed, seedLabel,
+context)` builds the names map from every node's own resolved label (the
+seed's given label always wins for its own id, set last), replacing
+`SubjectExplorer.tsx`'s old `new Map([[seed, label]])`. `nodeRows`/`edgeRows`
+untouched — they already rendered through whatever map they were given.
+
+Verified: 7/7 `graph_context.rs` (new test uses the real, shipped `gst`
+pack via `GRAPH_OWL_PACKS_DIR`, matching `pack_install.rs`'s own precedent,
+since the file's other fixtures use a synthetic namespace with no
+`[console.labels]` to resolve against), 12/12 `evidence_graph.rs` (no
+regression), 12/12 `namesFromContext`+existing `subjectContext.test.ts`,
+213/213 all `ui/src/graph` tests, tsc/eslint clean. Two manual mutation
+checks (semantic_type forced to None; seed-priority ordering) both caught.
+`cargo mutants` on the diff: 0/4 viable — the same "thin delegating shell"
+result as Slice 1's own handler, expected since no new branching logic was
+added beyond calls to an already-proven function. openapi.json diff empty.
+
+### Slice 2 (original scoping, for reference): The Explore graph view (`SubjectExplorer`) shows every node's label, not just the seed
 
 **Value**: a reviewer expanding a subject's neighbourhood in Explore reads
 names throughout the picture, not just at the node they clicked.
