@@ -49,7 +49,13 @@ def _portal(**overrides) -> dict:
 
 
 def _finding(
-    label: str, gstin: str, number: str, *, priority: int | None = None, **extra_evidence
+    label: str,
+    gstin: str,
+    number: str,
+    *,
+    priority: int | None = None,
+    id: str = "finding-1",
+    **extra_evidence,
 ) -> dict:
     evidence = [
         {"var": "gstin", "value": gstin, "predicate": "gst:supplierGstin"},
@@ -57,7 +63,7 @@ def _finding(
     ]
     for var, value in extra_evidence.items():
         evidence.append({"var": var, "value": value, "predicate": f"gst:{var}"})
-    return {"label": label, "evidence": evidence, "priority": priority}
+    return {"label": label, "evidence": evidence, "priority": priority, "id": id}
 
 
 class TestNoFindingIsMatched:
@@ -182,3 +188,69 @@ class TestFindingKeyingIsCaseAndPunctuationInsensitive:
         findings = [_finding("gst:AmountMismatch", "27aaafn2938k1z2", "inv-1")]
         results = reconcile([_book()], [_portal(taxable=175000)], [], findings)
         assert results[0]["status"] == STATUS_REVIEW
+
+
+class TestFindingIdIsCarriedThroughToTheRow:
+    """The row's own `finding_id` is what a console deep-link ("Open in
+    GraphOWL") is built from server-side — graph-owl's `PackFinding.id`,
+    carried through unchanged, not the `subject` any one query happens to
+    project first or any locally-invented value."""
+
+    def test_a_row_with_no_finding_carries_no_finding_id(self):
+        results = reconcile([_book()], [_portal()], [], [])
+        assert results[0]["finding_id"] is None
+
+    def test_a_row_with_one_finding_carries_that_finding_s_own_id(self):
+        findings = [
+            _finding("gst:AmountMismatch", "27AAAFN2938K1Z2", "INV-1", id="finding-abc")
+        ]
+        results = reconcile([_book()], [_portal(taxable=175000)], [], findings)
+        assert results[0]["finding_id"] == "finding-abc"
+
+    def test_two_findings_on_one_invoice_carry_the_winning_finding_s_id_not_either_arbitrarily(self):
+        # Mirrors TestMultipleFindingsOnOneInvoice's own real case: the
+        # lower-priority-number finding wins the status/reason, and must
+        # win the id too — a deep-link pointing at the *losing* finding
+        # would open graph-owl on the wrong evidence for what the row
+        # actually reports.
+        findings = [
+            _finding(
+                "gst:Gstr1NotIn2b",
+                "27AAAFN2938K1Z2",
+                "INV-1",
+                priority=2,
+                id="finding-lower-priority",
+            ),
+            _finding(
+                "gst:BooksGstr1Mismatch",
+                "27AAAFN2938K1Z2",
+                "INV-1",
+                priority=1,
+                id="finding-winner",
+            ),
+        ]
+        results = reconcile(
+            [_book(taxable=55000)], [], [_book(taxable=53000)], findings
+        )
+        assert results[0]["finding_id"] == "finding-winner"
+
+    def test_an_orphaned_portal_row_s_finding_id_is_none_when_no_finding_matches(self):
+        results = reconcile([], [_portal(invoice_no="INV-5")], [], [])
+        assert results[0]["finding_id"] is None
+
+    def test_missinginbooks_row_carries_its_finding_id_too(self):
+        # The gstr1-sourced branch (reconcile()'s third loop) is a
+        # separate code path from the books/portal branches above — its
+        # own finding_id wiring needs its own test, not just coverage by
+        # proximity to the other two loops.
+        gstr1_row = _book(invoice_no="INV-9", taxable=12000)
+        findings = [
+            _finding(
+                "gst:MissingInBooks",
+                "27AAAFN2938K1Z2",
+                "INV-9",
+                id="finding-missing-in-books",
+            )
+        ]
+        results = reconcile([], [], [gstr1_row], findings)
+        assert results[0]["finding_id"] == "finding-missing-in-books"

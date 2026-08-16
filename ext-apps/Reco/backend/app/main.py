@@ -554,6 +554,13 @@ def overview() -> dict:
         "supplier_health": rc.supplier_health(results) if results else [],
         "ims_actions": rc.ims_actions(results) if results else [],
         "results": results,
+        # The single source of truth for graph-owl's own base URL — already
+        # configured for the backend's own use (graphowl_client.py). Since
+        # graph-owl-server embeds and serves its own console, this is
+        # always also the console's base URL, not a coincidence of the
+        # local dev setup. Lets the frontend build an "Open in GraphOWL"
+        # link without a second, possibly-drifting env var of its own.
+        "graphowl_url": GRAPH_OWL_SERVER,
     }
 
 

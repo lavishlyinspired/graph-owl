@@ -100,10 +100,10 @@ def _findings_by_key(findings: list[dict]) -> dict[tuple[str, str], list[dict]]:
     return by_key
 
 
-def _status_and_reason(matches: list[dict]) -> tuple[str, str]:
+def _status_and_reason(matches: list[dict]) -> tuple[str, str, str | None]:
     known = [f for f in matches if f["label"] in _STATUS_BY_LABEL]
     if not known:
-        return STATUS_MATCHED, ""
+        return STATUS_MATCHED, "", None
     # An undeclared priority always loses: there is nothing to compare it
     # against, so it cannot be ranked ahead of a finding that declared
     # one. `float("inf")` rather than a large int, so this holds for any
@@ -112,7 +112,11 @@ def _status_and_reason(matches: list[dict]) -> tuple[str, str]:
     known.sort(key=lambda f: f.get("priority") if f.get("priority") is not None else float("inf"))
     status = _STATUS_BY_LABEL[known[0]["label"]][0]
     reasons = list(dict.fromkeys(_STATUS_BY_LABEL[f["label"]][1] for f in known))
-    return status, "; ".join(reasons)
+    # The winning finding's own id — what a console deep-link ("Open in
+    # GraphOWL") is built from, so it must be the same finding that won
+    # status/reason above, not any of the others this invoice also matched.
+    finding_id = known[0].get("id")
+    return status, "; ".join(reasons), finding_id
 
 
 def _key(record: dict) -> tuple[str, str]:
@@ -149,7 +153,7 @@ def reconcile(
             seen_gstr1.add(key)
 
         matches = findings_by_key.get(key, [])
-        status, reason = _status_and_reason(matches)
+        status, reason, finding_id = _status_and_reason(matches)
 
         taxable_book = to_float(book.get("taxable", 0))
         tax_book = record_tax(book)
@@ -176,6 +180,7 @@ def reconcile(
             {
                 "status": status,
                 "reason": reason,
+                "finding_id": finding_id,
                 "diff": diff,
                 "tax_diff": tax_diff,
                 "itc": round(tax_book, 2),
@@ -193,13 +198,14 @@ def reconcile(
         taxable_portal = to_float(row.get("taxable", 0))
         tax_portal = record_tax(row)
         matches = findings_by_key.get(key, [])
-        status, reason = _status_and_reason(matches)
+        status, reason, finding_id = _status_and_reason(matches)
         if status == STATUS_MATCHED:
             status, reason = STATUS_ONLY_GSTR2B, REASON_NOT_IN_BOOKS
         results.append(
             {
                 "status": status,
                 "reason": reason,
+                "finding_id": finding_id,
                 "diff": None,
                 "tax_diff": 0.0,
                 "itc": round(tax_portal, 2),
@@ -221,11 +227,12 @@ def reconcile(
             continue
         taxable = to_float(row.get("taxable", 0))
         tax = record_tax(row)
-        _, reason = _status_and_reason(matches)
+        _, reason, finding_id = _status_and_reason(matches)
         results.append(
             {
                 "status": STATUS_ONLY_GSTR2B,
                 "reason": reason,
+                "finding_id": finding_id,
                 "diff": None,
                 "tax_diff": 0.0,
                 "itc": round(tax, 2),

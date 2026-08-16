@@ -1,10 +1,22 @@
 import { useMemo, useState } from "react";
-import { Download, Search, ShieldCheck, AlertTriangle, ChevronLeft, ChevronRight, ArrowRight, ArrowLeft, FileSpreadsheet, RefreshCw } from "lucide-react";
+import { Download, Search, ShieldCheck, AlertTriangle, ChevronLeft, ChevronRight, ArrowRight, ArrowLeft, FileSpreadsheet, RefreshCw, ExternalLink } from "lucide-react";
 import { Button, Card, StatusPill } from "../components/ui.jsx";
 import { api } from "../api.js";
 import { amount, confidence, diff, inrFormat, statusLabel } from "../format.js";
 
 const PAGE_SIZES = [10, 25, 50, 100];
+
+/** Where "Open in GraphOWL" points a row at — graph-owl's own review queue,
+ *  already deep-linkable to one specific finding
+ *  (`?section=review&kind=findings&entry=<id>`, confirmed working code, no
+ *  graph-owl-side change needed for this). `null` when the row carries no
+ *  `finding_id` (a matched invoice with no finding, or graph-owl's base
+ *  URL isn't known yet) — there is nothing honest to link to. */
+function graphOwlFindingUrl(graphowlUrl, findingId) {
+  if (!graphowlUrl || !findingId) return null;
+  const params = new URLSearchParams({ section: "review", kind: "findings", entry: findingId });
+  return `${graphowlUrl}/?${params.toString()}`;
+}
 
 function rowView(row) {
   const book = row.book;
@@ -192,10 +204,13 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
                 <th className="px-4 py-2.5 font-medium text-right">ITC Amt</th>
                 <th className="px-4 py-2.5 font-medium">Reason</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
+                <th className="px-4 py-2.5 font-medium" />
               </tr>
             </thead>
             <tbody>
-              {pageRows.map((row, i) => (
+              {pageRows.map((row, i) => {
+                const graphowlUrl = graphOwlFindingUrl(overview.graphowl_url, row.finding_id);
+                return (
                 <tr key={i} className="border-t border-matcha-border/50 hover:bg-matcha-bg-secondary/60">
                   <td className="px-4 py-2.5 font-mono text-xs">{row.gstin}</td>
                   <td className="px-4 py-2.5">{row.supplier}</td>
@@ -222,11 +237,25 @@ export default function ReconcilePage({ overview, onMapping, onIntelligence }) {
                   <td className="px-4 py-2.5 text-right font-mono text-xs">{inrFormat(row.itc)}</td>
                   <td className="px-4 py-2.5 text-xs">{row.reason}</td>
                   <td className="px-4 py-2.5"><StatusPill status={row.status} /></td>
+                  <td className="px-4 py-2.5">
+                    {graphowlUrl && (
+                      <a
+                        href={graphowlUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open in GraphOWL"
+                        className="inline-flex items-center gap-1 text-matcha-accent hover:text-matcha-accent/80"
+                      >
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                  </td>
                 </tr>
-              ))}
+                );
+              })}
               {pageRows.length === 0 && (
                 <tr>
-                  <td colSpan={15} className="px-4 py-10 text-center text-matcha-text-tertiary">
+                  <td colSpan={16} className="px-4 py-10 text-center text-matcha-text-tertiary">
                     No {filter === "all" ? "" : statusLabel(filter).toLowerCase()} invoices found.
                   </td>
                 </tr>
