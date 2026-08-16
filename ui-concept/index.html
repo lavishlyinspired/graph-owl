@@ -1,0 +1,1664 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-time="now">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>graph-owl · Knowledge graph console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   graph-owl console prototype — semantic tokens, two tiers
+   Tier 2 semantic tokens only; primitives never referenced directly
+   ══════════════════════════════════════════════════════════════════ */
+:root{
+  --surface:#f4f5fa;
+  --surface-raised:#ffffff;
+  --surface-sunken:#eceef5;
+  --surface-overlay:#ffffff;
+  --text:#151a2b;
+  --text-muted:#5a6277;
+  --text-subtle:#8a93a9;
+  --text-inverse:#ffffff;
+  --border:#e2e5ef;
+  --border-strong:#c7cddd;
+  --border-subtle:#edeef4;
+  --accent:#4f46e5;
+  --accent-hover:#4338ca;
+  --accent-active:#3730a3;
+  --accent-subtle:#eef2ff;
+  --accent-ring:rgba(79,70,229,.35);
+  --success:#059669;
+  --success-subtle:#ecfdf5;
+  --warning:#d97706;
+  --warning-subtle:#fffbeb;
+  --danger:#e11d48;
+  --danger-subtle:#fff1f2;
+  --info:#0284c7;
+  --info-subtle:#f0f9ff;
+  --derived:#7c3aed;
+  --derived-subtle:#f5f3ff;
+  --temporal:#0d9488;
+  --temporal-subtle:#f0fdfa;
+  --conf-high:#059669;
+  --conf-mid:#d97706;
+  --conf-low:#98a0b3;
+  --graph-canvas:#0b1020;
+  --graph-canvas-line:rgba(148,163,184,.08);
+  --graph-node:#ffffff;
+  --graph-node-border:#c7cddd;
+  --graph-node-selected:#c7d2fe;
+  --graph-edge:#55627c;
+  --graph-edge-derived:#a78bfa;
+  --graph-edge-mid:#b45309;
+  --graph-label:#cbd5e1;
+  --shadow-raised:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.05);
+  --shadow-overlay:0 12px 32px -8px rgba(16,24,40,.18),0 4px 12px rgba(16,24,40,.08);
+  --r-sm:6px; --r-md:10px; --r-pill:9999px;
+  --t-fast:120ms; --t-panel:200ms;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --fs-xs:12px; --fs-sm:14px; --fs-md:16px; --fs-lg:20px; --fs-xl:24px; --fs-2xl:32px;
+}
+[data-theme="dark"]{
+  --surface:#0c1120;
+  --surface-raised:#131a2e;
+  --surface-sunken:#0f1526;
+  --surface-overlay:#151d33;
+  --text:#e7eaf4;
+  --text-muted:#a3adc4;
+  --text-subtle:#6d7892;
+  --text-inverse:#0c1120;
+  --border:#242e49;
+  --border-strong:#39456b;
+  --border-subtle:#1c2540;
+  --accent:#818cf8;
+  --accent-hover:#6d78f5;
+  --accent-active:#5a66e8;
+  --accent-subtle:#1d2246;
+  --accent-ring:rgba(129,140,248,.35);
+  --success:#34d399;
+  --success-subtle:#072a22;
+  --warning:#fbbf24;
+  --warning-subtle:#2a2105;
+  --danger:#fb7185;
+  --danger-subtle:#33060f;
+  --info:#38bdf8;
+  --info-subtle:#082032;
+  --derived:#a78bfa;
+  --derived-subtle:#221a40;
+  --temporal:#2dd4bf;
+  --temporal-subtle:#062a27;
+  --conf-high:#34d399;
+  --conf-mid:#fbbf24;
+  --conf-low:#6d7892;
+  --graph-node:#1a2438;
+  --graph-node-border:#3a4a6b;
+  --graph-node-selected:#818cf8;
+  --graph-edge:#46536e;
+  --graph-edge-derived:#8b5cf6;
+  --graph-edge-mid:#d97706;
+  --graph-label:#8ea1c0;
+  --shadow-raised:0 1px 2px rgba(0,0,0,.35);
+  --shadow-overlay:0 16px 40px -12px rgba(0,0,0,.55);
+}
+/* ═════════════ base ═════════════ */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:var(--sans);
+  font-size:var(--fs-sm);
+  color:var(--text);
+  background:var(--surface);
+  -webkit-font-smoothing:antialiased;
+  transition:background var(--t-panel),color var(--t-panel);
+}
+body[data-time="historic"]{ --accent:var(--temporal); --accent-hover:#0f766e; --accent-active:#115e59; --accent-subtle:var(--temporal-subtle); --accent-ring:rgba(13,148,136,.3); }
+[data-theme="dark"] body[data-time="historic"]{ --accent:var(--temporal); --accent-hover:#2dd4bf; --accent-active:#5eead4; }
+a{color:var(--accent);text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,textarea,select{font:inherit;color:inherit}
+code,.mono{font-family:var(--mono);font-size:.92em}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+svg{display:block}
+::selection{background:var(--accent);color:var(--text-inverse)}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+
+.app{display:grid;grid-template-columns:216px 1fr;grid-template-rows:56px 1fr;height:100vh;height:100dvh}
+/* ═════════════ topbar ═════════════ */
+.topbar{
+  grid-column:1/3;display:flex;align-items:center;gap:16px;
+  padding:0 20px;background:var(--surface-raised);border-bottom:1px solid var(--border);
+  position:relative;z-index:40;
+}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:var(--fs-md);letter-spacing:-.01em}
+.brand .mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--derived));display:grid;place-items:center;color:#fff;font-size:13px;box-shadow:0 2px 6px var(--accent-ring)}
+.brand .sub{color:var(--text-subtle);font-weight:500}
+.global-search{
+  flex:1;max-width:520px;display:flex;align-items:center;gap:10px;height:36px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);
+  padding:0 12px;color:var(--text-muted);cursor:pointer;transition:border-color var(--t-fast),box-shadow var(--t-fast);
+}
+.global-search:hover{border-color:var(--border-strong)}
+.global-search .kbd{margin-left:auto;font-size:11px;color:var(--text-subtle);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-family:var(--mono);background:var(--surface-raised)}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.time-ctl{
+  display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;border:1px solid var(--border);
+  border-radius:var(--r-sm);background:var(--surface-raised);font-weight:500;transition:all var(--t-fast);
+}
+.time-ctl:hover{border-color:var(--accent);color:var(--accent)}
+.time-ctl.historic{background:var(--temporal-subtle);border-color:var(--temporal);color:var(--temporal)}
+.icon-btn{width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--text-muted);border:1px solid transparent;transition:all var(--t-fast)}
+.icon-btn:hover{background:var(--surface);color:var(--text);border-color:var(--border)}
+.avatar{display:flex;align-items:center;gap:10px;height:36px;padding:0 6px 0 4px;border-radius:var(--r-pill);cursor:pointer}
+.avatar:hover{background:var(--surface)}
+.avatar .init{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--derived));color:#fff;display:grid;place-items:center;font-weight:600;font-size:12px}
+.avatar .who{text-align:left;line-height:1.1}
+.avatar .who b{font-size:13px;display:block}
+.avatar .who span{font-size:11px;color:var(--text-subtle)}
+/* ═════════════ rail ═════════════ */
+.rail{grid-column:1;grid-row:2;background:var(--surface-raised);border-right:1px solid var(--border);padding:12px 10px;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+.rail .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--text-subtle);font-weight:600;padding:10px 10px 6px}
+.rail-item{
+  display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:var(--r-sm);color:var(--text-muted);
+  font-weight:500;cursor:pointer;transition:background var(--t-fast),color var(--t-fast);position:relative;text-align:left;width:100%;
+}
+.rail-item:hover{background:var(--surface);color:var(--text)}
+.rail-item.active{background:var(--accent-subtle);color:var(--accent);font-weight:600}
+.rail-item .ico{width:18px;text-align:center;font-size:15px;line-height:1}
+.rail-item .count{margin-left:auto;font-size:11px;font-family:var(--mono);color:var(--text-subtle);background:var(--surface-sunken);border-radius:var(--r-pill);padding:1px 7px}
+.rail-item.active .count{background:var(--accent);color:var(--text-inverse)}
+.rail .rail-foot{margin-top:auto;padding:10px;font-size:11px;color:var(--text-subtle);line-height:1.5}
+.rail .rail-foot .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--success);margin-right:6px}
+/* ═════════════ content ═════════════ */
+.content{grid-column:2;grid-row:2;overflow-y:auto;position:relative}
+.screen{display:none;max-width:1400px;margin:0 auto;padding:24px 28px 80px}
+.screen.active{display:block;animation:fadeUp var(--t-panel) ease}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.screen-head{display:flex;align-items:flex-end;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.screen-head h1{font-size:var(--fs-xl);font-weight:700;letter-spacing:-.02em}
+.screen-head .crumb{color:var(--text-subtle);font-size:var(--fs-xs);font-family:var(--mono);margin-bottom:2px}
+.page-actions{margin-left:auto;display:flex;gap:8px}
+/* ═════════════ primitives ═════════════ */
+.card{background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--r-md);box-shadow:var(--shadow-raised)}
+.card-h{display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid var(--border-subtle);font-weight:600}
+.card-h .sub{font-weight:400;color:var(--text-subtle);font-size:var(--fs-xs)}
+.card-b{padding:16px 18px}
+.btn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 14px;border-radius:var(--r-sm);font-weight:600;font-size:var(--fs-sm);border:1px solid var(--border-strong);background:var(--surface-raised);transition:all var(--t-fast)}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--text-inverse)}
+.btn.primary:hover{background:var(--accent-hover)}
+.btn.small{height:28px;padding:0 10px;font-size:var(--fs-xs)}
+.btn.ghost{border-color:transparent;color:var(--text-muted)}
+.btn.ghost:hover{background:var(--surface);color:var(--text)}
+.badge{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:var(--r-pill);font-size:11.5px;font-weight:600;white-space:nowrap}
+.b-asserted{background:var(--surface-sunken);color:var(--text-muted)}
+.b-derived{background:var(--derived-subtle);color:var(--derived);border:1px solid var(--derived)}
+.b-conf-high{background:var(--success-subtle);color:var(--conf-high)}
+.b-conf-mid{background:var(--warning-subtle);color:var(--conf-mid)}
+.b-conf-low{background:var(--surface-sunken);color:var(--conf-low)}
+.b-cert{background:var(--success-subtle);color:var(--conf-high)}
+.b-cert.exp{background:var(--warning-subtle);color:var(--conf-mid)}
+.b-life{background:var(--info-subtle);color:var(--info)}
+.b-danger{background:var(--danger-subtle);color:var(--danger)}
+.b-neutral{background:var(--surface-sunken);color:var(--text-muted)}
+.pill{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:var(--r-pill);font-size:12px;border:1px solid var(--border);color:var(--text-muted);font-weight:500;background:var(--surface-raised)}
+.tag{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:5px;font-size:11px;font-weight:600;background:var(--surface-sunken);color:var(--text-muted)}
+.tag.warn{background:var(--warning-subtle);color:var(--conf-mid)}
+.tag.danger{background:var(--danger-subtle);color:var(--danger)}
+.tag.derived{background:var(--derived-subtle);color:var(--derived)}
+.fqn{font-family:var(--mono);font-size:.92em;color:var(--text-muted);word-break:break-all}
+.muted{color:var(--text-muted)} .subtle{color:var(--text-subtle)}
+.table-wrap{overflow:auto}
+table.data{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+table.data th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-subtle);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:0;background:var(--surface-raised)}
+table.data td{padding:11px 14px;border-bottom:1px solid var(--border-subtle);vertical-align:middle}
+table.data tr:hover td{background:var(--surface)}
+table.data tr.cursor{background:var(--accent-subtle)!important}
+table.data .num{font-family:var(--mono);font-size:.9em;color:var(--text-muted)}
+.rowlink{cursor:pointer;font-weight:500;color:var(--text)}
+.rowlink:hover{color:var(--accent)}
+.kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px}
+@media(max-width:1200px){.kpi-grid{grid-template-columns:repeat(3,1fr)}}
+.kpi{padding:16px 18px}
+.kpi .k-label{font-size:12px;color:var(--text-muted);font-weight:500;display:flex;align-items:center;gap:6px}
+.kpi .k-value{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-top:6px;font-variant-numeric:tabular-nums}
+.kpi .k-sub{font-size:12px;color:var(--text-subtle);margin-top:3px}
+.kpi .k-trend{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px}
+.kpi.up{color:var(--conf-high);background:var(--success-subtle)}
+.kpi.down{color:var(--conf-mid);background:var(--warning-subtle)}
+.kpi .k-icon{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-size:15px;background:var(--accent-subtle)}
+.kpi .k-top{display:flex;align-items:center;justify-content:space-between}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.grid-2.w72{grid-template-columns:1.6fr 1fr}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px}
+@media(max-width:1100px){.grid-2,.grid-2.w72,.grid-3{grid-template-columns:1fr}}
+.feed-item{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--border-subtle)}
+.feed-item:last-child{border-bottom:none}
+.feed-item .dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none}
+.feed-item .t{font-size:13px;line-height:1.45}
+.feed-item .m{font-size:12px;color:var(--text-subtle);margin-top:2px;font-family:var(--mono)}
+.feed-item .ago{margin-left:auto;font-size:11px;color:var(--text-subtle);white-space:nowrap;flex:none}
+.bar-row{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13px}
+.bar-row .lbl{width:130px;color:var(--text-muted);font-weight:500;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-row .track{flex:1;height:8px;background:var(--surface-sunken);border-radius:4px;overflow:hidden}
+.bar-row .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--derived))}
+.bar-row .n{width:56px;text-align:right;font-family:var(--mono);font-size:12px;color:var(--text-muted)}
+/* ═════════════ trust bar & entity ═════════════ */
+.trust-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:12px 18px;margin-bottom:16px}
+.trust-bar .sep{width:1px;height:22px;background:var(--border);margin:0 4px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow-x:auto}
+.tab{padding:10px 16px;font-weight:600;font-size:var(--fs-sm);color:var(--text-muted);border-bottom:2px solid transparent;white-space:nowrap;cursor:pointer;transition:color var(--t-fast)}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .dot{width:6px;height:6px;border-radius:50%;background:var(--danger);display:inline-block;margin-left:6px}
+.entity-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}
+@media(max-width:1100px){.entity-layout{grid-template-columns:1fr}}
+.entity-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+.entity-head .kind-icon{width:44px;height:44px;border-radius:10px;background:var(--accent-subtle);color:var(--accent);display:grid;place-items:center;font-size:20px;flex:none}
+.entity-head h1{font-size:24px;font-weight:700;letter-spacing:-.02em;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.diff{font-family:var(--mono);font-size:12px;border-radius:5px;padding:1px 6px}
+.diff.add{color:var(--conf-high);background:var(--success-subtle)}
+.diff.upd{color:var(--conf-mid);background:var(--warning-subtle)}
+.diff.del{color:var(--danger);background:var(--danger-subtle)}
+.hist-item{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--border-subtle)}
+.hist-item:last-child{border-bottom:none}
+.hist-item .v{font-family:var(--mono);font-weight:600;width:52px;flex:none;padding-top:2px}
+.hist-item .line{width:2px;background:var(--border-strong);border-radius:2px;flex:none;position:relative}
+.hist-item .line::before{content:"";position:absolute;top:4px;left:-4px;width:10px;height:10px;border-radius:50%;background:var(--surface-raised);border:2px solid var(--accent)}
+.hist-item .who{font-size:12px;color:var(--text-subtle);margin-top:3px;font-family:var(--mono)}
+.hist-item .dl{font-size:13px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.prop-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--border-subtle);border:1px solid var(--border-subtle);border-radius:var(--r-md);overflow:hidden}
+.prop-grid>div{padding:12px 14px;background:var(--surface-raised)}
+.prop-grid .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-subtle);font-weight:600;margin-bottom:3px}
+.prop-grid .v{font-size:13.5px;font-weight:500;word-break:break-word}
+/* context rail */
+.ctx-rail{position:sticky;top:0;align-self:start}
+.ctx-neigh{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.ctx-n{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--r-sm);cursor:pointer;transition:background var(--t-fast)}
+.ctx-n:hover{background:var(--surface)}
+.ctx-n .ic{width:26px;height:26px;border-radius:7px;background:var(--accent-subtle);color:var(--accent);display:grid;place-items:center;font-size:13px;flex:none}
+.ctx-n .nm{font-size:13px;font-weight:500;line-height:1.2}
+.ctx-n .rt{margin-left:auto;font-size:11px;color:var(--text-subtle);font-family:var(--mono);white-space:nowrap}
+/* ═════════════ graph canvas ═════════════ */
+.canvas-wrap{background:var(--graph-canvas);border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;position:relative;height:640px}
+.canvas-tools{position:absolute;top:14px;left:14px;right:14px;display:flex;gap:8px;align-items:center;z-index:5;pointer-events:none}
+.canvas-tools>*{pointer-events:auto}
+.toolbar{display:flex;align-items:center;gap:6px;background:rgba(10,14,26,.82);border:1px solid rgba(148,163,184,.18);border-radius:var(--r-sm);padding:5px 6px;backdrop-filter:blur(8px)}
+.toolbar .tsep{width:1px;height:18px;background:rgba(148,163,184,.2)}
+.tbtn{height:30px;padding:0 10px;border-radius:5px;color:#cbd5e1;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:6px;transition:background var(--t-fast)}
+.tbtn:hover{background:rgba(148,163,184,.14);color:#fff}
+.tbtn.on{background:var(--accent);color:#fff}
+.graph-legend{position:absolute;left:14px;bottom:14px;z-index:5;background:rgba(10,14,26,.85);border:1px solid rgba(148,163,184,.18);border-radius:var(--r-sm);padding:10px 12px;font-size:12px;color:var(--graph-label);backdrop-filter:blur(8px)}
+.graph-legend .li{display:flex;align-items:center;gap:8px;padding:3px 0}
+.graph-legend .sw{width:22px;height:3px;border-radius:2px;flex:none}
+.graph-legend .sw.dot{width:10px;height:10px;border-radius:50%}
+.minimap{position:absolute;right:14px;bottom:14px;z-index:5;width:150px;height:90px;border:1px solid rgba(148,163,184,.18);border-radius:var(--r-sm);background:rgba(10,14,26,.6);opacity:.85}
+.canvas-hint{position:absolute;bottom:14px;right:180px;z-index:5;color:#5f6c85;font-size:11px;font-family:var(--mono)}
+.inspector{position:absolute;top:14px;right:14px;bottom:14px;width:300px;background:rgba(13,18,32,.92);border:1px solid rgba(148,163,184,.22);border-radius:var(--r-md);z-index:6;backdrop-filter:blur(10px);overflow-y:auto;transform:translateX(8px);opacity:0;pointer-events:none;transition:all var(--t-panel)}
+.inspector.show{transform:none;opacity:1;pointer-events:auto}
+.inspector .i-h{padding:16px 16px 0;display:flex;align-items:flex-start;gap:10px}
+.inspector .i-h h3{color:#fff;font-size:15px;font-weight:600;line-height:1.3}
+.inspector .i-h .fqn{color:#8ea1c0;font-size:11px;margin-top:3px;word-break:break-all}
+.inspector .i-b{padding:14px 16px 16px}
+.inspector .i-sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:#6d7892;font-weight:700;margin:14px 0 8px}
+.inspector .i-sec:first-child{margin-top:0}
+.inspector .i-row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;font-size:12.5px;color:#cbd5e1}
+.inspector .i-row .k{color:#8ea1c0}
+.inspector .i-close{position:absolute;top:12px;right:12px;color:#6d7892;font-size:16px;line-height:1}
+.inspector .i-close:hover{color:#fff}
+.node-tooltip{position:absolute;z-index:7;background:rgba(13,18,32,.96);border:1px solid rgba(148,163,184,.3);border-radius:var(--r-sm);padding:8px 11px;font-size:12px;color:#e7eaf4;pointer-events:none;transform:translate(10px,-50%);white-space:nowrap;box-shadow:var(--shadow-overlay)}
+.node-tooltip .t-fqn{color:#8ea1c0;font-size:11px;font-family:var(--mono)}
+.node-tooltip .t-kind{color:var(--accent);font-weight:600}
+.zoom-ctl{display:flex;align-items:center;position:absolute;right:14px;top:14px;z-index:5}
+.zoom-ctl .tbtn{background:rgba(10,14,26,.82);border:1px solid rgba(148,163,184,.18);height:30px;width:32px;justify-content:center;padding:0;border-radius:5px;backdrop-filter:blur(8px)}
+.zoom-ctl .tbtn:first-child{border-radius:5px 0 0 5px}
+.zoom-ctl .tbtn:last-child{border-radius:0 5px 5px 0}
+.time-rail{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:5;background:rgba(10,14,26,.85);border:1px solid rgba(148,163,184,.18);border-radius:var(--r-pill);padding:7px 16px;display:flex;align-items:center;gap:12px;backdrop-filter:blur(8px)}
+.time-rail .tl{color:#8ea1c0;font-size:11px;font-family:var(--mono)}
+.time-rail input[type=range]{width:180px;accent-color:var(--temporal)}
+/* ═════════════ banner ═════════════ */
+.time-banner{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(20px);z-index:90;background:var(--temporal);color:#042f2c;border-radius:var(--r-md);padding:12px 18px;display:flex;align-items:center;gap:14px;box-shadow:var(--shadow-overlay);font-weight:600;font-size:var(--fs-sm);opacity:0;pointer-events:none;transition:all var(--t-panel)}
+.time-banner.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.time-banner .btn{background:rgba(4,47,44,.12);border-color:rgba(4,47,44,.3);color:#042f2c}
+.time-banner .btn:hover{background:rgba(4,47,44,.22)}
+/* ═════════════ discover ═════════════ */
+.discover-grid{display:grid;grid-template-columns:250px 1fr;gap:16px}
+@media(max-width:1100px){.discover-grid{grid-template-columns:1fr}}
+.facet{margin-bottom:18px}
+.facet h4{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-subtle);font-weight:700;margin-bottom:8px}
+.facet .opt{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;color:var(--text-muted);cursor:pointer}
+.facet .opt:hover{color:var(--text)}
+.facet .opt input{accent-color:var(--accent)}
+.facet .opt .n{margin-left:auto;font-size:11px;font-family:var(--mono);color:var(--text-subtle)}
+.searchbar{display:flex;align-items:center;gap:10px;height:44px;background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--r-md);padding:0 16px;box-shadow:var(--shadow-raised);margin-bottom:14px}
+.searchbar:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring)}
+.searchbar input{flex:1;border:none;background:none;font-size:15px;outline:none}
+.result{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:1px solid var(--border-subtle);border-bottom:1px solid var(--border);cursor:pointer;transition:background var(--t-fast),border-color var(--t-fast)}
+.result:last-child{border-bottom:none}
+.result:hover{background:var(--accent-subtle)}
+.result .ric{width:34px;height:34px;border-radius:8px;background:var(--surface-sunken);display:grid;place-items:center;font-size:15px;flex:none}
+.result .r-main{min-width:0}
+.result .r-title{font-weight:600;font-size:14px;color:var(--text)}
+.result .r-fqn{font-family:var(--mono);font-size:11.5px;color:var(--text-subtle);margin-top:1px}
+.result .r-snip{font-size:13px;color:var(--text-muted);margin-top:5px;line-height:1.5}
+.result .r-snip mark{background:transparent;color:var(--accent);font-weight:700}
+.result .r-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.result .r-right{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+/* ═════════════ workbench ═════════════ */
+.wb-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}
+@media(max-width:1100px){.wb-layout{grid-template-columns:1fr}}
+.wb-editor{position:relative;height:280px;background:#0b1020;border-radius:var(--r-md);overflow:hidden}
+.wb-editor .pre, .wb-editor textarea{
+  position:absolute;inset:0;padding:16px 18px;margin:0;font-family:var(--mono);font-size:13px;line-height:1.6;
+  white-space:pre;overflow:auto;tab-size:2;border:none;outline:none;color:#cbd5e1;background:transparent;word-wrap:normal;
+}
+.wb-editor textarea{color:transparent;caret-color:#fff;resize:none;z-index:2;-webkit-text-fill-color:transparent}
+.wb-editor textarea::selection{background:rgba(79,70,229,.35)}
+.wb-editor .pre{z-index:1;pointer-events:none}
+.wb-editor .pre .kw{color:#a78bfa} .wb-editor .pre .var{color:#5eead4}
+.wb-editor .pre .pref{color:#fbbf24} .wb-editor .pre .iri{color:#6ee7b7}
+.wb-editor .pre .str{color:#fda4af} .wb-editor .pre .fn{color:#93c5fd}
+.wb-lang{margin-left:auto}
+.wb-result-head{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--border-subtle)}
+.wb-result-head .n{font-family:var(--mono);font-size:12px;color:var(--text-muted)}
+.wb-query{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-left:3px solid var(--border);background:var(--surface);border-radius:0 var(--r-sm) var(--r-sm) 0;margin-bottom:10px}
+.wb-query pre{font-family:var(--mono);font-size:11.5px;color:var(--text-muted);white-space:pre-wrap;line-height:1.5}
+/* ═════════════ governance ═════════════ */
+.violation{display:flex;gap:14px;padding:14px 16px;border:1px solid var(--border-subtle);border-bottom:1px solid var(--border)}
+.violation:last-child{border-bottom:none}
+.violation .sev{width:6px;border-radius:3px;flex:none;align-self:stretch}
+.violation .sev.crit{background:var(--danger)} .violation .sev.warn{background:var(--warning)} .violation .sev.info{background:var(--info)}
+.violation .v-body{flex:1;min-width:0}
+.violation .v-title{font-weight:600;font-size:13.5px}
+.violation .v-desc{font-size:12.5px;color:var(--text-muted);margin-top:3px;line-height:1.5}
+.violation .v-meta{display:flex;gap:8px;align-items:center;margin-top:7px;flex-wrap:wrap}
+.queue-tab{display:flex;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;font-weight:600;font-size:13.5px;color:var(--text-muted);transition:all var(--t-fast)}
+.queue-tab:hover{background:var(--surface)}
+.queue-tab.active{color:var(--accent);box-shadow:inset 3px 0 0 var(--accent);background:var(--accent-subtle)}
+.queue-tab .n{margin-left:auto;font-family:var(--mono);font-size:11px;background:var(--surface-sunken);border-radius:var(--r-pill);padding:1px 8px}
+.queue-tab.active .n{background:var(--accent);color:var(--text-inverse)}
+.profile-badge{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:var(--r-md);padding:8px 12px;background:var(--surface-raised);font-size:13px}
+.profile-badge .code{font-family:var(--mono);font-weight:700;color:var(--derived);background:var(--derived-subtle);border:1px solid var(--derived);border-radius:6px;padding:2px 8px;font-size:12px}
+/* ═════════════ memory ═════════════ */
+.mem-card{padding:16px 18px;margin-bottom:12px}
+.mem-card .m-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.mem-card .m-title{font-weight:600;font-size:14px}
+.mem-card .m-body{font-size:13.5px;color:var(--text-muted);line-height:1.6}
+.mem-card .m-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.agent-row{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--border-subtle);align-items:flex-start}
+.agent-row:last-child{border-bottom:none}
+.agent-row .ai{width:30px;height:30px;border-radius:8px;background:var(--derived-subtle);color:var(--derived);display:grid;place-items:center;font-size:14px;flex:none}
+.agent-row .a-main{flex:1;min-width:0}
+.agent-row .a-who{font-size:13px;font-weight:600}
+.agent-row .a-who .op{font-weight:400;color:var(--text-muted)}
+.agent-row .a-fqn{font-family:var(--mono);font-size:11.5px;color:var(--text-subtle)}
+.agent-row .a-time{font-size:11px;color:var(--text-subtle);white-space:nowrap;margin-top:2px}
+/* ═════════════ cmd palette ═════════════ */
+.cmd-backdrop{position:fixed;inset:0;background:rgba(10,14,26,.45);z-index:100;opacity:0;pointer-events:none;transition:opacity var(--t-panel)}
+.cmd-backdrop.show{opacity:1;pointer-events:auto}
+.cmd-box{position:fixed;top:20%;left:50%;transform:translateX(-50%) translateY(-8px);width:560px;max-width:92vw;background:var(--surface-overlay);border:1px solid var(--border-strong);border-radius:var(--r-md);box-shadow:var(--shadow-overlay);z-index:101;opacity:0;pointer-events:none;transition:all var(--t-panel)}
+.cmd-box.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.cmd-box input{width:100%;padding:16px 18px;border:none;outline:none;background:transparent;font-size:15px;border-bottom:1px solid var(--border-subtle)}
+.cmd-list{max-height:320px;overflow-y:auto;padding:6px}
+.cmd-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--r-sm);font-size:13.5px;cursor:pointer}
+.cmd-item .ci{width:22px;text-align:center;color:var(--text-subtle)}
+.cmd-item:hover,.cmd-item.sel{background:var(--accent-subtle)}
+.cmd-item .k{margin-left:auto;font-size:11px;color:var(--text-subtle);font-family:var(--mono)}
+.cmd-item .cat{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-subtle);font-weight:700;padding:10px 12px 4px}
+/* ═════════════ misc ═════════════ */
+.empty{text-align:center;padding:48px 20px;color:var(--text-subtle)}
+.empty .big{font-size:38px;margin-bottom:10px}
+.empty h3{color:var(--text);font-size:16px;margin-bottom:6px}
+.section-title{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-subtle);font-weight:700;margin:0 0 10px}
+.flow{display:flex;gap:6px;flex-wrap:wrap}
+.stat-row{display:flex;justify-content:space-between;padding:7px 0;font-size:13px;border-bottom:1px dashed var(--border-subtle)}
+.stat-row:last-child{border:none}
+.stat-row .k{color:var(--text-muted)} .stat-row .v{font-family:var(--mono);font-weight:600}
+.switch{position:relative;width:36px;height:20px;border-radius:var(--r-pill);background:var(--border-strong);transition:background var(--t-fast)}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform var(--t-fast)}
+.switch.on{background:var(--accent)} .switch.on::after{transform:translateX(16px)}
+.seg{display:inline-flex;background:var(--surface-sunken);border-radius:var(--r-sm);padding:3px;gap:2px}
+.seg button{height:26px;padding:0 12px;border-radius:5px;font-weight:600;font-size:12.5px;color:var(--text-muted)}
+.seg button.on{background:var(--surface-raised);color:var(--text);box-shadow:var(--shadow-raised)}
+.spark{display:flex;align-items:flex-end;gap:3px;height:34px;margin-top:8px}
+.spark i{flex:1;background:var(--accent);border-radius:2px;opacity:.85;min-height:3px}
+.spark i:nth-child(2n){background:var(--derived)}
+</style>
+</head>
+<body data-time="now">
+
+<div class="app">
+
+  <!-- ═══════════════ TOP BAR ═══════════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">◈</span>
+      graph-owl<span class="sub">· knowledge graph</span>
+    </div>
+    <div class="global-search" id="global-search" role="button" tabindex="0" aria-label="Global search">
+      <span>🔎</span>
+      <span class="muted">Search the estate… assets, memory, agents, queries</span>
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="top-right">
+      <button class="time-ctl" id="time-ctl" title="Jump the whole console to any past moment">
+        <span>◷</span><span id="time-ctl-label">now</span>
+      </button>
+      <button class="icon-btn" id="theme-btn" title="Toggle theme">◑</button>
+      <div class="avatar" title="Priya Nair — Data Platform Steward">
+        <span class="init">PN</span>
+        <span class="who"><b>Priya Nair</b><span>Data Platform · steward</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════ RAIL ═══════════════ -->
+  <aside class="rail">
+    <button class="rail-item active" data-screen="overview"><span class="ico">◉</span> Overview</button>
+    <button class="rail-item" data-screen="discover"><span class="ico">⌕</span> Discover<span class="count">124</span></button>
+    <button class="rail-item" data-screen="explore"><span class="ico">⬡</span> Explore<span class="count">12k</span></button>
+    <button class="rail-item" data-screen="lineage"><span class="ico">⇄</span> Lineage</button>
+    <button class="rail-item" data-screen="workbench"><span class="ico">⌸</span> Workbench</button>
+    <div class="lbl">Govern</div>
+    <button class="rail-item" data-screen="governance"><span class="ico">⚑</span> Governance<span class="count">23</span></button>
+    <button class="rail-item" data-screen="memory"><span class="ico">🧠</span> Memory</button>
+    <div class="lbl">System</div>
+    <button class="rail-item" data-screen="settings"><span class="ico">⚙</span> Settings</button>
+    <div class="rail-foot"><span class="dot"></span>Connector sync 08:12 · 41s ago<br><span class="dot"></span>Reasoning overlay current</div>
+  </aside>
+
+  <!-- ═══════════════ CONTENT ═══════════════ -->
+  <main class="content">
+
+  <!-- ░░░░░░ OVERVIEW ░░░░░░ -->
+  <section class="screen active" id="screen-overview">
+    <div class="screen-head">
+      <div>
+        <div class="crumb">estate · indian retail &amp; corporate banking · <span id="ov-asof">now</span></div>
+        <h1>Good morning, Priya</h1>
+      </div>
+      <div class="page-actions">
+        <button class="btn" onclick="go('workbench')">⌸ New query</button>
+        <button class="btn primary" onclick="go('explore')">⬡ Open the graph</button>
+      </div>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi card"><div class="k-top"><span class="k-label">Entities</span><span class="k-icon">🗂</span></div><div class="k-value">124</div><div class="k-sub">11 types · 3 services · 5 schemas</div></div>
+      <div class="kpi card"><div class="k-top"><span class="k-label">Flakes in the graph</span><span class="k-icon">⬡</span></div><div class="k-value">1.24M</div><div class="k-sub">SPOT · PSOT · POST · OPST</div></div>
+      <div class="kpi card"><div class="k-top"><span class="k-label">Reasoning overlay</span><span class="k-icon">🧬</span></div><div class="k-value">38,240</div><div class="k-sub">OWL&nbsp;2&nbsp;RL · violet = inferred</div></div>
+      <div class="kpi card"><div class="k-top"><span class="k-label">Open violations</span><span class="k-icon">⚠</span></div><div class="k-value" style="color:var(--danger)">14</div><div class="k-sub"><span class="k-trend down">▲ 3 this week</span>&nbsp; 4 critical</div></div>
+      <div class="kpi card"><div class="k-top"><span class="k-label">Ownership coverage</span><span class="k-icon">👥</span></div><div class="k-value">87%</div><div class="k-sub"><span class="k-trend up">▲ 4 pts</span>&nbsp; 16 unowned</div></div>
+      <div class="kpi card"><div class="k-top"><span class="k-label">Certified assets</span><span class="k-icon">✓</span></div><div class="k-value">61 / 94</div><div class="k-sub">33 expire within 90 days</div></div>
+    </div>
+
+    <div class="grid-2 w72">
+      <div class="card">
+        <div class="card-h">Estate by type <span class="sub">counts · entities</span></div>
+        <div class="card-b" id="estate-bars"></div>
+      </div>
+      <div class="card">
+        <div class="card-h">Reasoning overlay</div>
+        <div class="card-b">
+          <div class="profile-badge" style="margin-bottom:12px"><span>Profile</span><span class="code">OWL 2 RL</span><span>routes · detect → refuse → reason</span></div>
+          <div class="stat-row"><span class="k">Derived facts</span><span class="v">38,240</span></div>
+          <div class="stat-row"><span class="k">Active rules</span><span class="v">17</span></div>
+          <div class="stat-row"><span class="k">Maintained to</span><span class="v">now · 0ms lag</span></div>
+          <div class="stat-row"><span class="k">Overlay reads</span><span class="v">1.9M / 24h</span></div>
+          <div style="margin-top:12px" class="spark" id="overlay-spark"></div>
+          <div class="muted" style="font-size:12px;margin-top:6px">Inference never persists into the base graph — it is an explainable overlay, queryable by rule and source fact.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-3">
+      <div class="card">
+        <div class="card-h">Needs attention <span class="sub">4 kinds</span></div>
+        <div class="card-b" id="attention-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-h">Recent activity <span class="sub">audit trail</span></div>
+        <div class="card-b" id="activity-feed"></div>
+      </div>
+      <div class="card">
+        <div class="card-h">Agents <span class="sub">context layer</span></div>
+        <div class="card-b" id="agent-strip"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ DISCOVER ░░░░░░ -->
+  <section class="screen" id="screen-discover">
+    <div class="screen-head"><h1>Discover</h1></div>
+    <div class="searchbar">
+      <span>🔎</span>
+      <input id="discover-input" type="text" placeholder="Search the estate by name, FQN, column, tag… try “upi”" autocomplete="off">
+      <span class="kbd" style="font-size:11px;color:var(--text-subtle);border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-family:var(--mono)">Esc</span>
+    </div>
+    <div class="discover-grid">
+      <div>
+        <div class="card">
+          <div class="card-h">Facets</div>
+          <div class="card-b">
+            <div class="facet"><h4>Type</h4><div id="fac-type"></div></div>
+            <div class="facet"><h4>Schema</h4><div id="fac-schema"></div></div>
+            <div class="facet"><h4>Sensitivity</h4><div id="fac-sens"></div></div>
+            <div class="facet"><h4>Lifecycle</h4><div id="fac-life"></div></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-b" style="display:flex;align-items:center;gap:10px">
+            <span class="muted" id="result-count">124 entities</span>
+            <span class="pill" id="result-mode">⏱ ranked · lexical + usage</span>
+            <div style="margin-left:auto" class="seg"><button class="on">Ranked</button><button>Recent</button></div>
+          </div>
+        </div>
+        <div class="card" id="result-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ ENTITY ░░░░░░ -->
+  <section class="screen" id="screen-entity">
+    <div class="screen-head">
+      <div>
+        <div class="crumb" id="e-crumb">data_warehouse → warehouse → public</div>
+        <h1 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" id="e-title">customers <span class="pill">Table</span> <span class="pill" id="e-version">v4.2</span></h1>
+        <div class="fqn" id="e-fqn">data_warehouse.warehouse.public.customers</div>
+      </div>
+      <div class="page-actions">
+        <button class="btn" onclick="goEntityGraph()">⌘G · view in graph</button>
+        <button class="btn primary" onclick="go('workbench')">⌸ Query this</button>
+      </div>
+    </div>
+
+    <div class="trust-bar" id="trust-bar"></div>
+
+    <div class="tabs" id="entity-tabs">
+      <button class="tab active" data-etab="overview">Overview</button>
+      <button class="tab" data-etab="columns">Columns</button>
+      <button class="tab" data-etab="lineage">Lineage</button>
+      <button class="tab" data-etab="relations">Relations</button>
+      <button class="tab" data-etab="knowledge">Knowledge</button>
+      <button class="tab" data-etab="history">History</button>
+    </div>
+
+    <div class="entity-layout">
+      <div>
+        <div class="etab-pane" id="etab-overview">
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-b" style="font-size:14px;line-height:1.65;color:var(--text-muted)">
+              Customer master for the retail division — identity, contact and KYC facts for every customer with a product.
+              Enriched nightly by <code>pipe_nightly_reconcile</code>; <b>certified by Finance Risk</b> for regulatory reporting (KRA / BCBS239).
+            </div>
+          </div>
+          <div class="grid-2" style="grid-template-columns:1fr 1fr;margin-bottom:0">
+            <div class="prop-grid" id="e-props"></div>
+          </div>
+        </div>
+        <div class="etab-pane" id="etab-columns" style="display:none">
+          <div class="card"><div class="table-wrap"><table class="data" id="e-columns"></table></div></div>
+        </div>
+        <div class="etab-pane" id="etab-lineage" style="display:none">
+          <div class="card" style="margin-bottom:12px"><div class="card-h">Upstream &amp; downstream <span class="sub">feeds / derivedFrom · edges carry confidence</span></div></div>
+          <div class="canvas-wrap" style="height:360px" id="entity-lineage-canvas"></div>
+          <div class="card" style="margin-top:14px">
+            <div class="card-h">Column lineage <span class="sub">many source columns → one target</span></div>
+            <div class="table-wrap"><table class="data"><thead><tr><th>Target column</th><th>Source columns</th><th>Transformation</th><th>Confidence</th><th>Epistemic</th></tr></thead>
+              <tbody><tr>
+                <td class="rowlink">full_name</td><td><code>first_name</code> + <code>last_name</code></td><td>CONCAT( , ' ')</td>
+                <td><span class="badge b-conf-high">0.99 asserted</span></td><td><span class="badge b-asserted">stated</span></td>
+              </tr><tr>
+                <td class="rowlink" style="color:var(--derived)">risk_tier</td><td><code>risk_score</code> · <code>txn_velocity</code></td><td>rule <code>r11</code> · band thresholds</td>
+                <td><span class="badge b-conf-mid">0.82</span></td><td><span class="badge b-derived">inferred</span></td>
+              </tr></tbody></table></div>
+          </div>
+        </div>
+        <div class="etab-pane" id="etab-relations" style="display:none">
+          <div class="card"><div class="table-wrap"><table class="data" id="e-relations"></table></div></div>
+        </div>
+        <div class="etab-pane" id="etab-knowledge" style="display:none">
+          <div class="card">
+            <div class="card-h">Memory about this asset <span class="sub">who decided what, why</span></div>
+            <div class="card-b" id="e-memory"></div>
+          </div>
+        </div>
+        <div class="etab-pane" id="etab-history" style="display:none">
+          <div class="card"><div class="card-b" id="e-history"></div></div>
+        </div>
+      </div>
+
+      <aside class="ctx-rail">
+        <div class="card">
+          <div class="card-h">Graph neighbourhood <span class="sub">one hop</span></div>
+          <div class="card-b">
+            <div class="ctx-neigh" id="ctx-neigh"></div>
+            <button class="btn small" style="width:100%;margin-top:12px" onclick="go('explore')">⬡ Expand in explorer</button>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="card-h">Freshness</div>
+          <div class="card-b">
+            <div class="stat-row"><span class="k">Last verified</span><span class="v">today · 08:12</span></div>
+            <div class="stat-row"><span class="k">Source</span><span class="v">core_banking</span></div>
+            <div class="stat-row"><span class="k">Sync status</span><span class="v" style="color:var(--success)">converged</span></div>
+            <div class="stat-row"><span class="k">Source hash</span><span class="v">9f3a…c21</span></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ EXPLORE ░░░░░░ -->
+  <section class="screen" id="screen-explore">
+    <div class="screen-head">
+      <div><div class="crumb">estate as a graph · as-of <span id="ex-asof">now</span></div><h1>Graph explorer</h1></div>
+      <div class="page-actions">
+        <button class="btn" onclick="focusEntity()">◎ Focus: customers</button>
+        <button class="btn primary" onclick="expandAll()">⊕ Expand neighbourhood</button>
+      </div>
+    </div>
+    <div class="canvas-wrap" id="explore-canvas">
+      <div class="canvas-tools">
+        <div class="toolbar">
+          <button class="tbtn" onclick="expandAll()">⊕ Expand</button>
+          <span class="tsep"></span>
+          <button class="tbtn on" id="f-derived" onclick="toggleFilter(this,'derived')">Inferred</button>
+          <button class="tbtn on" id="f-asserted" onclick="toggleFilter(this,'asserted')">Asserted</button>
+          <button class="tbtn on" id="f-lowconf" onclick="toggleFilter(this,'lowconf')">Low conf</button>
+          <span class="tsep"></span>
+          <button class="tbtn" onclick="resetView()">⟳ Reset</button>
+        </div>
+        <div class="zoom-ctl">
+          <button class="tbtn" onclick="zoom(-0.2)">−</button>
+          <button class="tbtn" onclick="zoom(0.2)">+</button>
+          <button class="tbtn" onclick="zoom(0)">⤢</button>
+        </div>
+      </div>
+      <div class="minimap" id="minimap"></div>
+      <div class="graph-legend">
+        <div class="li"><span class="sw dot" style="background:var(--accent)"></span> asserted node</div>
+        <div class="li"><span class="sw dot" style="background:var(--derived)"></span> inferred (overlay)</div>
+        <div class="li"><span class="sw" style="background:var(--graph-edge)"></span> asserted edge</div>
+        <div class="li"><span class="sw" style="background:var(--graph-edge-derived);border-top:1px dashed var(--graph-edge-derived)"></span> derived edge</div>
+        <div class="li"><span class="sw" style="background:var(--graph-edge-mid)"></span> confidence 0.5–0.8</div>
+      </div>
+      <div class="canvas-hint">drag nodes · scroll to zoom · click to inspect</div>
+      <div class="time-rail">
+        <span class="tl">as-of</span>
+        <input type="range" id="ex-time" min="0" max="34" value="34">
+        <span class="tl" id="ex-time-label">now</span>
+      </div>
+      <div class="node-tooltip" id="node-tooltip" style="display:none"></div>
+      <div class="inspector" id="inspector"></div>
+      <svg id="explore-svg" style="width:100%;height:100%" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ LINEAGE ░░░░░░ -->
+  <section class="screen" id="screen-lineage">
+    <div class="screen-head">
+      <div><div class="crumb">lineage · asset-focussed DAG</div><h1>Lineage of <code>risk_tier</code> &amp; <code>kra_reports</code></h1></div>
+      <div class="page-actions">
+        <div class="seg">
+          <button class="on" id="lg-up" onclick="lgMode('up')">Upstream</button>
+          <button onclick="lgMode('down')">Downstream</button>
+          <button onclick="lgMode('impact')">Impact</button>
+        </div>
+        <button class="btn">⇩ Export (GraphML)</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-b" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <span class="badge b-derived">2 inferred edges</span>
+        <span class="badge b-conf-mid">2 edges at 0.5–0.8</span>
+        <span class="pill">derived edges drawn distinctly</span>
+        <span class="pill">column-level · depth-bounded · cycles safe</span>
+      </div>
+    </div>
+    <div class="canvas-wrap" style="height:460px" id="lineage-canvas"></div>
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <div class="card-h">Traversal <span class="sub">shortest path · all paths · subgraph</span></div>
+        <div class="card-b">
+          <div class="bar-row"><span class="lbl">customers → kra_reports</span><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,var(--accent),var(--derived))"></div></div><span class="n">3 hops</span></div>
+          <div class="bar-row"><span class="lbl">upi_transactions → risk_tier</span><div class="track"><div class="fill" style="width:66%"></div></div><span class="n">2 hops</span></div>
+          <div class="bar-row"><span class="lbl">loans → risk_tier</span><div class="track"><div class="fill" style="width:66%"></div></div><span class="n">2 hops</span></div>
+          <div class="bar-row"><span class="lbl">all paths found</span><div class="track"><div class="fill" style="width:12%;background:var(--derived)"></div></div><span class="n">6</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h">Impact analysis <span class="sub">blast radius</span></div>
+        <div class="card-b" id="impact-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ WORKBENCH ░░░░░░ -->
+  <section class="screen" id="screen-workbench">
+    <div class="screen-head">
+      <div><div class="crumb">dual-language query · SPARQL &amp; openCypher over one graph</div><h1>Query workbench</h1></div>
+      <div class="page-actions">
+        <button class="btn" onclick="wbExplain()">🧬 Explain derivation</button>
+        <button class="btn primary" onclick="wbRun()">▶ Run</button>
+      </div>
+    </div>
+    <div class="wb-layout">
+      <div>
+        <div class="card">
+          <div class="card-h">
+            Query
+            <div class="seg wb-lang">
+              <button class="on" id="wb-lang-sparql" onclick="wbLang('sparql')">SPARQL</button>
+              <button id="wb-lang-cypher" onclick="wbLang('cypher')">Cypher</button>
+            </div>
+          </div>
+          <div class="wb-editor">
+            <pre class="pre" id="wb-pre" aria-hidden="true"></pre>
+            <textarea id="wb-code" spellcheck="false" aria-label="Query editor"></textarea>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="wb-result-head">
+            <span style="font-weight:600">Results</span>
+            <span class="n" id="wb-timing">—</span>
+            <div style="margin-left:auto" class="seg">
+              <button class="on" onclick="wbResultMode('table')">Table</button>
+              <button onclick="wbResultMode('graph')">Graph</button>
+            </div>
+          </div>
+          <div id="wb-result-table"></div>
+          <div id="wb-result-graph" class="canvas-wrap" style="height:340px;display:none"></div>
+        </div>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-h">Saved queries</div>
+          <div class="card-b" id="wb-saved"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">Explain a derivation</div>
+          <div class="card-b" id="wb-explain">
+            <div class="muted" style="font-size:13px;line-height:1.6">Run a query, then hit <b>Explain derivation</b> — every inferred result names the rule and the asserted source facts that produced it.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ GOVERNANCE ░░░░░░ -->
+  <section class="screen" id="screen-governance">
+    <div class="screen-head">
+      <div><div class="crumb">validation · resolution · classification · lifecycle</div><h1>Governance</h1></div>
+      <div class="page-actions"><button class="btn primary">⚑ New policy</button></div>
+    </div>
+    <div class="grid-2 w72">
+      <div class="card">
+        <div class="card-h">Constraint violations <span class="sub">SHACL-like shapes · reported, not rejected</span></div>
+        <div class="card-b" id="violations-list"></div>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-h">Review queues <span class="sub">one pattern · five sources</span></div>
+          <div id="queue-tabs"></div>
+          <div class="card-b" id="queue-body"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">Ownership &amp; lifecycle</div>
+          <div class="card-b">
+            <div class="stat-row"><span class="k">Unowned assets</span><span class="v" style="color:var(--warning)">16</span></div>
+            <div class="stat-row"><span class="k">Certified, expiring ≤ 90d</span><span class="v" style="color:var(--warning)">33</span></div>
+            <div class="stat-row"><span class="k">Deprecated</span><span class="v">9</span></div>
+            <div class="stat-row"><span class="k">Retired</span><span class="v">3</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ MEMORY ░░░░░░ -->
+  <section class="screen" id="screen-memory">
+    <div class="screen-head">
+      <div><div class="crumb">organisational memory · the “why” layer</div><h1>Memory &amp; agents</h1></div>
+      <div class="page-actions"><button class="btn">+ New memory</button></div>
+    </div>
+    <div class="grid-2 w72">
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-h">Memory objects <span class="sub">every memory links to an asset, carries provenance &amp; confidence</span></div>
+          <div class="card-b" id="memory-list"></div>
+        </div>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-h">Agent activity <span class="sub">MCP sessions · reads · writes · retractions</span></div>
+          <div class="card-b" id="agent-activity"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">Integration health</div>
+          <div class="card-b">
+            <div class="stat-row"><span class="k">MCP endpoint</span><span class="v" style="color:var(--success)">serving · 6 tools</span></div>
+            <div class="stat-row"><span class="k">Active agent sessions</span><span class="v">3</span></div>
+            <div class="stat-row"><span class="k">Outbound events · 24h</span><span class="v">1,204</span></div>
+            <div class="stat-row"><span class="k">Policy filter</span><span class="v">compiled per query</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░ SETTINGS ░░░░░░ -->
+  <section class="screen" id="screen-settings">
+    <div class="screen-head"><h1>Settings</h1></div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-h">Connector: core_banking</div>
+        <div class="card-b">
+          <div class="stat-row"><span class="k">Source</span><span class="v">postgres · prod-mum-01</span></div>
+          <div class="stat-row"><span class="k">Last run</span><span class="v">today · 08:12 · 41s</span></div>
+          <div class="stat-row"><span class="k">Result</span><span class="v" style="color:var(--success)">converged</span></div>
+          <div class="stat-row"><span class="k">Created / patched / skipped</span><span class="v">0 / 2 / 318</span></div>
+          <div class="stat-row"><span class="k">Fingerprint</span><span class="v">source_hash · active</span></div>
+          <div class="stat-row"><span class="k">Deletion guard</span><span class="v">threshold 95% · safe</span></div>
+          <div style="margin-top:14px;display:flex;gap:8px"><button class="btn small">Test</button><button class="btn small">Run now</button><button class="btn small">History</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h">Surface &amp; budgets</div>
+        <div class="card-b">
+          <div class="stat-row"><span class="k">REST API</span><span class="v">/openapi.json · v1</span></div>
+          <div class="stat-row"><span class="k">Bolt (property graph)</span><span class="v" style="color:var(--success)">read-only · on</span></div>
+          <div class="stat-row"><span class="k">MCP server</span><span class="v">stdio + sse</span></div>
+          <div class="stat-row"><span class="k">RDF export</span><span class="v">JSON-LD · Turtle · NT</span></div>
+          <div class="stat-row"><span class="k">Memory budget</span><span class="v">34 / 100 MB</span></div>
+          <div class="stat-row"><span class="k">Admission control</span><span class="v">2 classes · no queue</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h">Operational posture</div>
+      <div class="card-b" style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+        <span class="badge b-cert">● /health OK</span>
+        <span class="badge b-cert">● /ready 200 · degraded: auth off?</span>
+        <span class="badge b-neutral">○ auth · OIDC PKCE · tokens in memory</span>
+        <span class="badge b-neutral">○ single binary · Postgres only</span>
+      </div>
+    </div>
+  </section>
+
+  </main>
+</div>
+
+<!-- ═══════════════ TIME BANNER ═══════════════ -->
+<div class="time-banner" id="time-banner">
+  <span style="font-size:16px">◷</span>
+  <span id="time-banner-text">Viewing the estate as it stood on</span>
+  <button class="btn small" onclick="returnToNow()">⟳ Return to now</button>
+</div>
+
+<!-- ═══════════════ CMD PALETTE ═══════════════ -->
+<div class="cmd-backdrop" id="cmd-backdrop" onclick="closeCmd()"></div>
+<div class="cmd-box" id="cmd-box">
+  <input id="cmd-input" type="text" placeholder="Type a command or search…" autocomplete="off">
+  <div class="cmd-list" id="cmd-list"></div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   graph-owl console prototype — single source of truth: the graph
+   ══════════════════════════════════════════════════════════════ */
+const NOW = "16 Aug 2026";
+const KINDS = {
+  DatabaseService:"🗄", Database:"▦", DatabaseSchema:"▤", Table:"▤", Column:"⋮",
+  Dashboard:"▧", Pipeline:"⇶", Metric:"ƒ", Memory:"🧠", Agent:"🤖", Domain:"◈"
+};
+
+/* graph model — nodes with epistemic status + confidence, edges with payload */
+const NODES = {
+  "svc-dw":{n:"data_warehouse",fqn:"data_warehouse",k:"DatabaseService",x:200,y:52,c:.99,region:"BLR"},
+  "svc-core":{n:"core_banking",fqn:"core_banking",k:"DatabaseService",x:470,y:52,c:.99},
+  "svc-risk":{n:"risk_platform",fqn:"risk_platform",k:"DatabaseService",x:740,y:52,c:.99},
+  "db-wh":{n:"warehouse",fqn:"data_warehouse.warehouse",k:"Database",x:200,y:140,c:.99},
+  "db-oltp":{n:"oltp",fqn:"core_banking.oltp",k:"Database",x:470,y:140,c:.99},
+  "sch-public":{n:"public",fqn:"data_warehouse.warehouse.public",k:"DatabaseSchema",x:140,y:230,c:.99},
+  "sch-risk":{n:"risk",fqn:"data_warehouse.warehouse.risk",k:"DatabaseSchema",x:470,y:230,c:.99},
+  "tbl-cust":{n:"customers",fqn:"data_warehouse.warehouse.public.customers",k:"Table",x:80,y:330,c:.98,sens:"PII.Sensitive",cert:true},
+  "tbl-acc":{n:"accounts",fqn:"data_warehouse.warehouse.public.accounts",k:"Table",x:260,y:330,c:.98,sens:"PII.Personal"},
+  "tbl-txn":{n:"transactions",fqn:"data_warehouse.warehouse.public.transactions",k:"Table",x:460,y:330,c:.97,sens:"PII.Personal"},
+  "tbl-upi":{n:"upi_transactions",fqn:"data_warehouse.warehouse.risk.upi_transactions",k:"Table",x:650,y:330,c:.82,sens:"PII.Personal"},
+  "tbl-loans":{n:"loans",fqn:"data_warehouse.warehouse.risk.loans",k:"Table",x:840,y:330,c:.96,sens:"PII.Sensitive"},
+  "tbl-emi":{n:"emi_schedule",fqn:"data_warehouse.warehouse.risk.emi_schedule",k:"Table",x:880,y:430,c:.95},
+  "tbl-kra":{n:"kra_reports",fqn:"data_warehouse.warehouse.risk.kra_reports",k:"Table",x:650,y:460,c:.91,sens:"PII.Sensitive"},
+  "tbl-kyc":{n:"kyc_documents",fqn:"data_warehouse.warehouse.risk.kyc_documents",k:"Table",x:460,y:460,c:.9,sens:"PII.Sensitive"},
+  "col-fname":{n:"first_name",fqn:"…customers.first_name",k:"Column",x:20,y:430,c:.99,sens:"PII.Personal"},
+  "col-lname":{n:"last_name",fqn:"…customers.last_name",k:"Column",x:60,y:430,c:.99,sens:"PII.Personal"},
+  "col-full":{n:"full_name",fqn:"…customers.full_name",k:"Column",x:100,y:500,c:.99,derived:true,rule:"r03 · CONCAT"},
+  "col-tier":{n:"risk_tier",fqn:"…customers.risk_tier",k:"Column",x:160,y:520,c:.82,derived:true,rule:"r11 · band thresholds"},
+  "mtr-active":{n:"metric_active_loans",fqn:"metrics.retail.metric_active_loans",k:"Metric",x:300,y:520,c:.94,derived:true,rule:"r05 · classification"},
+  "mtr-dpd":{n:"metric_dpd_over_90",fqn:"metrics.retail.metric_dpd_over_90",k:"Metric",x:700,y:540,c:.9,derived:true,rule:"r07 · DPD>90 → NPA"},
+  "dash-reg":{n:"dash_regulatory",fqn:"dashboards.risk.dash_regulatory",k:"Dashboard",x:560,y:560,c:.96},
+  "dash-risk":{n:"dash_risk_daily",fqn:"dashboards.risk.dash_risk_daily",k:"Dashboard",x:840,y:560,c:.93},
+  "pipe-risk":{n:"pipe_risk_scoring",fqn:"pipelines.risk.pipe_risk_scoring",k:"Pipeline",x:410,y:560,c:.95},
+  "mem-loan":{n:"lending policy 2026",fqn:"memory.decision.lending-policy-2026",k:"Memory",x:150,y:590,c:.99},
+  "dom-retail":{n:"Retail Banking",fqn:"domains.retail-banking",k:"Domain",x:940,y:180,c:1}
+};
+
+const EDGES = [
+  {f:"svc-dw",t:"db-wh",type:"contains",c:.99,src:"registry"},
+  {f:"svc-core",t:"db-oltp",type:"contains",c:.99,src:"registry"},
+  {f:"svc-risk",t:"db-wh",type:"contains",c:.99,src:"registry"},
+  {f:"db-wh",t:"sch-public",type:"contains",c:.99,src:"registry"},
+  {f:"db-wh",t:"sch-risk",type:"contains",c:.99,src:"registry"},
+  {f:"sch-public",t:"tbl-cust",type:"contains",c:.99,src:"registry"},
+  {f:"sch-public",t:"tbl-acc",type:"contains",c:.99,src:"registry"},
+  {f:"sch-public",t:"tbl-txn",type:"contains",c:.99,src:"registry"},
+  {f:"sch-risk",t:"tbl-upi",type:"contains",c:.99,src:"registry"},
+  {f:"sch-risk",t:"tbl-loans",type:"contains",c:.99,src:"registry"},
+  {f:"sch-risk",t:"tbl-emi",type:"contains",c:.99,src:"registry"},
+  {f:"sch-risk",t:"tbl-kra",type:"contains",c:.99,src:"registry"},
+  {f:"sch-risk",t:"tbl-kyc",type:"contains",c:.99,src:"registry"},
+  {f:"tbl-cust",t:"col-fname",type:"contains",c:.99,src:"schema"},
+  {f:"tbl-cust",t:"col-lname",type:"contains",c:.99,src:"schema"},
+  {f:"col-fname",t:"col-full",type:"derivedFrom",c:.99,derived:true,rule:"r03",src:"rule r03"},
+  {f:"col-lname",t:"col-full",type:"derivedFrom",c:.99,derived:true,rule:"r03",src:"rule r03"},
+  {f:"col-full",t:"col-tier",type:"derivedFrom",c:.82,derived:true,rule:"r11",src:"rule r11"},
+  {f:"tbl-txn",t:"tbl-upi",type:"feeds",c:.82,src:"Connector · upi feed"},
+  {f:"tbl-upi",t:"col-tier",type:"feeds",c:.78,derived:true,rule:"r11",src:"rule r11"},
+  {f:"tbl-cust",t:"col-tier",type:"feeds",c:.95,derived:true,rule:"r11",src:"rule r11"},
+  {f:"tbl-loans",t:"tbl-emi",type:"contains",c:.95,src:"registry"},
+  {f:"tbl-loans",t:"mtr-active",type:"feeds",c:.94,derived:true,rule:"r05",src:"rule r05"},
+  {f:"tbl-emi",t:"mtr-dpd",type:"feeds",c:.9,derived:true,rule:"r07",src:"rule r07"},
+  {f:"tbl-loans",t:"mtr-dpd",type:"feeds",c:.9,derived:true,rule:"r07",src:"rule r07"},
+  {f:"tbl-cust",t:"tbl-kra",type:"derivedFrom",c:.91,derived:true,rule:"r04 · PII rollup",src:"rule r04"},
+  {f:"pipe-risk",t:"tbl-cust",type:"consumes",c:.95,src:"declared"},
+  {f:"pipe-risk",t:"tbl-txn",type:"consumes",c:.95,src:"declared"},
+  {f:"pipe-risk",t:"tbl-kyc",type:"produces",c:.9,src:"declared"},
+  {f:"tbl-kra",t:"dash-reg",type:"feeds",c:.96,src:"declared"},
+  {f:"col-tier",t:"dash-risk",type:"feeds",c:.93,src:"declared"},
+  {f:"mtr-dpd",t:"dash-risk",type:"feeds",c:.9,src:"declared"},
+  {f:"mem-loan",t:"tbl-loans",type:"documents",c:.99,src:"human · Priya"},
+  {f:"dom-retail",t:"tbl-cust",type:"governedBy",c:1,src:"human · confirmed"}
+];
+
+const ENTITIES = [
+  {n:"customers",fqn:"data_warehouse.warehouse.public.customers",k:"Table",schema:"public",sens:"PII.Sensitive",life:"Active",conf:.98,own:["Priya Nair"],dom:"Retail Banking",cert:true,desc:"Customer master — identity, contact, KYC."},
+  {n:"accounts",fqn:"data_warehouse.warehouse.public.accounts",k:"Table",schema:"public",sens:"PII.Personal",life:"Active",conf:.98,own:["Priya Nair"],dom:"Retail Banking",cert:true},
+  {n:"transactions",fqn:"data_warehouse.warehouse.public.transactions",k:"Table",schema:"public",sens:"PII.Personal",life:"Active",conf:.97,own:["Arjun Mehta"],dom:"Retail Banking",cert:true},
+  {n:"upi_transactions",fqn:"data_warehouse.warehouse.risk.upi_transactions",k:"Table",schema:"risk",sens:"PII.Personal",life:"Active",conf:.82,own:["Ravi Iyer"],dom:"Payments",cert:false},
+  {n:"loans",fqn:"data_warehouse.warehouse.risk.loans",k:"Table",schema:"risk",sens:"PII.Sensitive",life:"Active",conf:.96,own:["Arjun Mehta"],dom:"Retail Banking",cert:true},
+  {n:"emi_schedule",fqn:"data_warehouse.warehouse.risk.emi_schedule",k:"Table",schema:"risk",sens:"—",life:"Active",conf:.95,own:[],dom:"Retail Banking",cert:false},
+  {n:"kra_reports",fqn:"data_warehouse.warehouse.risk.kra_reports",k:"Table",schema:"risk",sens:"PII.Sensitive",life:"Active",conf:.91,own:["Finance Risk"],dom:"Regulatory",cert:true},
+  {n:"kyc_documents",fqn:"data_warehouse.warehouse.risk.kyc_documents",k:"Table",schema:"risk",sens:"PII.Sensitive",life:"Draft",conf:.9,own:[],dom:"Regulatory",cert:false},
+  {n:"dash_regulatory",fqn:"dashboards.risk.dash_regulatory",k:"Dashboard",schema:"—",sens:"PII.Sensitive",life:"Active",conf:.96,own:["Finance Risk"],dom:"Regulatory",cert:true},
+  {n:"dash_risk_daily",fqn:"dashboards.risk.dash_risk_daily",k:"Dashboard",schema:"—",sens:"—",life:"Active",conf:.93,own:["Ravi Iyer"],dom:"Payments",cert:false},
+  {n:"pipe_risk_scoring",fqn:"pipelines.risk.pipe_risk_scoring",k:"Pipeline",schema:"—",sens:"PII.Personal",life:"Active",conf:.95,own:["Data Platform"],dom:"Payments",cert:true},
+  {n:"metric_active_loans",fqn:"metrics.retail.metric_active_loans",k:"Metric",schema:"—",sens:"—",life:"Active",conf:.94,own:["Finance Risk"],dom:"Retail Banking",cert:true,derived:true},
+  {n:"metric_dpd_over_90",fqn:"metrics.retail.metric_dpd_over_90",k:"Metric",schema:"—",sens:"—",life:"Active",conf:.9,own:["Finance Risk"],dom:"Retail Banking",cert:true,derived:true},
+  {n:"lending policy 2026",fqn:"memory.decision.lending-policy-2026",k:"Memory",schema:"—",sens:"—",life:"—",conf:.99,own:["Priya Nair"],dom:"Retail Banking",cert:false}
+];
+
+/* ─────────────── NAV ─────────────── */
+const $=s=>document.querySelector(s);
+function go(screen){
+  document.querySelectorAll(".rail-item").forEach(b=>b.classList.toggle("active",b.dataset.screen===screen));
+  document.querySelectorAll(".screen").forEach(s=>s.classList.toggle("active",s.id==="screen-"+screen));
+  window.scrollTo({top:0});
+}
+document.querySelectorAll(".rail-item").forEach(b=>b.onclick=()=>go(b.dataset.screen));
+
+/* ─────────────── THEME ─────────────── */
+$("#theme-btn").onclick=()=>{
+  const d=document.documentElement.dataset.theme==="light"?"dark":"light";
+  document.documentElement.dataset.theme=d;
+};
+
+/* ─────────────── TIME TRAVEL ─────────────── */
+const DAYS=[];
+for(let i=0;i<=34;i++){const d=new Date(2026,6,14+i);DAYS.push({i,label:d.toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"}),date:d});}
+const today=DAYS[DAYS.length-1];
+function setTime(i){
+  const day=DAYS[i];const historic=i<DAYS.length-1;
+  document.body.dataset.time=historic?"historic":"now";
+  $("#time-ctl-label").textContent=historic?day.label:"now";
+  $("#time-ctl").classList.toggle("historic",historic);
+  $("#ov-asof").textContent=historic?day.label:"now";
+  $("#ex-asof").textContent=historic?day.label:"now";
+  const b=$("#time-banner");
+  if(historic){
+    b.querySelector("span:nth-child(2)").textContent=`Viewing the estate as it stood on ${day.label} — assertions still valid then, retractions undone.`;
+    b.classList.add("show");
+  } else b.classList.remove("show");
+}
+$("#time-ctl").onclick=()=>{const r=$("#ex-time");const v=r.value==String(r.max)?0:+r.value+1;r.value=v;setTime(+v);$("#ex-time-label").textContent=$("#time-ctl-label").textContent;}
+function returnToNow(){$("#ex-time").value=$("#ex-time").max;setTime(DAYS.length-1);}
+$("#ex-time").oninput=e=>{setTime(+e.target.value);$("#ex-time-label").textContent=$("#time-ctl-label").textContent;};
+
+/* ─────────────── OVERVIEW ─────────────── */
+const TYPES={Table:40,Column:36,Database:3,DatabaseSchema:5,Dashboard:8,Pipeline:7,Metric:9,Memory:6,DatabaseService:3,Container:4,GlossaryTerm:3};
+const bars=$("#estate-bars");
+Object.entries(TYPES).forEach(([k,v])=>{const max=40;
+  const el=document.createElement("div");el.className="bar-row";
+  el.innerHTML=`<span class="lbl">${k}</span><div class="track"><div class="fill" style="width:${v/max*100}%"></div></div><span class="n">${v}</span>`;
+  bars.appendChild(el);});
+const overlay=[18,26,22,38,34,52,48,64,58,72,70,84,80,92,88,96];
+const spark=$("#overlay-spark");overlay.forEach(v=>{const i=document.createElement("i");i.style.height=(v/100*34)+"px";spark.appendChild(i);});
+const ATTENTION=[
+  {i:"⚠",t:"4 critical violations",d:"kra_reports · missing owner for 9 files",tag:"danger"},
+  {i:"👥",t:"16 assets unowned",d:"3 in Regulatory domain",tag:"warn"},
+  {i:"✓",t:"33 certifications expire ≤ 90 days",d:"oldest: metric_dpd_over_90",tag:"warn"},
+  {i:"❓",t:"6 extractions pending review",d:"document ingestion · confidence 0.5–0.8",tag:"derived"}
+];
+$("#attention-list").innerHTML=ATTENTION.map(a=>`<div class="feed-item"><span class="dot" style="background:var(--${a.tag==="danger"?"danger":a.tag==="warn"?"warning":"derived"})"></span><div class="t"><b>${a.t}</b><div class="m">${a.d}</div></div></div>`).join("");
+const ACTIVITY=[
+  {t:"updated <b>customers</b> description",m:"Priya Nair · v4.1 → 4.2",ago:"12m",dot:"var(--accent)"},
+  {t:"connector <b>core_banking</b> converged",m:"2 patched · 318 skipped · fingerprint ok",ago:"41m",dot:"var(--success)"},
+  {t:"inferred <b>risk_tier</b> from r11",m:"overlay · 1,842 facts",ago:"1h",dot:"var(--derived)"},
+  {t:"soft-deleted <b>old_reports</b> (restore possible)",m:"Arjun Mehta",ago:"3h",dot:"var(--danger)"},
+  {t:"certified <b>transactions</b> for BCBS239",m:"Finance Risk · issuer",ago:"1d",dot:"var(--success)"}
+];
+$("#activity-feed").innerHTML=ACTIVITY.map(a=>`<div class="feed-item"><span class="dot" style="background:${a.dot}"></span><div class="t">${a.t}<div class="m">${a.m}</div></div><span class="ago">${a.ago}</span></div>`).join("");
+const AGENTS=[
+  {w:"risk-bot",op:"queried upi_transactions · PII-filtered (8 rows hidden)",t:"12m ago"},
+  {w:"dataqa",op:"wrote a memory: ‘loans restructure decision’",t:"2h ago"},
+  {w:"compliance-agent",op:"read kra_reports under policy FIN-R2",t:"5h ago"}
+];
+$("#agent-strip").innerHTML=AGENTS.map(a=>`<div class="agent-row"><div class="ai">🤖</div><div class="a-main"><div class="a-who">${a.w} <span class="op">${a.op}</span></div><div class="a-time">${a.t}</div></div></div>`).join("");
+
+/* ─────────────── DISCOVER ─────────────── */
+const facetDefs=[
+  ["type",["Table","Dashboard","Pipeline","Metric","Memory","DatabaseService"]],
+  ["schema",["public","risk","—"]],
+  ["sens",["PII.Sensitive","PII.Personal","—"]],
+  ["life",["Active","Draft","Deprecated"]]
+];
+const facState={type:new Set(),schema:new Set(),sens:new Set(),life:new Set()};
+function renderFacets(){
+  const counts={type:{},schema:{},sens:{},life:{}};
+  ENTITIES.forEach(e=>{counts.type[e.k]=(counts.type[e.k]||0)+1;counts.schema[e.schema]=(counts.schema[e.schema]||0)+1;counts.sens[e.sens]=(counts.sens[e.sens]||0)+1;counts.life[e.life]=(counts.life[e.life]||0)+1;});
+  facetDefs.forEach(([key,opts])=>{
+    const wrap=$("#fac-"+key);wrap.innerHTML=opts.map(o=>{
+      const n=counts[key][o]||0;if(n===0)return"";
+      return `<label class="opt"><input type="checkbox" ${facState[key].has(o)?"checked":""} data-k="${key}" data-v="${o}"><span>${o}</span><span class="n">${n}</span></label>`;
+    }).join("");
+  });
+  document.querySelectorAll(".facet input").forEach(cb=>cb.onchange=()=>{
+    const {k,v}=cb.dataset;
+    cb.checked?facState[k].add(v):facState[k].delete(v);
+    renderResults();
+  });
+}
+function searchHit(e,q){
+  if(!q)return null;
+  const i=e.n.toLowerCase().indexOf(q)+e.fqn.toLowerCase().indexOf(q)+e.desc?.toLowerCase().indexOf(q);
+  return e.desc?`…${e.desc}`:null;
+}
+function renderResults(){
+  const q=$("#discover-input").value.trim().toLowerCase();
+  let list=ENTITIES;
+  Object.entries(facState).forEach(([k,set])=>{if(set.size){list=list.filter(e=>set.has(k==="sens"?e.sens:e[k]));}});
+  if(q)list=list.filter(e=>e.n.toLowerCase().includes(q)||e.fqn.toLowerCase().includes(q)||e.schema.toLowerCase().includes(q)||(e.desc||"").toLowerCase().includes(q));
+  $("#result-count").textContent=`${list.length} entities`;
+  if(!list.length){$("#result-list").innerHTML=`<div class="empty"><div class="big">🔍</div><h3>Nothing found</h3><p>No asset matches — search searches names, FQNs, columns and descriptions. Authorisation filtering also hides what you may not see.</p></div>`;return;}
+  $("#result-list").innerHTML=list.map(e=>{
+    const snip=q&&e.desc?e.desc.replace(new RegExp("("+q+")","ig"),"<mark>$1</mark>"):(e.desc||"");
+    return `<div class="result" data-fqn="${e.fqn}" onclick="openEntity('${e.fqn}')">
+      <div class="ric">${KINDS[e.k]||"◆"}</div>
+      <div class="r-main">
+        <div class="r-title">${e.n} ${e.derived?'<span class="badge b-derived" style="height:18px;font-size:10.5px">inferred</span>':""}</div>
+        <div class="r-fqn">${e.fqn}</div>
+        ${snip?`<div class="r-snip">${snip}</div>`:""}
+        <div class="r-meta">
+          <span class="tag">${e.k}</span>
+          <span class="tag">${e.sens}</span>
+          <span class="tag">${e.life}</span>
+          <span class="tag" style="background:var(--accent-subtle);color:var(--accent)">${e.dom}</span>
+        </div>
+      </div>
+      <div class="r-right">
+        ${confBadge(e.conf)}
+        <span class="muted" style="font-size:11px">v${e.k==="Table"?2+((e.n.length*7)%5):3}.${(e.n.length*3)%9}</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+$("#discover-input").oninput=renderResults;
+document.querySelectorAll(".seg").forEach(seg=>seg.querySelectorAll("button").forEach(b=>b.onclick=()=>{seg.querySelectorAll("button").forEach(x=>x.classList.remove("on"));b.classList.add("on");}));
+
+/* ─────────────── ENTITY PAGE ─────────────── */
+let CURRENT_ENTITY=null;
+function confBadge(c){return c>=.8?`<span class="badge b-conf-high">◐ ${c.toFixed(2)}</span>`:c>=.5?`<span class="badge b-conf-mid">◐ ${c.toFixed(2)}</span>`:`<span class="badge b-conf-low">◐ ${c.toFixed(2)}</span>`;}
+function openEntity(fqn){
+  const e=ENTITIES.find(x=>x.fqn===fqn)||ENTITIES.find(x=>x.n===fqn);if(!e)return;
+  CURRENT_ENTITY=e;go("entity");
+  $("#e-crumb").textContent=e.fqn.split(".").slice(0,-1).join(" → ");
+  $("#e-title").innerHTML=`${e.n} <span class="pill">${e.k}</span> <span class="pill" id="e-version">v${2+((e.n.length*7)%5)}.${(e.n.length*3)%9}</span>`;
+  $("#e-fqn").textContent=e.fqn;
+  const tb=$("#trust-bar");
+  tb.innerHTML=`
+    ${e.cert?`<span class="badge b-cert">✓ Certified · BCBS239 · expires Mar 2027</span><span class="sep"></span>`:""}
+    ${confBadge(e.conf)}
+    <span class="sep"></span>
+    <span class="badge b-neutral">◈ ${e.dom}</span>
+    <span class="badge b-neutral">@ ${e.own.join(", ")||"unowned"}</span>
+    <span class="sep"></span>
+    <span class="tag ${e.sens==="PII.Sensitive"?"danger":e.sens==="PII.Personal"?"warn":""}">${e.sens}</span>
+    <span class="tag">${e.life}</span>
+    ${e.derived?'<span class="badge b-derived">inferred · overlay</span>':""}
+    <span class="sep"></span>
+    <span class="muted" style="font-size:12px">updated <b>${e.life==="Draft"?"3h":"today"}</b> by <b>${e.own[0]||"system"}</b></span>`;
+  const props=$("#e-props");props.innerHTML=[
+    ["Description",e.desc||"—"],["Domain",e.dom],["Owners",e.own.join(", ")||"<span class='subtle'>inherited: none</span>"],
+    ["Certification",e.cert?"Finance Risk · BCBS239":"—"],["Lifecycle",e.life],["Last verified","16 Aug 2026 · 08:12"],
+    ["Rows","1.2M"],["Source system","core_banking (postgres)"]].map(([k,v])=>`<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  renderColumns(e);
+  renderRelations(e);
+  renderContextRail(e);
+  renderHistory();
+  renderEntityMemory(e);
+  renderLineage();
+}
+document.querySelectorAll(".tab[data-etab]").forEach(t=>t.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));t.classList.add("active");
+  document.querySelectorAll(".etab-pane").forEach(p=>p.style.display="none");
+  $("#etab-"+t.dataset.etab).style.display="block";
+});
+function renderColumns(e){
+  const cols=[
+    ["customer_id","INTEGER","NOT NULL","pk","PII.Personal"],
+    ["first_name","VARCHAR(80)","NULL","search: A","PII.Personal"],
+    ["last_name","VARCHAR(80)","NULL","search: A","PII.Personal"],
+    ["full_name","VARCHAR(161)","GENERATED","inferred r03","PII.Personal"],
+    ["pan","VARCHAR(10)","NULL","masked","PII.Sensitive"],
+    ["aadhaar_last4","VARCHAR(4)","NULL","masked","PII.Sensitive"],
+    ["risk_tier","VARCHAR(12)","NULL","inferred r11","—"]
+  ];
+  $("#e-columns").innerHTML=`<thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Notes</th><th>Sensitivity</th><th>Epistemic</th></tr></thead><tbody>`+
+  cols.map(c=>`<tr><td class="rowlink mono">${c[0]}</td><td class="num">${c[1]}</td><td>${c[2]}</td><td class="muted">${c[3]}</td><td><span class="tag ${c[4]==="PII.Sensitive"?"danger":c[4]==="PII.Personal"?"warn":""}">${c[4]}</span></td><td>${c[3].includes("inferred")?'<span class="badge b-derived">inferred</span>':'<span class="badge b-asserted">stated</span>'}</td></tr>`).join("")+`</tbody>`;
+}
+function renderRelations(e){
+  const rels=[
+    [KINDS.Schema,"risk / public","contains","belongsTo",".98","asserted"],
+    [KINDS.Pipeline,"pipe_risk_scoring","consumes","consumedBy",".95","asserted"],
+    [KINDS.Dashboard,"dash_regulatory","feeds","fedBy",".96","asserted"],
+    [KINDS.Metric,"metric_dpd_over_90","feeds","fedBy",".90","inferred"],
+    [KINDS.Memory,"lending policy 2026","documents","documentedBy",".99","asserted"]
+  ];
+  $("#e-relations").innerHTML=`<thead><tr><th>Node</th><th>Relationship</th><th>Inverse</th><th>Confidence</th><th>Epistemic</th></tr></thead><tbody>`+
+  rels.map(r=>`<tr><td><span class="mono">${r[1]}</span></td><td><code>${r[2]}</code></td><td class="muted">${r[3]}</td><td class="num">${r[4]}</td><td>${r[5]==="inferred"?'<span class="badge b-derived">inferred</span>':'<span class="badge b-asserted">stated</span>'}</td></tr>`).join("")+`</tbody>`;
+}
+function renderContextRail(e){
+  const nei=[
+    ["▤","public",".99","sch"],["⇶","pipe_risk_scoring",".95","pipeline"],["▧","dash_regulatory",".96","dash"],["ƒ","metric_dpd_over_90",".90","metric"],["🧠","lending policy 2026",".99","mem"]
+  ];
+  $("#ctx-neigh").innerHTML=nei.map(n=>`<div class="ctx-n" onclick="openEntity('${n[1]}')"><span class="ic">${n[0]}</span><div><div class="nm">${n[1]}</div></div><span class="rt">${n[2]}</span></div>`).join("");
+}
+function renderHistory(){
+  const items=[
+    {v:"4.2",who:"Priya Nair · 4 Aug 2026",diff:[["upd","description","“Customer master for retail…”"]],major:false},
+    {v:"4.1",who:"Priya Nair · 12 Jul 2026",diff:[["upd","owners","+ Finance Risk (team)"]],major:false},
+    {v:"4.0",who:"Arjun Mehta · 2 Jun 2026",diff:[["add","column","aadhaar_last4 (masked)"],["del","column","old_cust_ref"]],major:true},
+    {v:"3.2",who:"system · 18 May 2026",diff:[["add","tag","PII.Sensitive (scanner suggested → confirmed)"]],major:false},
+    {v:"0.1",who:"connector · 14 Jan 2026",diff:[["add","entity","created by core_banking connector"]],major:true}
+  ];
+  $("#e-history").innerHTML=items.map(it=>`<div class="hist-item"><div class="v">v${it.v}</div><div class="line"></div><div><div><b>${it.major?"Major":"Minor"}</b> · ${it.major?"breaking change":"backward-compatible"}</div><div class="dl">${it.diff.map(d=>`<span class="diff ${d[0]}">${d[0]==="add"?"+":d[0]==="del"?"−":"~"} ${d[1]}: ${d[2]}</span>`).join("")}</div><div class="who">${it.who}</div></div></div>`).join("");
+}
+function renderEntityMemory(e){
+  const mem=[
+    {t:"Decision · loan restructure (Mar 2026)",b:"We approved restructuring for NPAs under ₹10L without a new CIBIL pull — risk-bot flags any new account with DPD>30. Do not change without looping Finance Risk.",c:.99,src:"Priya Nair · human",a:"2h ago"},
+    {t:"Why customers is the golden source",b:"core_banking is the system of record for identity. dashboards may read it but must never write back; kyc_documents is authoritative only for document status.",c:.95,src:"Priya Nair · human",a:"12 Aug 2026"}
+  ];
+  $("#e-memory").innerHTML=mem.map(m=>`<div class="mem-card card">
+    <div class="m-head"><b class="m-title">${m.t}</b>${confBadge(m.c)}</div>
+    <div class="m-body">${m.b}</div>
+    <div class="m-links"><span class="badge b-asserted">provenance: ${m.src}</span><span class="badge b-neutral">${m.a}</span></div>
+  </div>`).join("");
+}
+function goEntityGraph(){go("explore");focusEntity(CURRENT_ENTITY?.fqn||"data_warehouse.warehouse.public.customers");}
+
+/* ─────────────── GRAPH EXPLORER ─────────────── */
+let gScale=1,gTx=0,gTy=0,selected=null,svgEl=null;
+const FILTERS={derived:true,asserted:true,lowconf:true};
+function nodeIsDerived(id){return NODES[id].derived;}
+function edgeConfClass(c){return c>=.8?"high":c>=.5?"mid":"low";}
+function renderGraph(container){
+  const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox","0 0 1000 640");
+  svg.style.width="100%";svg.style.height="100%";
+  svg.id=container===exploreCv?"explore-svg":"lg-svg";
+  container.appendChild(svg);
+  const defs=document.createElementNS("http://www.w3.org/2000/svg","defs");
+  defs.innerHTML=`
+    <marker id="ah" viewBox="0 0 8 8" refX="9" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L8,4 L0,8 z" fill="context-stroke" stroke="none"/>
+    </marker>`;
+  svg.appendChild(defs);
+  draw(svg);
+  return svg;
+}
+function draw(svg){
+  svg.replaceChildren();
+  const defs=document.createElementNS("http://www.w3.org/2000/svg","defs");
+  defs.innerHTML=`<marker id="ah" viewBox="0 0 8 8" refX="9" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke" stroke="none"/></marker>`;
+  svg.appendChild(defs);
+  const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+  g.setAttribute("transform",`translate(${gTx},${gTy}) scale(${gScale})`);
+  EDGES.forEach(e=>{
+    const a=NODES[e.f],b=NODES[e.t];
+    const derived=e.derived;
+    if(derived&&!FILTERS.derived)return;
+    if(!derived&&!FILTERS.asserted)return;
+    if(edgeConfClass(e.c)==="mid"&&!FILTERS.lowconf)return;
+    const line=document.createElementNS("http://www.w3.org/2000/svg","path");
+    const x1=a.x,y1=a.y,x2=b.x,y2=b.y;
+    const mx=(x1+x2)/2,my=(y1+y2)/2-10;
+    const col=derived?"var(--graph-edge-derived)":edgeConfClass(e.c)==="mid"?"var(--graph-edge-mid)":"var(--graph-edge)";
+    line.setAttribute("d",`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`);
+    line.setAttribute("fill","none");
+    line.setAttribute("stroke",col);
+    line.setAttribute("stroke-width",derived?1.4:1.1);
+    if(derived)line.setAttribute("stroke-dasharray","4 3");
+    line.setAttribute("marker-end","url(#ah)");
+    line.setAttribute("data-from",e.f);line.setAttribute("data-to",e.t);
+    line.style.opacity=.55;
+    line.addEventListener("mouseenter",ev=>{
+      const tip=$("#node-tooltip");tip.style.display="block";
+      const rect=svg.getBoundingClientRect();
+      tip.innerHTML=`<div><span class="t-kind">${e.type}</span> · ${e.derived?"<span class='badge b-derived' style='height:17px;font-size:10px'>inferred</span>":""}</div><div class="t-fqn">${e.src} · confidence ${e.c.toFixed(2)}</div>`;
+      tip.style.left=(ev.clientX-rect.left)+"px";tip.style.top=(ev.clientY-rect.top)+"px";
+      line.style.opacity=1;
+    });
+    line.addEventListener("mouseleave",()=>{$("#node-tooltip").style.display="none";line.style.opacity=.55;});
+    g.appendChild(line);
+  });
+  Object.entries(NODES).forEach(([id,nd])=>{
+    const derived=nd.derived;
+    if(derived&&!FILTERS.derived)return;
+    if(!derived&&!FILTERS.asserted)return;
+    if(edgeConfClass(nd.c)==="mid"&&!FILTERS.lowconf)return;
+    const grp=document.createElementNS("http://www.w3.org/2000/svg","g");
+    grp.setAttribute("transform",`translate(${nd.x},${nd.y})`);
+    grp.style.cursor="grab";
+    const r=derived?15:12;
+    const node=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    node.setAttribute("r",r);
+    node.setAttribute("fill",derived?"var(--derived)":"var(--graph-node)");
+    node.setAttribute("stroke",derived?"var(--derived)":selected===id?"var(--graph-node-selected)":"var(--graph-node-border)");
+    node.setAttribute("stroke-width",selected===id?2.5:1.3);
+    grp.appendChild(node);
+    const txt=document.createElementNS("http://www.w3.org/2000/svg","text");
+    txt.setAttribute("x",r+6);txt.setAttribute("y",4);
+    txt.setAttribute("fill","var(--graph-label)");txt.setAttribute("font-size",11.5);
+    txt.setAttribute("font-family","var(--mono)");
+    txt.textContent=nd.n;
+    grp.appendChild(txt);
+    const labelBg=document.createElementNS("http://www.w3.org/2000/svg","rect");
+    grp.appendChild(labelBg);
+    grp.addEventListener("mouseenter",ev=>{
+      const tip=$("#node-tooltip");tip.style.display="block";
+      const rect=svg.getBoundingClientRect();
+      tip.innerHTML=`<div><span class="t-kind">${KINDS[nd.k]||""} ${nd.k}</span> ${nd.derived?'· <span class="badge b-derived" style="height:17px;font-size:10px">inferred</span>':""}</div><div class="t-fqn">${nd.fqn}</div><div class="t-fqn">confidence ${nd.c.toFixed(2)}</div>`;
+      tip.style.left=(ev.clientX-rect.left)+"px";tip.style.top=(ev.clientY-rect.top)+"px";
+      node.setAttribute("stroke-width",2);
+    });
+    grp.addEventListener("mouseleave",()=>{$("#node-tooltip").style.display="none";node.setAttribute("stroke-width",selected===id?2.5:1.3);});
+    grp.addEventListener("click",()=>{selectNode(id);});
+    grp.addEventListener("pointerdown",e=>{if(e.button!==0)return;const nx=nd.x,ny=nd.y;const move=ev=>{nd.x=nx+(ev.clientX-e.clientX)/gScale;nd.y=ny+(ev.clientY-e.clientY)/gScale;draw(svg);};const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);};window.addEventListener("pointermove",move);window.addEventListener("pointerup",up);});
+    g.appendChild(grp);
+  });
+  svg.appendChild(g);
+  renderMinimap();
+}
+function renderMinimap(){
+  const mm=$("#minimap");mm.innerHTML="";
+  const v=document.createElementNS("http://www.w3.org/2000/svg","svg");v.setAttribute("viewBox","0 0 1000 640");v.style.width="100%";v.style.height="100%";
+  Object.entries(NODES).forEach(([id,nd])=>{const c=document.createElementNS("http://www.w3.org/2000/svg","circle");c.setAttribute("cx",nd.x);c.setAttribute("cy",nd.y);c.setAttribute("r",nd.derived?3.4:2.6);c.setAttribute("fill",nd.derived?"var(--derived)":"var(--accent)");v.appendChild(c);});
+  mm.appendChild(v);
+}
+function selectNode(id){
+  selected=id;draw(svgEl);
+  const nd=NODES[id];
+  const ins=$("#inspector");
+  const rels=EDGES.filter(e=>e.f===id||e.t===id).slice(0,8);
+  ins.innerHTML=`
+    <div class="i-h">
+      <div style="font-size:20px">${KINDS[nd.k]||"◆"}</div>
+      <div><h3>${nd.n}</h3><div class="fqn">${nd.fqn}</div></div>
+      <button class="i-close" onclick="$('#inspector').classList.remove('show')">✕</button>
+    </div>
+    <div class="i-b">
+      <div class="i-sec">Identity</div>
+      <div class="i-row"><span class="k">Kind</span><span>${nd.k}</span></div>
+      <div class="i-row"><span class="k">Confidence</span><span>${confBadge(nd.c)}</span></div>
+      <div class="i-row"><span class="k">Epistemic</span><span>${nd.derived?'<span class="badge b-derived">inferred · overlay</span>':'<span class="badge b-asserted">asserted</span>'}</span></div>
+      ${nd.sens?`<div class="i-row"><span class="k">Sensitivity</span><span class="tag danger">${nd.sens}</span></div>`:""}
+      ${nd.rule?`<div class="i-row"><span class="k">Derived by</span><span class="mono" style="color:var(--derived)">${nd.rule}</span></div>`:""}
+      <div class="i-sec">Neighbourhood · ${rels.length} edges</div>
+      ${rels.map(e=>{
+        const other=e.f===id?NODES[e.t]:NODES[e.f];
+        return `<div class="i-row"><span class="k">${e.type} ${e.f===id?"→":"←"}</span><span class="mono">${other.n} · ${e.c.toFixed(2)}</span></div>`;
+      }).join("")}
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn small" style="flex:1;justify-content:center" onclick="openEntity('${nd.fqn}')">Open asset</button>
+        <button class="btn small" style="flex:1;justify-content:center" onclick="$('#inspector').classList.remove('show')">Close</button>
+      </div>
+    </div>`;
+  ins.classList.add("show");
+}
+function toggleFilter(btn,key){FILTERS[key]=!FILTERS[key];btn.classList.toggle("on");draw(svgEl);}
+function expandAll(){
+  const ids=Object.keys(NODES);
+  ids.forEach(id=>{const nd=NODES[id];nd.x=nd.x+(Math.sin(id.length*13)*18);nd.y=nd.y+(Math.cos(id.length*7)*18);});
+  draw(svgEl);
+}
+function resetView(){gScale=1;gTx=0;gTy=0;draw(svgEl);}
+function zoom(d){if(d===0){gScale=1;gTx=0;gTy=0;}else if(d>0){gScale=Math.min(gScale+d,2.5);gTx=gTx-500*d;gTy=gTy-320*d;}else{gScale=Math.max(gScale+d,.35);gTx=gTx-500*d;gTy=gTy-320*d;}draw(svgEl);}
+function focusEntity(fqn){
+  const nd=Object.entries(NODES).find(([i,n])=>n.fqn===fqn||n.n===fqn);if(!nd)return;
+  selectNode(nd[0]);
+}
+let exploreCv=null,lgCv=null;
+exploreCv=$("#explore-canvas");
+svgEl=renderGraph(exploreCv);
+svgEl.addEventListener("wheel",e=>{e.preventDefault();zoom(e.deltaY<0?.2:-.2);},{passive:false});
+
+/* ─────────────── LINEAGE ─────────────── */
+function renderLineage(){
+  if(lgCv&&$("#lg-svg")){$("#lg-svg").remove();}
+  lgCv=$("#lineage-canvas");
+  const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.id="lg-svg";svg.setAttribute("viewBox","0 0 1000 460");svg.style.width="100%";svg.style.height="100%";
+  lgCv.appendChild(svg);
+  const defs=document.createElementNS("http://www.w3.org/2000/svg","defs");
+  defs.innerHTML=`<marker id="ah2" viewBox="0 0 8 8" refX="9" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke" stroke="none"/></marker>`;
+  svg.appendChild(defs);
+  const lay=[
+    {n:"customers",x:150,y:80,derived:false},{n:"upi_transactions",x:430,y:80,derived:false},{n:"loans",x:700,y:80,derived:false},{n:"emi_schedule",x:880,y:80,derived:false},
+    {n:"pipe_risk_scoring",x:300,y:200,derived:false},
+    {n:"risk_tier",x:150,y:330,derived:true},{n:"metric_dpd_over_90",x:620,y:330,derived:true},{n:"metric_active_loans",x:880,y:330,derived:true},
+    {n:"kra_reports",x:430,y:330,derived:true},{n:"dash_regulatory",x:300,y:420,derived:false},{n:"dash_risk_daily",x:700,y:420,derived:false}
+  ];
+  const E=[
+    ["customers","pipe_risk_scoring",false,.95],["upi_transactions","pipe_risk_scoring",false,.82],["loans","pipe_risk_scoring",false,.95],
+    ["pipe_risk_scoring","risk_tier",true,.82],["customers","risk_tier",true,.95],["customers","kra_reports",true,.91],
+    ["loans","emi_schedule",false,.95],["loans","metric_active_loans",true,.94],["emi_schedule","metric_dpd_over_90",true,.9],
+    ["loans","metric_dpd_over_90",true,.9],["kra_reports","dash_regulatory",false,.96],["risk_tier","dash_risk_daily",false,.93],["metric_dpd_over_90","dash_risk_daily",false,.9]
+  ];
+  const pos={};lay.forEach(l=>pos[l.n]=l);
+  E.forEach(([a,b,der,c])=>{
+    const p1=pos[a],p2=pos[b];
+    const line=document.createElementNS("http://www.w3.org/2000/svg","line");
+    line.setAttribute("x1",p1.x);line.setAttribute("y1",p1.y+22);line.setAttribute("x2",p2.x);line.setAttribute("y2",p2.y-22);
+    const col=der?"var(--graph-edge-derived)":edgeConfClass(c)==="mid"?"var(--graph-edge-mid)":"var(--graph-edge)";
+    line.setAttribute("stroke",col);line.setAttribute("stroke-width",der?1.6:1.2);
+    if(der)line.setAttribute("stroke-dasharray","5 4");
+    line.setAttribute("marker-end","url(#ah2)");
+    svg.appendChild(line);
+  });
+  lay.forEach(l=>{
+    const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.setAttribute("transform",`translate(${l.x},${l.y})`);
+    const r=l.derived?15:12;
+    const node=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    node.setAttribute("r",r);
+    node.setAttribute("fill",l.derived?"var(--derived)":"var(--graph-node)");
+    node.setAttribute("stroke",l.derived?"var(--derived)":"var(--graph-node-border)");
+    g.appendChild(node);
+    const txt=document.createElementNS("http://www.w3.org/2000/svg","text");
+    txt.setAttribute("x",r+6);txt.setAttribute("y",4);
+    txt.setAttribute("fill","var(--graph-label)");txt.setAttribute("font-size",11.5);txt.setAttribute("font-family","var(--mono)");
+    txt.textContent=l.n;
+    g.appendChild(txt);
+    svg.appendChild(g);
+  });
+  $("#impact-list").innerHTML=[
+    {t:"Blast radius of a broken customers load",d:"2 downstream dashboards · 1 regulatory report · 3 metrics go stale",n:"HIGH"},
+    {t:"kra_reports outage",d:"dash_regulatory only — no further spread",n:"LOW"}
+  ].map(x=>`<div class="feed-item"><span class="dot" style="background:${x.n==="HIGH"?"var(--danger)":"var(--success)"}"></span><div class="t"><b>${x.t}</b><div class="m">${x.d}</div></div><span class="ago">${x.n}</span></div>`).join("");
+}
+function lgMode(m){
+  document.querySelectorAll("#screen-lineage .seg button").forEach(b=>b.classList.remove("on"));
+  const map={up:0,down:1,impact:2};const idx=map[m];
+  document.querySelectorAll("#screen-lineage .seg button")[idx].classList.add("on");
+  const hint=$("#screen-lineage .screen-head .crumb");
+  hint.textContent=m==="up"?"lineage · upstream sources":m==="down"?"lineage · downstream consumers":"lineage · impact analysis";
+}
+
+/* ─────────────── WORKBENCH ─────────────── */
+const WB_DEFAULTS={
+  sparql:`PREFIX dsc: <https://graph-owl.dev/ns/catalog#>
+
+# Every transaction above ₹5L, joined to the customer,
+# with the confidence of each edge the path crosses.
+SELECT ?customer ?txn ?amount (MIN(?conf) AS ?min_confidence)
+WHERE {
+  ?txn  a            dsc:Table ;
+        dsc:name     "transactions" ;
+        dsc:amount   ?amount .
+  ?txn  dsc:feeds    ?upi .
+  ?upi  dsc:belongsTo  dsc:upi_transactions .
+  ?cust dsc:parentOf ?txn .
+  FILTER(?amount > 500000)
+  BIND(0.82 AS ?conf)
+}
+ORDER BY DESC(?amount)
+LIMIT 25`,
+  cypher:`MATCH (c:Table {name:"customers"})-[:FEEDS|DERIVED_FROM*1..2]->(x)
+WHERE x.name IN ["risk_tier","kra_reports"]
+RETURN c.name AS source, x.name AS target,
+       reduce(s = 1.0, r IN relationships(p) | s * r.confidence) AS path_confidence
+ORDER BY path_confidence DESC`
+};
+let wbCurrentLang="sparql";
+$("#wb-code").value=WB_DEFAULTS.sparql;
+highlightWB();
+$("#wb-code").oninput=highlightWB;
+$("#wb-code").onscroll=e=>{$("#wb-pre").scrollTop=e.target.scrollTop;$("#wb-pre").scrollLeft=e.target.scrollLeft;};
+function highlightWB(){
+  const code=$("#wb-code").value;
+  let html=code.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const kw=wbCurrentLang==="sparql"
+    ?["PREFIX","SELECT","WHERE","FILTER","OPTIONAL","UNION","BIND","LIMIT","ORDER","BY","DESC","ASC","DISTINCT","AS","a"]
+    :["MATCH","WHERE","RETURN","ORDER","BY","LIMIT","DESC","ASC","AS","DISTINCT","CREATE","MERGE"];
+  kw.forEach(k=>html=html.replace(new RegExp("\\b("+k+")\\b","g"),'<span class="kw">$1</span>'));
+  html=html.replace(/(\?|&lt;)[A-Za-z_][A-Za-z0-9_]*/g,'<span class="var">$&</span>');
+  html=html.replace(/([A-Za-z0-9_]+:)/g,'<span class="pref">$1</span>');
+  html=html.replace(/&lt;[^&]*&gt;/g,'<span class="iri">$&</span>');
+  html=html.replace(/"[^"]*"/g,'<span class="str">$&</span>');
+  html=html.replace(/([A-Z][A-Z0-9_]{2,})/g,'<span class="fn">$1</span>');
+  $("#wb-pre").innerHTML=html+"\n";
+}
+function wbLang(l){
+  wbCurrentLang=l;highlightWB();
+  $("#wb-lang-sparql").classList.toggle("on",l==="sparql");
+  $("#wb-lang-cypher").classList.toggle("on",l==="cypher");
+  $("#wb-code").value=WB_DEFAULTS[l];highlightWB();
+}
+const WB_RESULTS={
+  sparql:[["customer","txn","amount","min_confidence"],["CUST-0442","TXN-88412","₹ 6,20,000","0.82"],["CUST-1190","TXN-77341","₹ 5,95,500","0.82"],["CUST-0338","TXN-66510","₹ 5,44,000","0.82"],["CUST-2210","TXN-55122","₹ 5,02,750","0.82"]],
+  cypher:[["source","target","path_confidence"],["customers","risk_tier","0.779"],["customers","kra_reports","0.910"],["customers","full_name","0.990"]]
+};
+let wbResultModeState="table";
+function wbRun(){
+  const rows=WB_RESULTS[wbCurrentLang];
+  $("#wb-timing").textContent=wbCurrentLang==="sparql"?"4 rows · 212ms · BGP + FILTER pushdown · authz compiled":"3 rows · 48ms · path 1..2";
+  $("#wb-result-table").innerHTML=`<div class="table-wrap"><table class="data"><thead><tr>${rows[0].map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.slice(1).map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  renderWbGraph();
+}
+function renderWbGraph(){
+  const g=$("#wb-result-graph");g.style.display="none";
+  const rows=WB_RESULTS[wbCurrentLang].slice(1);
+  const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox","0 0 600 300");svg.style.width="100%";svg.style.height="100%";
+  const pts=rows.map((r,i)=>({n:r[0],x:80+i*140,y:150}));
+  pts.push({n:"transactions",x:320,y:70});
+  const edges=[["transactions",rows[0][0]],["transactions",rows[1][0]],["transactions",rows[2][0]]];
+  edges.forEach(([a,b],i)=>{
+    const p1=pts.find(p=>p.n===a),p2=pts.find(p=>p.n===b);
+    if(!p1||!p2)return;
+    const l=document.createElementNS("http://www.w3.org/2000/svg","line");
+    l.setAttribute("x1",p1.x);l.setAttribute("y1",p1.y);l.setAttribute("x2",p2.x);l.setAttribute("y2",p2.y);
+    l.setAttribute("stroke",i%2?"var(--graph-edge-derived)":"var(--graph-edge)");
+    if(i%2)l.setAttribute("stroke-dasharray","4 3");
+    l.setAttribute("stroke-width",1.3);svg.appendChild(l);
+  });
+  pts.forEach(p=>{
+    const g2=document.createElementNS("http://www.w3.org/2000/svg","g");g2.setAttribute("transform",`translate(${p.x},${p.y})`);
+    const c=document.createElementNS("http://www.w3.org/2000/svg","circle");c.setAttribute("r",10);
+    c.setAttribute("fill",p.n==="transactions"?"var(--accent)":"var(--graph-node)");c.setAttribute("stroke","var(--graph-node-border)");
+    g2.appendChild(c);
+    const t=document.createElementNS("http://www.w3.org/2000/svg","text");t.setAttribute("y",-14);t.setAttribute("text-anchor","middle");
+    t.setAttribute("fill","var(--graph-label)");t.setAttribute("font-size",10.5);t.setAttribute("font-family","var(--mono)");t.textContent=p.n;
+    g2.appendChild(t);svg.appendChild(g2);
+  });
+  g.appendChild(svg);g.style.display="block";
+}
+function wbResultMode(m){wbResultModeState=m;$("#wb-result-table").style.display=m==="table"?"block":"none";$("#wb-result-graph").style.display=m==="graph"?"block":"none";}
+function wbExplain(){
+  const ex=$("#wb-explain");
+  ex.innerHTML=`<div style="border-left:3px solid var(--derived);padding:4px 0 4px 14px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:14px">Why does risk_tier = 'High' for CUST-1190?</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.6">
+      Derived by rule <code style="color:var(--derived)">r11 · band thresholds</code> from two asserted facts:
+    </div>
+  </div>
+  <div class="wb-query"><pre>1  CUST-1190 <dsc:risk_score>  81.4          (asserted · core_banking · conf 0.99)
+2  CUST-1190 <dsc:txn_velocity>  42/mo        (asserted · upi feed · conf 0.82)
+   ───────────────────────────────────────────────
+   rule r11: score > 75 AND velocity > 30  ⇒  tier = "High"</pre></div>
+  <div style="font-size:12.5px;color:var(--text-subtle)">Inference lives in the overlay only — it never persists into the base graph. Retract the source facts and the tier follows.</div>`;
+}
+const SAVED=[
+  ["Customer exposure > ₹5L","sparql"],["NPA watch-list (DPD > 90)","sparql"],["Risk tier derivation chain","cypher"],["Uncertified PII assets","sparql"]
+];
+$("#wb-saved").innerHTML=SAVED.map(s=>`<div class="feed-item" style="cursor:pointer" onclick="loadSaved('${s[0]}')"><span class="dot" style="background:var(--accent)"></span><div class="t"><b>${s[0]}</b><div class="m">${s[1]==="sparql"?"SPARQL":"openCypher"}</div></div></div>`).join("");
+function loadSaved(n){
+  $("#wb-code").value=`# ${n}\n`+WB_DEFAULTS[wbCurrentLang];highlightWB();
+}
+
+/* ─────────────── GOVERNANCE ─────────────── */
+const VIOLATIONS=[
+  {sev:"crit",title:"Required property missing",desc:"shape:PropertyShape · kra_reports must have an owner",target:"kra_reports",rule:"sh:property · dsc:owner · minCount 1",who:"Finance Risk",age:"2h"},
+  {sev:"crit",title:"Sensitive column unmasked",desc:"kyc_documents.aadhaar_number must be masked in dashboards",target:"kyc_documents",rule:"policy PII-MASK",who:"Security",age:"1d"},
+  {sev:"warn",title:"Certification expiring",desc:"metric_dpd_over_90 certified 14 May 2025 — expires 13 Nov 2026",target:"metric_dpd_over_90",rule:"shape:expiry ≤ 90d",who:"Finance Risk",age:"3d"},
+  {sev:"warn",title:"Confidence below threshold",desc:"upi_transactions edges at 0.82 — below the 0.85 board threshold",target:"upi_transactions",rule:"confidence band",who:"Data Platform",age:"5d"},
+  {sev:"info",title:"Orphan column lineage",desc:"full_name has no upstream mapping in 12 tables",target:"customers",rule:"lineage completeness",who:"Data Platform",age:"1w"}
+];
+$("#violations-list").innerHTML=VIOLATIONS.map(v=>`<div class="violation">
+  <div class="sev ${v.sev}"></div>
+  <div class="v-body">
+    <div class="v-title">${v.title}</div>
+    <div class="v-desc">${v.desc}</div>
+    <div class="v-meta">
+      <span class="tag">${v.target}</span><span class="tag derived">${v.rule}</span>
+      <select style="height:26px;font-size:12px;border-radius:6px;border:1px solid var(--border-strong);background:var(--surface-raised);color:var(--text);padding:0 6px">
+        <option>Assign…</option><option>Priya Nair</option><option>Arjun Mehta</option><option>Ravi Iyer</option><option>Finance Risk</option>
+      </select>
+      <button class="btn small ghost">Defer</button>
+      <span class="muted" style="margin-left:auto;font-size:11px">${v.who} · ${v.age}</span>
+    </div>
+  </div>
+</div>`).join("");
+const QUEUES={
+  extraction:{n:"Extraction review",items:[
+    {t:"Extracted triple · customers governedBy Retail Banking",d:"from doc “Onboarding SOP.pdf” · conf 0.62",btn:"Approve"},
+    {t:"Suggested description · transactions",d:"LLM extraction · conf 0.55",btn:"Approve"}
+  ]},
+  resolution:{n:"Entity resolution",items:[
+    {t:"Merge proposed · CUST-0442 ↔ CUST-0442b",d:"same pan, same phone · matcher score 0.91",btn:"Review merge"}
+  ]},
+  proposals:{n:"Proposals",items:[
+    {t:"Change description of loans",d:"proposed by Arjun Mehta · reviewer: Priya",btn:"Review"}
+  ]},
+  incidents:{n:"Incidents",items:[
+    {t:"Data quality · 212 rows NULL risk_score",d:"freshness validity · raised by dataqa",btn:"Triage"}
+  ]}
+};
+const qkeys=Object.keys(QUEUES);
+$("#queue-tabs").innerHTML=qkeys.map((k,i)=>`<div class="queue-tab ${i===0?"active":""}" onclick="setQueue('${k}',this)">${QUEUES[k].n}<span class="n">${QUEUES[k].items.length}</span></div>`).join("");
+let currentQ=qkeys[0];
+function setQueue(k,el){currentQ=k;document.querySelectorAll(".queue-tab").forEach(t=>t.classList.remove("active"));el.classList.add("active");renderQueue();}
+function renderQueue(){
+  $("#queue-body").innerHTML=QUEUES[currentQ].items.map(it=>`<div class="feed-item"><span class="dot" style="background:var(--accent)"></span><div class="t"><b>${it.t}</b><div class="m">${it.d}</div></div><button class="btn small" style="margin-left:auto;flex:none">${it.btn}</button></div>`).join("")||`<div class="empty"><div class="big">✓</div><h3>Queue clear</h3></div>`;
+}
+renderQueue();
+
+/* ─────────────── MEMORY ─────────────── */
+const MEMORIES=[
+  {t:"Lending policy · loan restructure",c:.99,src:"Priya Nair · human",a:"2h ago",b:"We approved restructuring for NPAs under ₹10L without a fresh CIBIL pull. risk-bot flags any new account with DPD > 30. Do not change without looping Finance Risk.",links:[["loans","tbl-loans"],["Finance Risk","dom-retail"]]},
+  {t:"Why upi_transactions is marked uncertain",c:.7,src:"risk-bot · automated",a:"yesterday",b:"The upi feed bypasses the nightly reconcile — edge confidence 0.82 until lineage from the settlement file lands. Flagged, not asserted.",links:[["upi_transactions","tbl-upi"]]},
+  {t:"Decision · kra_reports ownership",c:.99,src:"Finance Risk · human",a:"12 Aug 2026",b:"Compliance owns kra_reports. Data Platform can propose, Compliance approves. This overrides the earlier Data Platform ownership.",links:[["kra_reports","tbl-kra"]]}
+];
+$("#memory-list").innerHTML=MEMORIES.map(m=>`<div class="mem-card card">
+  <div class="m-head"><b class="m-title">${m.t}</b>${confBadge(m.c)}</div>
+  <div class="m-body">${m.b}</div>
+  <div class="m-links"><span class="badge b-asserted">provenance · ${m.src}</span><span class="badge b-neutral">${m.a}</span><button class="btn small ghost" style="margin-left:auto">Retract</button></div>
+</div>`).join("");
+$("#agent-activity").innerHTML=[
+  {w:"risk-bot",op:"read loans · restricted to active records (authz compiled)",t:"14:02 · 3m ago"},
+  {w:"dataqa",op:"wrote memory · upi_transactions uncertainty",t:"11:47 · yesterday"},
+  {w:"compliance-agent",op:"queried kra_reports under policy FIN-R2 · 8 rows filtered",t:"09:12 · yesterday"},
+  {w:"risk-bot",op:"suggested description for transactions (awaiting review)",t:"08:31 · yesterday"},
+  {w:"dataqa",op:"retracted memory · ‘old_reports is deprecated’",t:"2d ago"}
+].map(a=>`<div class="agent-row"><div class="ai">🤖</div><div class="a-main"><div class="a-who">${a.w} <span class="op">${a.op}</span></div><div class="a-time">${a.t}</div></div></div>`).join("");
+
+/* ─────────────── CMD PALETTE ─────────────── */
+const CMDS=[
+  {cat:"Navigate"}, 
+  {t:"Overview",i:"◉",go:"overview"},{t:"Discover",i:"⌕",go:"discover"},{t:"Graph explorer",i:"⬡",go:"explore"},{t:"Lineage",i:"⇄",go:"lineage"},{t:"Workbench",i:"⌸",go:"workbench"},{t:"Governance",i:"⚑",go:"governance"},{t:"Memory",i:"🧠",go:"memory"},
+  {cat:"Jump to asset"},
+  {t:"customers",i:"▤",open:"data_warehouse.warehouse.public.customers"},{t:"upi_transactions",i:"▤",open:"data_warehouse.warehouse.risk.upi_transactions"},{t:"kra_reports",i:"▤",open:"data_warehouse.warehouse.risk.kra_reports"},{t:"metric_dpd_over_90",i:"ƒ",open:"metrics.retail.metric_dpd_over_90"},
+  {cat:"Query"},
+  {t:"Run exposure query",i:"⌸",run:true},{t:"Explain derivation r11",i:"🧬",exp:true}
+];
+let cmdIdx=0;
+function openCmd(){
+  $("#cmd-box").classList.add("show");$("#cmd-backdrop").classList.add("show");
+  $("#cmd-input").value="";renderCmd("");$("#cmd-input").focus();cmdIdx=0;
+}
+function closeCmd(){$("#cmd-box").classList.remove("show");$("#cmd-backdrop").classList.remove("show");}
+function renderCmd(q){
+  const list=CMDS.filter(c=>!c.t||!q||c.t.toLowerCase().includes(q));
+  const el=$("#cmd-list");el.innerHTML="";
+  list.forEach((c,i)=>{
+    if(c.cat){el.innerHTML+=`<div class="cmd-item cat">${c.cat}</div>`;return;}
+    const d=document.createElement("div");d.className="cmd-item"+(i===cmdIdx?" sel":"");d.innerHTML=`<span class="ci">${c.i||""}</span>${c.t}<span class="k">↵</span>`;
+    d.onclick=()=>execCmd(c);
+    el.appendChild(d);
+  });
+  const items=el.querySelectorAll(".cmd-item:not(.cat)");
+  cmdIdx=Math.min(cmdIdx,items.length-1);
+}
+function execCmd(c){
+  closeCmd();
+  if(c.go)go(c.go);
+  if(c.open)openEntity(c.open);
+  if(c.run){go("workbench");wbRun();}
+  if(c.exp){go("workbench");wbExplain();}
+}
+$("#global-search").onclick=openCmd;
+$("#cmd-input").oninput=e=>{cmdIdx=0;renderCmd(e.target.value.toLowerCase());};
+$("#cmd-input").onkeydown=e=>{
+  const items=$("#cmd-list").querySelectorAll(".cmd-item:not(.cat)");
+  if(e.key==="ArrowDown"){e.preventDefault();cmdIdx=(cmdIdx+1)%items.length;renderCmd($("#cmd-input").value.toLowerCase());}
+  if(e.key==="ArrowUp"){e.preventDefault();cmdIdx=(cmdIdx-1+items.length)%items.length;renderCmd($("#cmd-input").value.toLowerCase());}
+  if(e.key==="Enter"){items[cmdIdx]&&items[cmdIdx].click();}
+  if(e.key==="Escape")closeCmd();
+};
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openCmd();}
+  if(e.key==="Escape")closeCmd();
+});
+
+/* ─────────────── BOOT ─────────────── */
+renderFacets();renderResults();
+openEntity("data_warehouse.warehouse.public.customers");
+$("#ov-asof").textContent="now";
+</script>
+</body>
+</html>
