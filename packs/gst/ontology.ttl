@@ -12,6 +12,8 @@
 
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
 
 gst:Supplier        rdf:type gst:Class ; gst:label "Supplier" .
 gst:PurchaseInvoice rdf:type gst:Class ; gst:label "Purchase invoice (taxpayer's register)" .
@@ -116,15 +118,43 @@ gst:effectiveFrom rdf:type gst:Property ; gst:label "effective from" .
 gst:capPercent    rdf:type gst:Property ; gst:label "provisional credit cap (percent)" .
 gst:citation      rdf:type gst:Property ; gst:label "citation" .
 
-# Event vocabulary.
-gst:onInvoice     rdf:type gst:Property ; gst:label "on invoice" .
+# Event vocabulary. `onInvoice` is the one edge in this block — `atTime`/
+# `amount` stay plain `gst:Property` (literal-valued). `PurchaseEvent` is its
+# domain because that is the first class declared to use it; `PaymentEvent`
+# and `GoodsReceipt` (below) assert the identical triple shape against the
+# same range, which this single domain/range pair cannot also represent —
+# see the Ontology Builder's own known limitation, noted where
+# `owl:ObjectProperty` is first used below.
+gst:onInvoice     rdf:type owl:ObjectProperty ; rdfs:domain gst:PurchaseEvent ; rdfs:range gst:PurchaseInvoice ; gst:label "on invoice" .
 gst:atTime        rdf:type gst:Property ; gst:label "at time" .
 gst:amount        rdf:type gst:Property ; gst:label "amount" .
 
 # `gst:Supplier` was already declared above and never instantiated — every
 # invoice carried its GSTIN as a bare literal, unreachable by a graph walk.
 # `issuedBy` is the edge that closes that: `plans/105c-gst-causal-graph.md`.
-gst:issuedBy      rdf:type gst:Property ; gst:label "issued by" .
+#
+# **`owl:ObjectProperty` plus `rdfs:domain`/`rdfs:range`, not `gst:Property`,
+# from here down** — Plan 120 Slice C / Plan 121's own follow-on: the
+# Ontology Builder's importer (`ui/src/features/ontology-builder/formats.ts`)
+# only draws a relationship edge for a property typed `owl:ObjectProperty`
+# with both terms present; `gst:Property` alone (every property above this
+# point) renders as a node attribute, correctly, since none of them connect
+# two classes. Genuine RDFS/OWL vocabulary per `plans/00i-licensing.md` rule
+# 2 (the spec is the source), not adopted from any reference implementation,
+# and already used by this project's own reasoning engine
+# (`graph-owl-reasoning-el`) — just never before by a pack's own ontology.
+#
+# **A known, accepted limitation**: `rdfs:domain`/`rdfs:range` are singular
+# per property in this simple encoding, so `issuedBy` (asserted identically
+# by `PurchaseInvoice`, `Gstr1Invoice` and `Gstr2bInvoice` — see
+# `graphowl_client.py`'s `CLASS_BY_KIND`) and `reflectedIn` (deliberately
+# reused at two granularities, per the canonical-entity comment below) each
+# get only their single most representative pair. The Ontology Builder draws
+# one edge, not the full union OWL would technically allow via multiple
+# domain/range triples — a real gap, left for whoever next needs the
+# Ontology Builder to represent it precisely, not solved here by inventing a
+# second, non-standard way to say "this property has more than one shape".
+gst:issuedBy      rdf:type owl:ObjectProperty ; rdfs:domain gst:PurchaseInvoice ; rdfs:range gst:Supplier ; gst:label "issued by" .
 
 # The canonical-entity edges — Plan 109 Slice 2. All three point *down*, from
 # the canonical `gst:Invoice` to the per-source evidence record it was built
@@ -132,19 +162,20 @@ gst:issuedBy      rdf:type gst:Property ; gst:label "issued by" .
 # the graph. `reflectedIn` is deliberately reused at two levels: canonical
 # Invoice to its `Gstr2bInvoice` line, and that line on to the
 # `Gstr2bStatement` it came from — both mean the same thing, "the authority's
-# own record of this," at different granularity.
-gst:recordedIn    rdf:type gst:Property ; gst:label "recorded in (purchase register)" .
-gst:appearsIn     rdf:type gst:Property ; gst:label "appears in (GSTR-1/IFF)" .
-gst:reflectedIn   rdf:type gst:Property ; gst:label "reflected in (GSTR-2B)" .
+# own record of this," at different granularity; the domain/range pair below
+# is the first (canonical-to-line) use only, per `issuedBy`'s comment above.
+gst:recordedIn    rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:PurchaseInvoice ; gst:label "recorded in (purchase register)" .
+gst:appearsIn     rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:Gstr1Invoice ; gst:label "appears in (GSTR-1/IFF)" .
+gst:reflectedIn   rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:Gstr2bInvoice ; gst:label "reflected in (GSTR-2B)" .
 
 # The one genuinely new hop: a declared GSTR-1 line to the filing it came
 # from, and that filing to the supplier who filed it.
-gst:filedIn       rdf:type gst:Property ; gst:label "filed in (which GSTR-1/IFF filing)" .
-gst:filedBy       rdf:type gst:Property ; gst:label "filed by" .
+gst:filedIn       rdf:type owl:ObjectProperty ; rdfs:domain gst:Gstr1Invoice ; rdfs:range gst:Gstr1Filing ; gst:label "filed in (which GSTR-1/IFF filing)" .
+gst:filedBy       rdf:type owl:ObjectProperty ; rdfs:domain gst:Gstr1Filing ; rdfs:range gst:Supplier ; gst:label "filed by" .
 
 # A GSTR-2B statement to the recipient it was generated for — always
 # `gst:recipient-self` today, since this pack is single-tenant.
-gst:generatedFor  rdf:type gst:Property ; gst:label "generated for" .
+gst:generatedFor  rdf:type owl:ObjectProperty ; rdfs:domain gst:Gstr2bStatement ; rdfs:range gst:Recipient ; gst:label "generated for" .
 
 # When the authority generated the statement — optional, since no current
 # source has been confirmed to carry it.
