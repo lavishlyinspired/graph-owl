@@ -236,6 +236,7 @@ fn finding_rule_from_row(row: &sqlx::postgres::PgRow) -> Result<FindingRuleDef, 
         evidence,
         similarity: row.get("similarity"),
         span: row.get("span"),
+        priority: row.get("priority"),
     })
 }
 
@@ -248,8 +249,8 @@ impl FindingRuleRegistry for PostgresTripleStore {
 
         sqlx::query(
             "INSERT INTO finding_rules
-                (pack, label, summary, governed_by, query, subject_var, evidence, similarity, span)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (pack, label) DO UPDATE SET
                 summary     = EXCLUDED.summary,
                 governed_by = EXCLUDED.governed_by,
@@ -257,7 +258,8 @@ impl FindingRuleRegistry for PostgresTripleStore {
                 subject_var = EXCLUDED.subject_var,
                 evidence    = EXCLUDED.evidence,
                 similarity  = EXCLUDED.similarity,
-                span        = EXCLUDED.span",
+                span        = EXCLUDED.span,
+                priority    = EXCLUDED.priority",
         )
         .bind(&rule.pack)
         .bind(&rule.label)
@@ -268,6 +270,7 @@ impl FindingRuleRegistry for PostgresTripleStore {
         .bind(evidence)
         .bind(&rule.similarity)
         .bind(&rule.span)
+        .bind(rule.priority)
         .execute(self.pool())
         .await
         .map_err(|e| RegistryError::Backend(e.to_string()))?;
@@ -277,7 +280,7 @@ impl FindingRuleRegistry for PostgresTripleStore {
 
     async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
         let rows = sqlx::query(
-            "SELECT pack, label, summary, governed_by, query, subject_var, evidence, similarity, span
+            "SELECT pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority
              FROM finding_rules WHERE pack = $1 ORDER BY label",
         )
         .bind(pack)

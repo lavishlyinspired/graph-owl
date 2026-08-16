@@ -46,6 +46,38 @@ fn missing_invoice() -> Finding {
 }
 
 #[tokio::test]
+async fn priority_round_trips_and_a_finding_with_none_reads_back_as_none() {
+    // Epic 105 P10 (`plans/119-architecture-audit.md` §10) — copied from
+    // the rule onto the finding at `findings_from_rows` time, never
+    // re-read from the rule, so this table has to carry it independently.
+    let (storage, _db, _url) = store().await;
+
+    let mut prioritized = missing_invoice();
+    prioritized.priority = Some(1);
+    storage.record_finding(&prioritized).await.expect("record");
+
+    let mut unprioritized = missing_invoice();
+    unprioritized.subject = "1025:pr-INV-1004".to_string();
+    storage
+        .record_finding(&unprioritized)
+        .await
+        .expect("record");
+
+    let found = storage.list_findings(None, None).await.expect("list");
+    let with_priority = found
+        .iter()
+        .find(|f| f.subject == "1025:pr-INV-1003")
+        .expect("recorded above");
+    assert_eq!(with_priority.priority, Some(1));
+
+    let without_priority = found
+        .iter()
+        .find(|f| f.subject == "1025:pr-INV-1004")
+        .expect("recorded above");
+    assert_eq!(without_priority.priority, None);
+}
+
+#[tokio::test]
 async fn a_finding_is_recorded_and_read_back_whole() {
     let (storage, _db, _url) = store().await;
 

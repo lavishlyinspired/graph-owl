@@ -337,6 +337,12 @@ def _register_finding_rules(base: str, manifest: Manifest, token: str | None) ->
                         "as_of": "asOf",
                     },
                 ),
+                # Epic 105 P10 (plans/119-architecture-audit.md §10): how
+                # this rule ranks against a pack's other rules when more
+                # than one fires on the same subject. `None` (sent as an
+                # explicit `null`, matching similarity/span's own
+                # convention above) for a rule that declares none.
+                "priority": rule.get("priority"),
             }
         )
 

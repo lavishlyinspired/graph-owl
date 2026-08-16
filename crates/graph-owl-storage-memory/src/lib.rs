@@ -2246,10 +2246,9 @@ impl Storage for InMemoryStorage {
             let renames_column_fqn = |fqn: &str| -> Option<String> {
                 if fqn == old_prefix {
                     Some(new_prefix.clone())
-                } else if let Some(rest) = fqn.strip_prefix(&format!("{old_prefix}.")) {
-                    Some(format!("{new_prefix}.{rest}"))
                 } else {
-                    None
+                    fqn.strip_prefix(&format!("{old_prefix}."))
+                        .map(|rest| format!("{new_prefix}.{rest}"))
                 }
             };
             for (_, mapping) in self.column_mappings.lock().unwrap().iter_mut() {

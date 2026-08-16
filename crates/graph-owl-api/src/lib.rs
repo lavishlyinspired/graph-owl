@@ -1693,17 +1693,17 @@ fn findings_from_rows(
             })
             .collect();
 
-        built.push(
-            graph_owl_core::finding::Finding::new(
-                rule.pack.clone(),
-                rule.label.clone(),
-                subject,
-                rule.summary.clone(),
-                rule.governed_by.clone(),
-                evidence,
-            )
-            .map_err(|e| rule_error(rule, e))?,
-        );
+        let mut finding = graph_owl_core::finding::Finding::new(
+            rule.pack.clone(),
+            rule.label.clone(),
+            subject,
+            rule.summary.clone(),
+            rule.governed_by.clone(),
+            evidence,
+        )
+        .map_err(|e| rule_error(rule, e))?;
+        finding.priority = rule.priority;
+        built.push(finding);
     }
 
     Ok(built)
@@ -3954,7 +3954,7 @@ impl Catalog {
         let edge_types: Vec<Sid> = flakes
             .iter()
             .filter(|f| f.op && matches!(f.o, FlakeValue::Ref(_)))
-            .filter(|f| relationship_types.is_none_or(|types| types.iter().any(|t| *t == f.p.id)))
+            .filter(|f| relationship_types.is_none_or(|types| types.contains(&f.p.id)))
             .map(|f| f.p.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -18395,7 +18395,7 @@ fn outbound_webhook_wants(
     serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
-        .is_some_and(|kind_str| webhook.event_types.iter().any(|t| *t == kind_str))
+        .is_some_and(|kind_str| webhook.event_types.contains(&kind_str))
 }
 
 /// Names the header a delivery's HMAC signature travels in.
@@ -42929,6 +42929,7 @@ mod finding_rule_declaration_tests {
             }],
             similarity: None,
             span: None,
+            priority: None,
         }
     }
 
@@ -43102,6 +43103,7 @@ mod findings_from_rows_tests {
             evidence,
             similarity: None,
             span: None,
+            priority: None,
         }
     }
 
@@ -43155,6 +43157,43 @@ mod findings_from_rows_tests {
             findings_from_rows(&rule, &[]).expect("empty is not an error"),
             vec![]
         );
+    }
+
+    #[test]
+    fn the_rule_s_priority_propagates_to_every_finding_it_produces() {
+        // A consumer collapsing several findings on one subject into a
+        // single decision (reco-now's one-row-per-invoice table is the
+        // motivating case, plans/119-architecture-audit.md §10) needs to
+        // rank them without hardcoding a table of finding labels itself —
+        // the rank belongs to the rule, copied onto each finding it files,
+        // the same way summary/governed_by already are.
+        let rows = vec![row(&[
+            ("invoice", "<https://graph-owl.dev/packs/gst#2b-INV-1001>"),
+            ("number", "\"INV-1001\""),
+        ])];
+        let mut rule = rule(vec![EvidenceBinding {
+            predicate: "gst:invoiceNumber".to_string(),
+            var: "number".to_string(),
+        }]);
+        rule.priority = Some(1);
+
+        let findings = findings_from_rows(&rule, &rows).expect("ok");
+        assert_eq!(findings[0].priority, Some(1));
+    }
+
+    #[test]
+    fn a_rule_with_no_declared_priority_produces_findings_with_none() {
+        let rows = vec![row(&[
+            ("invoice", "<https://graph-owl.dev/packs/gst#2b-INV-1001>"),
+            ("number", "\"INV-1001\""),
+        ])];
+        let rule = rule(vec![EvidenceBinding {
+            predicate: "gst:invoiceNumber".to_string(),
+            var: "number".to_string(),
+        }]);
+
+        let findings = findings_from_rows(&rule, &rows).expect("ok");
+        assert_eq!(findings[0].priority, None);
     }
 
     #[test]
@@ -43407,6 +43446,7 @@ mod obligations_from_rows_tests {
                 "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
                 "whenMissing": "elapsed", "asOf": "2026-08-01"
             })),
+            priority: None,
         }
     }
 
@@ -45685,6 +45725,7 @@ mod run_rule_tests {
             }],
             similarity: None,
             span: None,
+            priority: None,
         }
     }
 
@@ -46048,6 +46089,7 @@ mod calculate_risk_tests {
             span: Some(serde_json::json!({
                 "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
             })),
+            priority: None,
         }
     }
 
@@ -46286,6 +46328,7 @@ mod near_miss_node_tests {
             ],
             similarity: Some(similarity),
             span: None,
+            priority: None,
         }
     }
 
@@ -46517,6 +46560,7 @@ mod near_miss_node_tests {
                 evidence: vec![],
                 similarity: None,
                 span: None,
+                priority: None,
             })
             .await
             .expect("declare");

@@ -47,6 +47,7 @@ fn finding_from_row(row: &sqlx::postgres::PgRow) -> Result<Finding, StorageError
         detected_at: row.get("detected_at"),
         decided_by: row.get("decided_by"),
         reason: row.get("reason"),
+        priority: row.get("priority"),
     })
 }
 
@@ -77,8 +78,8 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
         let result = sqlx::query(
             "INSERT INTO findings
                  (id, pack, label, subject, summary, governed_by, evidence,
-                  status, evidence_digest)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+                  status, evidence_digest, priority)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9)
              ON CONFLICT DO NOTHING",
         )
         .bind(finding.id)
@@ -89,6 +90,7 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
         .bind(&finding.governed_by)
         .bind(&evidence)
         .bind(finding.evidence_digest())
+        .bind(finding.priority)
         .execute(self.pool())
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -99,7 +101,7 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
     async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
         let row = sqlx::query(
             "SELECT id, pack, label, subject, summary, governed_by, evidence,
-                    status, detected_at, decided_by, reason
+                    status, detected_at, decided_by, reason, priority
              FROM findings WHERE id = $1",
         )
         .bind(id)
@@ -117,7 +119,7 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
     ) -> Result<Vec<Finding>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, pack, label, subject, summary, governed_by, evidence,
-                    status, detected_at, decided_by, reason
+                    status, detected_at, decided_by, reason, priority
              FROM findings
              WHERE ($1::text IS NULL OR pack = $1)
                AND ($2::text IS NULL OR status = $2)

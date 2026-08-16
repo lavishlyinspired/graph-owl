@@ -362,6 +362,46 @@ def test_similarity_and_span_bands_are_translated_to_camel_case():
     assert reversed_rule["span"] is None
 
 
+def test_priority_is_forwarded_when_a_rule_declares_one():
+    # Epic 105 P10 (plans/119-architecture-audit.md §10) — a consumer that
+    # must collapse several findings on one subject into a single decision
+    # (reco-now's one-row-per-invoice table is the motivating case) ranks
+    # by this instead of hardcoding its own table of finding labels.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    rules = json.loads(
+        next(r for r in received if r["path"] == "/packs/gst/finding-rules")["raw"]
+    )["rules"]
+
+    amount_mismatch = next(r for r in rules if r["label"] == "gst:AmountMismatch")
+    assert amount_mismatch["priority"] == 1
+
+    missing_in_books = next(r for r in rules if r["label"] == "gst:MissingInBooks")
+    assert missing_in_books["priority"] == 3
+
+
+def test_priority_is_null_not_absent_when_a_rule_declares_none():
+    # Matching similarity/span's own convention above: an explicit `null`
+    # is what this loader sends, not an omitted key — the server's
+    # `#[serde(default)]` accepts either, but the two are not the same
+    # promise to a caller inspecting the payload.
+    #
+    # gst:PaymentOverdue is genuinely the odd one out among the 13 —
+    # payment-timing tracking rather than a documents-disagree conclusion,
+    # so it does not fit the reconciliation-priority scale the other 12
+    # share and is left undeclared on purpose (packs/gst/pack.toml).
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    rules = json.loads(
+        next(r for r in received if r["path"] == "/packs/gst/finding-rules")["raw"]
+    )["rules"]
+    overdue = next(r for r in rules if r["label"] == "gst:PaymentOverdue")
+    assert "priority" in overdue
+    assert overdue["priority"] is None
+
+
 def test_hospitality_registers_no_finding_rules() -> None:
     # Its one finding has no `query` — a declaration of intent, the same
     # legitimate half-built state the runtime always read it as. A rule

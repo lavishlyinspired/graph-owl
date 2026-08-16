@@ -290,6 +290,27 @@ n = 3
 # — for the two things SPARQL cannot do here. Both are declared in the manifest
 # rather than hidden in the runtime, so the thresholds are visible to whoever
 # has to defend a finding.
+#
+# **`priority` — Epic 105 P10 (`plans/119-architecture-audit.md` §10).** Most
+# rules carry one: which rule wins when more than one fires on the same
+# subject, for a consumer that has to collapse several findings into a single
+# decision (reco-now's one-row-per-invoice table is the motivating case — an
+# invoice can be both filed-but-absent-from-2B and genuinely mismatched
+# against what was filed, and one of the two has to win the row). Lower is
+# more actionable. graph-owl's own console has no such constraint — every
+# finding is its own row there — so this is read, never required, and
+# `gst:PaymentOverdue` (payment-timing tracking, not a documents-disagree
+# conclusion) deliberately carries none.
+#
+#   1  the two sides genuinely disagree on a value, or credit is matched but
+#      blocked/reversed/mis-keyed — the most actionable class, something is
+#      concretely wrong with what was claimed
+#   2  claimed, and not yet available for one of three reasons GSTR-1/2A
+#      evidence distinguishes (never filed, filed but not yet in 2B, or —
+#      absent GSTR-1 entirely — simply not reached)
+#   3  the opposite direction: the authority has evidence the books do not,
+#      which is unclaimed credit rather than an over-claim — an opportunity,
+#      not a risk, and the reason it ranks last
 
 # **Narrowed by Plan 108 Slice 3.** This is the books-vs-2B answer, and it
 # stands down entirely once GSTR-1 evidence is loaded, because the two rules
@@ -300,6 +321,7 @@ label = "gst:PotentialMismatch"
 summary = "An invoice claimed in the purchase register that has not reached GSTR-2B (no GSTR-1 data loaded to say why)"
 governed_by = "gst:Section16-2-aa"
 query = "missing-in-gstr2b"
+priority = 2
 subject = "invoice"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -325,6 +347,7 @@ label = "gst:AmountMismatch"
 summary = "Both sides report the invoice, and the values differ by more than the cap then in force allowed"
 governed_by = "gst:Rule36-4"
 query = "amount-mismatch"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -352,6 +375,7 @@ label = "gst:ITCNotAvailable"
 summary = "The invoice matches, and the authority reports the credit as unavailable"
 governed_by = "gst:Section17-5"
 query = "itc-not-available"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },
@@ -372,6 +396,7 @@ label = "gst:Reversed"
 summary = "The invoice matches, and the authority flags it as reverse-charge"
 governed_by = "gst:Section16-2-aa"
 query = "reverse-charge"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },
@@ -403,6 +428,7 @@ label = "gst:GstinTransposition"
 summary = "Same invoice number and period on both sides under near-identical GSTINs — probably a keying error"
 governed_by = "gst:MatchingPolicy"
 query = "gstin-transposition"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },
@@ -458,6 +484,7 @@ label = "gst:SupplierNotFiled"
 summary = "An invoice claimed in the purchase register that the supplier has not reported in any GSTR-1/IFF filing"
 governed_by = "gst:Section16-2-aa"
 query = "missing-in-gstr1"
+priority = 2
 subject = "invoice"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -484,6 +511,7 @@ label = "gst:Gstr1NotIn2b"
 summary = "The supplier declared the invoice in GSTR-1/IFF, and it has not reached any GSTR-2B this pack holds"
 governed_by = "gst:Section16-2-aa"
 query = "gstr1-not-in-2b"
+priority = 2
 subject = "invoice"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -513,6 +541,7 @@ label = "gst:MissingInBooks"
 summary = "The supplier's declared invoice appears in GSTR-1/IFF with no matching entry in the purchase register"
 governed_by = "gst:Section16"
 query = "missing-in-books"
+priority = 3
 subject = "declared"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -539,6 +568,7 @@ label = "gst:BooksGstr1Mismatch"
 summary = "The purchase register and the supplier's GSTR-1/IFF declare the same invoice with different values"
 governed_by = "gst:Rule36-4"
 query = "books-gstr1-mismatch"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -567,6 +597,7 @@ label = "gst:GoodsReceiptTiming"
 summary = "The invoice is matched and its GSTR-2B period contains it, but the goods or services were received in a later period"
 governed_by = "gst:Section16-2-b"
 query = "goods-receipt-timing"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -594,6 +625,7 @@ label = "gst:TaxHeadMismatch"
 summary = "The invoice matches on every total, and the tax is split across different heads than the supplier filed"
 governed_by = "gst:Section16-2-aa"
 query = "tax-head-mismatch"
+priority = 1
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -622,6 +654,7 @@ label = "gst:SupplierPanMismatch"
 summary = "Booked against one GSTIN of a supplier and filed under another registration of the same PAN"
 governed_by = "gst:MatchingPolicy"
 query = "supplier-pan-mismatch"
+priority = 1
 subject = "invoice"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },

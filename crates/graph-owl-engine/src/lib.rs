@@ -433,6 +433,28 @@ pub struct FindingRuleDef {
     pub evidence: Vec<EvidenceBinding>,
     pub similarity: Option<serde_json::Value>,
     pub span: Option<serde_json::Value>,
+    /// How this rule ranks against a pack's other rules when more than one
+    /// fires on the same subject — Epic 105 P10
+    /// (`plans/119-architecture-audit.md` §10). Lower ranks more
+    /// actionable. Pack-authored (`[[findings]]`'s own `priority` key),
+    /// copied onto every [`Finding`](graph_owl_core::finding::Finding) the
+    /// rule produces, the same way `summary`/`governed_by` already are.
+    ///
+    /// **Exists for a consumer that must collapse several findings on one
+    /// subject into a single decision** — reco-now's one-row-per-invoice
+    /// table is the motivating case: an invoice both filed-but-absent-
+    /// from-2B and genuinely mismatched against what was filed needs one
+    /// of the two to win, and that ranking is a property of the finding
+    /// *kind*, not something each consumer should hardcode a table of
+    /// labels to re-derive. graph-owl's own console has no such
+    /// constraint — every finding is its own row there — so this is
+    /// read, never required.
+    ///
+    /// `None` when a rule declares none, treated as least urgent by any
+    /// consumer that ranks by it — a declared priority always outranks an
+    /// undeclared one.
+    #[serde(default)]
+    pub priority: Option<i16>,
 }
 
 /// Finding rules definable at runtime, so a pack's reconciliation logic

@@ -42,6 +42,7 @@ fn rule(pack: &str, label: &str, query: &str) -> FindingRuleDef {
         ],
         similarity: None,
         span: None,
+        priority: None,
     }
 }
 
@@ -122,6 +123,36 @@ async fn redeclaring_the_same_label_replaces_the_query_rather_than_duplicating()
 async fn a_pack_with_no_declared_rules_returns_an_empty_list() {
     let (store, _db, _url) = store().await;
     assert_eq!(store.for_pack("nonexistent").await.expect("list"), vec![]);
+}
+
+/// Priority round-trips through Postgres — Epic 105 P10
+/// (`plans/119-architecture-audit.md` §10). Declared alongside a rule with
+/// none, so the column's nullability is exercised in the same run rather
+/// than assumed.
+#[tokio::test]
+async fn priority_round_trips_and_a_rule_with_none_reads_back_as_none() {
+    let (store, _db, _url) = store().await;
+
+    let mut with_priority = rule("gst", "gst:AmountMismatch", "SELECT ?invoice {}");
+    with_priority.priority = Some(1);
+    store.declare(&with_priority).await.expect("declare");
+    store
+        .declare(&rule("gst", "gst:MissingInBooks", "SELECT ?invoice {}"))
+        .await
+        .expect("declare");
+
+    let rules = store.for_pack("gst").await.expect("list");
+    let mismatch = rules
+        .iter()
+        .find(|r| r.label == "gst:AmountMismatch")
+        .expect("declared above");
+    assert_eq!(mismatch.priority, Some(1));
+
+    let missing = rules
+        .iter()
+        .find(|r| r.label == "gst:MissingInBooks")
+        .expect("declared above");
+    assert_eq!(missing.priority, None);
 }
 
 /// The similarity/span bands round-trip as opaque JSON — proving the

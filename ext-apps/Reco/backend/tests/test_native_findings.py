@@ -48,14 +48,16 @@ def _portal(**overrides) -> dict:
     return base
 
 
-def _finding(label: str, gstin: str, number: str, **extra_evidence) -> dict:
+def _finding(
+    label: str, gstin: str, number: str, *, priority: int | None = None, **extra_evidence
+) -> dict:
     evidence = [
         {"var": "gstin", "value": gstin, "predicate": "gst:supplierGstin"},
         {"var": "number", "value": number, "predicate": "gst:invoiceNumber"},
     ]
     for var, value in extra_evidence.items():
         evidence.append({"var": var, "value": value, "predicate": f"gst:{var}"})
-    return {"label": label, "evidence": evidence}
+    return {"label": label, "evidence": evidence, "priority": priority}
 
 
 class TestNoFindingIsMatched:
@@ -121,15 +123,21 @@ class TestSingleFindingMapsToStatus:
 
 
 class TestMultipleFindingsOnOneInvoice:
-    def test_a_value_disagreement_finding_outranks_a_not_yet_available_one(self):
-        # The real case this cutover exists to get right: INV-AUG-114 in
+    """Epic 105 P10 (plans/119-architecture-audit.md §10): each finding
+    carries its own `priority` from graph-owl (packs/gst/pack.toml), read
+    off the wire rather than hardcoded here — reco-now no longer maintains
+    its own table ranking finding labels."""
+
+    def test_a_lower_priority_number_outranks_a_higher_one(self):
+        # The real case this ranking exists to get right: INV-AUG-114 in
         # plans/119-architecture-audit.md §8a is both Gstr1NotIn2b (not
-        # yet available) AND BooksGstr1Mismatch (the two sides actually
-        # disagree) — the disagreement is the more actionable fact, so it
-        # must win the status bucket even though Gstr1NotIn2b matched first.
+        # yet available, packs/gst priority 2) AND BooksGstr1Mismatch (the
+        # two sides actually disagree, priority 1) — the disagreement is
+        # the more actionable fact, so it must win even though Gstr1NotIn2b
+        # is listed first.
         findings = [
-            _finding("gst:Gstr1NotIn2b", "27AAAFN2938K1Z2", "INV-1"),
-            _finding("gst:BooksGstr1Mismatch", "27AAAFN2938K1Z2", "INV-1"),
+            _finding("gst:Gstr1NotIn2b", "27AAAFN2938K1Z2", "INV-1", priority=2),
+            _finding("gst:BooksGstr1Mismatch", "27AAAFN2938K1Z2", "INV-1", priority=1),
         ]
         results = reconcile(
             [_book(taxable=55000)], [], [_book(taxable=53000)], findings
@@ -138,14 +146,27 @@ class TestMultipleFindingsOnOneInvoice:
 
     def test_both_findings_reasons_appear_in_the_combined_reason_text(self):
         findings = [
-            _finding("gst:Gstr1NotIn2b", "27AAAFN2938K1Z2", "INV-1"),
-            _finding("gst:BooksGstr1Mismatch", "27AAAFN2938K1Z2", "INV-1"),
+            _finding("gst:Gstr1NotIn2b", "27AAAFN2938K1Z2", "INV-1", priority=2),
+            _finding("gst:BooksGstr1Mismatch", "27AAAFN2938K1Z2", "INV-1", priority=1),
         ]
         results = reconcile(
             [_book(taxable=55000)], [], [_book(taxable=53000)], findings
         )
         assert "2B" in results[0]["reason"]
         assert "GSTR-1" in results[0]["reason"]
+
+    def test_a_declared_priority_outranks_an_undeclared_one_regardless_of_number(self):
+        # gst:PaymentOverdue declares no priority at all (packs/gst's own
+        # odd one out — payment-timing, not a documents-disagree
+        # conclusion). Any finding that *does* declare one must win over
+        # it, not just one with a numerically lower value.
+        findings = [
+            _finding("gst:PaymentOverdue", "27AAAFN2938K1Z2", "INV-1", priority=None),
+            _finding("gst:MissingInBooks", "27AAAFN2938K1Z2", "INV-1", priority=3),
+        ]
+        results = reconcile([_book()], [], [_book()], findings)
+        assert results[0]["status"] == STATUS_ONLY_GSTR2B
+        assert "Declared (GSTR-1), Not in Books" in results[0]["reason"]
 
 
 class TestOrphanedPortalRow:

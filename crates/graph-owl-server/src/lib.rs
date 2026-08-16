@@ -8752,6 +8752,8 @@ struct FindingRuleInput {
     similarity: Option<serde_json::Value>,
     #[serde(default)]
     span: Option<serde_json::Value>,
+    #[serde(default)]
+    priority: Option<i16>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -8793,6 +8795,7 @@ async fn declare_finding_rules(
                     .collect(),
                 similarity: rule.similarity,
                 span: rule.span,
+                priority: rule.priority,
             })
             .await?;
     }

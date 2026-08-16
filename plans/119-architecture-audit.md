@@ -599,3 +599,56 @@ on the priority-ordering logic.
 two-document taxonomy and does not yet distinguish "authority data" by
 which authority document it came from. Accurate, not mislabeled data,
 but a column name that doesn't yet say "GSTR-2B or GSTR-1/2A."
+
+## 10. Finding priority moves into graph-owl — 16 August 2026
+
+Asked directly, following §9: should reco-now's remaining reconciliation
+logic move into graph-owl entirely? Investigated and answered narrowly,
+not wholesale — `reconciliation.py`'s fallback `reconcile()` stays (this
+project has repeatedly stated graph-owl being unreachable must degrade
+reco-now, not break it), and `match_stats`/`classify_mismatches`/
+`supplier_health`/`ims_actions` stay (dashboard-shaping for reco-now's
+own UI, not something a domain-neutral, multi-consumer platform should
+own). The one piece that genuinely belonged in graph-owl: which finding
+wins when more than one fires on the same subject.
+
+**Before this slice**, `native_findings.py`'s `_STATUS_PRIORITY` hardcoded
+a ranking over reco-now's own 4-bucket taxonomy (`review` > `only_books` >
+`only_gstr2b`), which meant packs/gst's own authors had no way to change
+how their rules rank without a reco-now code change — a genuine violation
+of "Rust owns deterministic graph intelligence, Python orchestrates,"
+just narrower in scope than the Python matcher/scorer that principle was
+originally written against.
+
+**Now**: `FindingRuleDef`/`Finding` (`graph-owl-engine`/`graph-owl-core`)
+carry an optional `priority: Option<i16>` — pack-authored
+(`packs/gst/pack.toml`'s `[[findings]]`), copied onto every finding a rule
+produces at `findings_from_rows` time (`graph-owl-api`), persisted on both
+sides (`finding_rules.priority` V17, `findings.priority` V62), forwarded
+through `POST /packs/{pack}/finding-rules` and the pack loader. Lower
+ranks more actionable; a rule that declares none (`gst:PaymentOverdue` —
+payment-timing tracking, not a documents-disagree conclusion) is
+deliberately left unranked rather than forced onto the scale.
+`native_findings.py`'s `_status_and_reason` now sorts by each finding's
+own `priority` read off the wire, with `None` always losing to any
+declared value — no hardcoded label table left in Python at all.
+
+**Verified end to end**: new Rust tests at every layer (`graph-owl-api`'s
+`findings_from_rows_tests`, `graph-owl-engine-postgres`'s
+`finding_rule_registry` integration test, `graph-owl-storage-postgres`'s
+`findings` integration test — all against a real Postgres), new Python
+tests (`connectors/python/tests/test_loader.py`,
+`ext-apps/Reco/backend/tests/test_native_findings.py`), a manual mutation
+check on the new sort key, then a live round trip against a fresh
+database: `curl /findings?pack=gst` shows every finding carrying the
+priority its pack.toml rule declared, INV-AUG-114's `BooksGstr1Mismatch`
+(priority 1) correctly outranking its own `Gstr1NotIn2b` (priority 2),
+and `scripts/verify-reconcile-parity.py` unchanged (14/7/2/3/2 — same
+answer, now derived from graph-owl's own data instead of a Python table).
+
+`cargo public-api -p graph-owl-api` was checked and found already stale
+before this slice — dozens of pre-existing, unrelated surface changes
+(including a capability already recorded as removed in `_archived/`) —
+not fixed here, since regenerating the committed snapshot would fold an
+unknown backlog of other work into this commit. Flagged, not silently
+absorbed.

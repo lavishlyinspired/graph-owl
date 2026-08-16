@@ -26,12 +26,17 @@ anchors on.
 
 **One invoice can carry more than one finding** — confirmed live: an
 invoice both filed-but-absent-from-2B (`Gstr1NotIn2b`) and genuinely
-mismatched against what was filed (`BooksGstr1Mismatch`) gets both. Picked
-by priority (`_STATUS_PRIORITY`): a value disagreement always outranks a
-"not yet available" finding, because it is the more actionable fact — a
-reviewer needs to know the numbers disagree before they need to know 2B
-hasn't caught up yet. All matching findings' reasons are still shown,
-joined, so nothing is silently dropped for losing the priority ordering.
+mismatched against what was filed (`BooksGstr1Mismatch`) gets both.
+Picked by each finding's own `priority` — Epic 105 P10
+(`plans/119-architecture-audit.md` §10), read off the wire
+(`packs/gst/pack.toml`'s `[[findings]]`), not a table of finding labels
+hardcoded here: this module used to rank by a fixed `_STATUS_PRIORITY`
+list of *buckets*, which meant graph-owl's own pack authors had no way
+to change the ranking without a reco-now code change. Lower ranks more
+actionable; a finding with no declared priority always loses to one that
+declares any, since an unranked finding cannot be compared. All matching
+findings' reasons are still shown, joined, so nothing is silently
+dropped for losing the ranking.
 """
 
 from __future__ import annotations
@@ -71,10 +76,6 @@ _STATUS_BY_LABEL: dict[str, tuple[str, str]] = {
     "gst:PaymentOverdue": (STATUS_REVIEW, "Payment Overdue (180 Days)"),
 }
 
-#: Status priority when one invoice carries multiple findings — lower
-#: index wins. A value disagreement is always the more actionable fact.
-_STATUS_PRIORITY = [STATUS_REVIEW, STATUS_ONLY_BOOKS, STATUS_ONLY_GSTR2B]
-
 
 def _finding_key(finding: dict) -> tuple[str, str] | None:
     gstin = number = None
@@ -100,14 +101,17 @@ def _findings_by_key(findings: list[dict]) -> dict[tuple[str, str], list[dict]]:
 
 
 def _status_and_reason(matches: list[dict]) -> tuple[str, str]:
-    resolved = [
-        _STATUS_BY_LABEL[f["label"]] for f in matches if f["label"] in _STATUS_BY_LABEL
-    ]
-    if not resolved:
+    known = [f for f in matches if f["label"] in _STATUS_BY_LABEL]
+    if not known:
         return STATUS_MATCHED, ""
-    resolved.sort(key=lambda pair: _STATUS_PRIORITY.index(pair[0]))
-    status = resolved[0][0]
-    reasons = list(dict.fromkeys(reason for _, reason in resolved))
+    # An undeclared priority always loses: there is nothing to compare it
+    # against, so it cannot be ranked ahead of a finding that declared
+    # one. `float("inf")` rather than a large int, so this holds for any
+    # priority scale a pack author picks, not just the small integers
+    # packs/gst happens to use today.
+    known.sort(key=lambda f: f.get("priority") if f.get("priority") is not None else float("inf"))
+    status = _STATUS_BY_LABEL[known[0]["label"]][0]
+    reasons = list(dict.fromkeys(_STATUS_BY_LABEL[f["label"]][1] for f in known))
     return status, "; ".join(reasons)
 
 

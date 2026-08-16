@@ -163,6 +163,14 @@ pub struct Finding {
     pub decided_by: Option<String>,
     /// Why they decided that. Required on rejection.
     pub reason: Option<String>,
+    /// The rule's own rank against a pack's other rules, copied from
+    /// [`FindingRuleDef::priority`](../../graph_owl_engine/struct.FindingRuleDef.html#structfield.priority)
+    /// at the moment this finding was filed — never read from the rule
+    /// again, since a later edit to the rule's declared priority should
+    /// not silently reorder findings already open. Lower ranks more
+    /// actionable. `None` when the rule declared none.
+    #[serde(default)]
+    pub priority: Option<i16>,
 }
 
 impl Finding {
@@ -213,6 +221,7 @@ impl Finding {
             detected_at: Utc::now(),
             decided_by: None,
             reason: None,
+            priority: None,
         })
     }
 
