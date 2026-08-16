@@ -5,15 +5,24 @@
  *  chain, which is exactly right for deciding whether *one* accusation stands.
  *  It is not how a reconciliation is done. A CA closing a period needs the
  *  three totals side by side, the difference between them, and what accounts
- *  for that difference — and until now that meant uploading through an admin
- *  screen, clicking a button in a table row, and reading a flat list in
- *  another tab, with the arithmetic done by hand afterwards.
+ *  for that difference, with the arithmetic already done.
  *
- *  So this page is the workflow, in the order it is actually performed: load
- *  the three sources, run the rules, read the statement, work the exceptions,
- *  take the working paper away. Nothing here duplicates the queue's job —
- *  every finding still opens into the queue's evidence chain, which is where
- *  the argument for a finding lives.
+ *  **Read-only, deliberately — Plan 120 Slice E.** This page used to also
+ *  offer upload cards and a manual "Run reconciliation" button; both are
+ *  gone. reco-now is the only place a CA uploads a period or triggers a run
+ *  now — its own upload flow already calls graph-owl's native rule engine
+ *  automatically (`_run_graphowl_reconcile` in `ext-apps/Reco/backend/app/
+ *  main.py`) the moment column mapping is confirmed, so a second, manual
+ *  trigger here duplicated a step nobody needed to take twice. This page
+ *  still reads the graph fresh on every mount (`refresh()`, below) — the
+ *  statement is never stale just because nobody clicked a button on this
+ *  particular screen; it reflects whatever the last real upload, from
+ *  wherever it came from, actually landed.
+ *
+ *  So this page is the statement, read the moment it opens: the totals side
+ *  by side, the exceptions worked, the working paper taken away. Nothing
+ *  here duplicates the queue's job — every finding still opens into the
+ *  queue's evidence chain, which is where the argument for a finding lives.
  *
  *  **The console still has no GST tab.** This page renders for whichever pack
  *  declares import surfaces and finding rules; `statement.ts` holds the one
@@ -37,32 +46,20 @@ import {
   Row,
   Select,
   Space,
-  Spin,
   Statistic,
   Table,
   Tag,
   Typography,
-  Upload,
-  message,
 } from "./../../components/ui/antd-compat";
 import {
   CheckCircleOutlined,
   DownloadOutlined,
-  InboxOutlined,
   QuestionCircleOutlined,
-  SyncOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
-import type { UploadFile } from "./../../components/ui/antd-compat";
 import { api, type FindingRuleDef, type PackConsoleConfig, type PackFinding } from "../../api";
 import { lexical } from "../../workbench/results";
-import { importThroughSurface } from "../packs/importFile";
-import {
-  surfacesFor,
-  surfacesFromConsole,
-  unreadableFormats,
-  type PackImportSurface,
-} from "../packs/packSurfaces";
+import { surfacesFor } from "../packs/packSurfaces";
 import {
   ALL_PERIODS,
   buildStatement,
@@ -97,17 +94,10 @@ const COPY = {
   noPack: "No domain pack is installed",
   noPackBody:
     "This page reconciles whatever sources an installed pack declares. Install one from Admin → Packs and it will appear here.",
-  step1: "1 · Load your data",
-  step2: "2 · Run the rules",
-  step3: "3 · The statement",
+  step3: "1 · The statement",
   step4: "4 · What to do about it",
   loading: "Reading the graph…",
   loadFailed: "Could not read the reconciliation",
-  run: "Run reconciliation",
-  running: "Running…",
-  runAgain: "Run again",
-  runHint: "Re-runs are safe: findings are computed from the graph each time, never stored as flags on an invoice.",
-  runFailed: "Reconciliation could not be run",
   exportCsv: "Download working paper (CSV)",
   nothingToExport: "Nothing to export yet",
   emptyFindings: "Nothing to look at",
@@ -121,19 +111,12 @@ const COPY = {
   nextAction: "What to do",
   governedBy: "Rule",
   openInReview: "Review the evidence for these",
-  sourceLoaded: "loaded",
-  sourceEmpty: "not loaded",
-  periodsLabel: "Periods",
   filterPeriod: "GST period",
   filterAll: "All",
   filterHint:
-    "Narrows the statement, the findings and the by-supplier view to one filing period. Your uploads stay loaded — a period you are not working on is not deleted.",
+    "Narrows the statement, the findings and the by-supplier view to one filing period. A period you are not working on is not deleted.",
   truncated:
     "The graph returned more rows than one read allows, so these totals are of what was read, not of everything held. Narrow the period before relying on them.",
-  noSurface: "This pack declares no upload surface for this source.",
-  unreadable:
-    "This pack declares a file format this console cannot read, so that upload is not offered. Either the manifest names the wrong format, or this console is older than the pack it is serving.",
-  whereToGetIt: "Where do I get this?",
   booksTotal: "As per your books",
   authorityTotal: "As per GSTR-2B",
   differenceTotal: "Difference",
@@ -147,7 +130,7 @@ const COPY = {
   headBooks: "Books",
   headAuthority: "GSTR-2B",
   headDifference: "Difference",
-  step5: "6 · By supplier",
+  step5: "3 · By supplier",
   supplierHint:
     "One supplier is one subject in the graph, pointed at by the register, the GSTR-2A and the GSTR-2B alike — so which documents describe it is a question the graph answers directly. Chasing is done supplier by supplier, and this is the order to make the calls in.",
   inAll: "in all three",
@@ -157,7 +140,7 @@ const COPY = {
   sourceBooks: "books",
   sourceGstr1: "GSTR-2A",
   sourceAuthority: "GSTR-2B",
-  graphTitle: "5 · What the graph knows",
+  graphTitle: "2 · What the graph knows",
   graphHint:
     "These are not three spreadsheets joined by a batch job. Each import lands in its own named graph, one party subject is shared across all of them, and every finding is the live result of a query with the statute it rests on attached — nothing is written onto an invoice as a flag.",
   graphSubjects: "Invoice records",
@@ -313,154 +296,6 @@ function toSourceInvoice(row: Readonly<Record<string, string>>): BoundInvoice {
     cess: value("cess", "0.00"),
     period: value("period"),
   };
-}
-
-function SourceCard({
-  spec,
-  rows,
-  surface,
-  onImported,
-  money,
-  packId,
-}: {
-  spec: SourceSpec;
-  rows: readonly SourceInvoice[];
-  surface: PackImportSurface | undefined;
-  onImported: () => void;
-  money: (value: number) => string;
-  /** Whose pack this upload belongs to — discovered by the page, never the
-   *  literal `"gst"` this used to pass. */
-  packId: string;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [invoiceOpen, setInvoiceOpen] = useState(false);
-  const summary = useMemo(() => sourceSummary(rows), [rows]);
-
-  const handle = useCallback(
-    async (file: UploadFile & { originFileObj?: File }) => {
-      if (!surface) return;
-      const blob = (file.originFileObj ?? file) as unknown as File;
-      setBusy(true);
-      setFailure(null);
-      try {
-        const outcome = await importThroughSurface(packId, surface, await blob.text());
-        message.success(
-          outcome.count === 0
-            ? "That file held no invoices — a period nobody filed against is a valid answer."
-            : `${outcome.source}: ${outcome.count} invoice(s) read, ${outcome.landed} facts added.`,
-        );
-        onImported();
-      } catch (error) {
-        // The pack's own message, written for whoever is uploading — "no GSTIN
-        // column found in that file", not "unexpected token < in JSON".
-        setFailure(error instanceof Error ? error.message : "That file could not be read");
-      } finally {
-        setBusy(false);
-      }
-    },
-    [surface, onImported, packId],
-  );
-
-  const loaded = summary.count > 0;
-
-  return (
-    <Card
-      size="small"
-      style={{ height: "100%" }}
-      title={
-        <Space>
-          <Text strong>{spec.label}</Text>
-          <Tag color={loaded ? "green" : "default"}>{loaded ? COPY.sourceLoaded : COPY.sourceEmpty}</Tag>
-        </Space>
-      }
-    >
-      <Paragraph type="secondary" style={{ marginBottom: 12, fontSize: 12 }}>
-        {spec.role}
-      </Paragraph>
-
-      {loaded && (
-        <Space direction="vertical" size={2} style={{ marginBottom: 12, width: "100%" }}>
-          <Text style={{ fontSize: 22, fontWeight: 600 }}>{money(summary.taxAmount)}</Text>
-          {/* **The count is a door, not a figure.** A number with nothing behind
-              it made a CA reach for the graph to see which invoices a total was
-              built from; the count now opens them. The taxable figure stays out
-              of the trigger — it is part of the summary, not the action. */}
-          <Space size={0} wrap>
-            <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => setInvoiceOpen(true)}>
-              {`${summary.count} invoice${summary.count === 1 ? "" : "s"}`}
-            </Button>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {` · taxable ${money(summary.taxableValue)}`}
-            </Text>
-          </Space>
-          {summary.periods.length > 0 && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {`${COPY.periodsLabel}: ${summary.periods.join(", ")}`}
-            </Text>
-          )}
-        </Space>
-      )}
-
-      {surface ? (
-        <Upload.Dragger
-          accept={surface.accept}
-          maxCount={1}
-          showUploadList={false}
-          disabled={busy}
-          beforeUpload={(file) => {
-            void handle(file as unknown as UploadFile);
-            // Returning false keeps antd from attempting its own upload — this
-            // component posts the converted RDF itself.
-            return false;
-          }}
-          style={{ padding: "4px 0" }}
-        >
-          <p className="ant-upload-drag-icon" style={{ marginBottom: 4 }}>
-            {busy ? <Spin /> : <InboxOutlined />}
-          </p>
-          <p className="ant-upload-text" style={{ fontSize: 13 }}>
-            {busy ? "Reading…" : loaded ? "Replace or add a period" : "Upload"}
-          </p>
-        </Upload.Dragger>
-      ) : (
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {COPY.noSurface}
-        </Text>
-      )}
-
-      <details style={{ marginTop: 10 }}>
-        <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--ant-color-text-secondary)" }}>
-          {COPY.whereToGetIt}
-        </summary>
-        <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 6, marginBottom: 0 }}>
-          {surface?.howToObtain ?? "—"}
-        </Paragraph>
-      </details>
-
-      {failure && <Alert style={{ marginTop: 10 }} type="error" showIcon message={failure} />}
-
-      {/* **Portalled, so it can live here without owning the card's layout.**
-          The invoices behind the count, opened from the trigger above. */}
-      <Modal
-        open={invoiceOpen}
-        title={`${spec.label} · ${summary.count} ${COPY.invoicesSuffix}`}
-        onCancel={() => setInvoiceOpen(false)}
-        footer={null}
-        width={960}
-      >
-        <Table
-          size="small"
-          rowKey="invoiceNumber"
-          dataSource={[...rows]}
-          columns={invoiceColumns(money)}
-          pagination={false}
-          scroll={{ x: "max-content", y: 360 }}
-          summary={invoiceTotals(summary, money)}
-        />
-      </Modal>
-    </Card>
-  );
 }
 
 function invoiceColumns(money: (v: number) => string) {
@@ -1010,22 +845,11 @@ export function ReconciliationWorkspace({
   const [graphTileOpen, setGraphTileOpen] = useState<"invoices" | "suppliers" | "graphs" | null>(null);
   const [config, setConfig] = useState<PackConsoleConfig | null>(null);
   const [guidance, setGuidance] = useState<GuidanceIndex>({});
-  /** Which pack this page is showing. Discovered, never assumed — the page
-   *  addressed `"gst"` by name in five places even after it had discovered a
-   *  pack, so any other domain would have had its uploads, its rules and its
-   *  findings all pointed at GST. */
-  const [packId, setPackId] = useState<string | null>(null);
   const [rows, setRows] = useState<Record<string, SourceInvoice[]> | null>(null);
   const [findings, setFindings] = useState<readonly PackFinding[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [surfaces, setSurfaces] = useState<readonly PackImportSurface[]>([]);
   const [packInstalled, setPackInstalled] = useState<boolean | null>(null);
-  /** Formats this pack declared that this console cannot read. Named rather
-   *  than dropped: a surface silently missing looks like a pack that forgot
-   *  to declare it. */
-  const [unreadable, setUnreadable] = useState<readonly string[]>([]);
   /** Which filing period the statement, findings and suppliers are narrowed to.
    *  `"all"` is the default, and must behave exactly as the workspace did
    *  before the filter existed. */
@@ -1047,25 +871,13 @@ export function ReconciliationWorkspace({
         }
       }
       setPackInstalled(pack !== undefined);
-      setPackId(pack?.packId ?? null);
       if (!pack) {
-        setSurfaces([]);
         setRows({});
         return;
       }
 
       const declared = await api.packConsole(pack.packId);
       setConfig(declared);
-      // **The pack's own `[[console.imports]]` wins over the built-in
-      // registry** — Plan 111 Slice E. The registry is the fallback for a
-      // pack installed before it declared its files, not the source of truth:
-      // a second domain's upload surfaces must not need a React change, which
-      // is the test this whole plan applies to itself. `unreadableFormats`
-      // reports a declared format this console has no reader for rather than
-      // dropping it silently.
-      const fromPack = surfacesFromConsole(pack.packId, pack.label, declared);
-      setSurfaces(fromPack.length > 0 ? fromPack : pack.imports);
-      setUnreadable(unreadableFormats(declared));
       const specs = sourcesFromConfig(declared);
       if (specs.length === 0) {
         // A pack with no declared reconciliation is not an error — it simply
@@ -1119,22 +931,6 @@ export function ReconciliationWorkspace({
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
-
-  const run = useCallback(async () => {
-    setRunning(true);
-    try {
-      if (packId === null) return;
-      const outcome = await api.reconcilePack(packId);
-      message.success(
-        outcome.found === 0 ? "Reconciliation ran — no rule matched." : `${outcome.found} finding(s).`,
-      );
-      await refresh();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : COPY.runFailed);
-    } finally {
-      setRunning(false);
-    }
   }, [refresh]);
 
   /** Whatever the installed pack declares — empty for a pack that declares no
@@ -1267,20 +1063,6 @@ export function ReconciliationWorkspace({
 
       {truncated && <Alert type="warning" showIcon message={COPY.truncated} />}
 
-      {/* **A declared format this console cannot read is named, not dropped.**
-          A surface that silently disappears looks like a pack that forgot to
-          declare it; naming the format tells an operator exactly which line of
-          `pack.toml` to fix, or that this console build is older than the pack
-          it is serving. */}
-      {unreadable.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          message={COPY.unreadable}
-          description={unreadable.join(", ")}
-        />
-      )}
-
       {/* **The period filter, placed where the truncated alert tells the CA to
           narrow the period.** One filing period at a time is how a CA works,
           and a statement mixing July and August is the failure the filter
@@ -1309,45 +1091,6 @@ export function ReconciliationWorkspace({
       )}
 
       <div>
-        <Title level={5}>{COPY.step1}</Title>
-        <Row gutter={[16, 16]}>
-          {sources.map((source) => (
-            <Col xs={24} md={8} key={source.key}>
-              <SourceCard
-                spec={source}
-                rows={rows[source.key] ?? []}
-                surface={surfaces.find((s) => s.key === source.surfaceKey)}
-                onImported={() => void refresh()}
-                money={money}
-                packId={packId ?? ""}
-              />
-            </Col>
-          ))}
-        </Row>
-      </div>
-
-      <div>
-        <Title level={5}>{COPY.step2}</Title>
-        <Space wrap>
-          <Button type="primary" icon={<SyncOutlined spin={running} />} loading={running} onClick={() => void run()}>
-            {running ? COPY.running : findings.length > 0 ? COPY.runAgain : COPY.run}
-          </Button>
-          <Button icon={<DownloadOutlined />} disabled={statement.items.length === 0} onClick={download}>
-            {statement.items.length === 0 ? COPY.nothingToExport : COPY.exportCsv}
-          </Button>
-          <Button onClick={onReview}>{COPY.openInReview}</Button>
-          <Button size="small" icon={<QuestionCircleOutlined />} onClick={() => setRulesOpen(true)}>
-            {COPY.rulesTrigger}
-          </Button>
-        </Space>
-        <div style={{ marginTop: 6 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {COPY.runHint}
-          </Text>
-        </div>
-      </div>
-
-      <div>
         <Title level={5}>
           <Space size={4}>
             {COPY.step3}
@@ -1356,6 +1099,19 @@ export function ReconciliationWorkspace({
             </Button>
           </Space>
         </Title>
+        {/* **Read-only actions, not workflow steps — Plan 120 Slice E.**
+            Uploading and running are reco-now's job now; what is left here is
+            exporting and reading what the last real upload, from wherever it
+            came from, already produced. */}
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Button icon={<DownloadOutlined />} disabled={statement.items.length === 0} onClick={download}>
+            {statement.items.length === 0 ? COPY.nothingToExport : COPY.exportCsv}
+          </Button>
+          <Button onClick={onReview}>{COPY.openInReview}</Button>
+          <Button size="small" icon={<QuestionCircleOutlined />} onClick={() => setRulesOpen(true)}>
+            {COPY.rulesTrigger}
+          </Button>
+        </Space>
         <StatementPanel statement={statement} measures={measures} money={money} />
       </div>
 

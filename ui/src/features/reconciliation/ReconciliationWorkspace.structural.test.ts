@@ -1,24 +1,33 @@
 import { describe, expect, it } from "vitest";
 import source from "./ReconciliationWorkspace.tsx?raw";
 
-/** The "16 invoices" figure on a source card used to be a plain `<Text>`: a
- *  number with nothing behind it. It is now a button that opens the invoices
- *  themselves. A structural test, because `SourceCard` is not exported and the
- *  page only renders against a real graph — the same `?raw` technique
- *  `ReviewQueue.structural.test.ts` established, for the same reason: a unit
- *  test of the visible output cannot tell a real modal from a figure that
- *  happens to agree with it. */
+/** Plan 120 Slice E — reco-now is the only place upload and manual
+ *  reconciliation-running happen now; this page stays a *read-only*
+ *  statement view over whatever is already in the graph. Structural, for
+ *  the same reason every other test in this file is: the page only
+ *  renders meaningfully against a real backend, so a unit render cannot
+ *  prove an upload control was never mounted — its absence from the
+ *  source is the only thing a test can actually pin. */
+describe("this page offers no way to upload or manually run reconciliation", () => {
+  it("has no upload surface — reco-now owns that workflow", () => {
+    expect(source).not.toMatch(/Upload\.Dragger/);
+    expect(source).not.toMatch(/importThroughSurface/);
+  });
 
-/** C1 — the success toast names the graph source (`gst-gstr2b-2025-07`), not
- *  just the counts, so a CA can match the worksheet to the imported source.
- *  Structural, because `handle` only runs against a real upload and the
- *  visible message is a toast no unit test renders. */
-describe("an upload names where it landed", () => {
-  it("tells the CA the source name alongside the counts", () => {
-    const handle = source.match(/const outcome = await importThroughSurface[\s\S]*?onImported\(\)/)?.[0];
-    expect(handle).toBeDefined();
-    expect(handle).toMatch(/message\.success/);
-    expect(handle).toMatch(/outcome\.source/);
+  it("has no manual run trigger — reco-now already triggers it automatically on upload", () => {
+    expect(source).not.toMatch(/api\.reconcilePack/);
+    expect(source).not.toMatch(/SyncOutlined/);
+  });
+
+  it("still refreshes from the graph on mount, so the statement is never empty just because nobody clicked a button here", () => {
+    expect(source).toMatch(/void refresh\(\)/);
+    expect(source).toMatch(/api\.sparql\(/);
+  });
+
+  it("keeps the read-only actions a run-free page still needs: export, open in review, and what the rules are", () => {
+    expect(source).toMatch(/exportCsv/);
+    expect(source).toMatch(/openInReview/);
+    expect(source).toMatch(/rulesTrigger/);
   });
 });
 
@@ -36,33 +45,15 @@ describe("the GST period filter narrows the workspace", () => {
   });
 });
 
-describe("a source card's invoice count opens the invoices behind it", () => {
-  it("renders the count as a trigger, not a plain figure", () => {
-    expect(source).toMatch(/type="link"/);
-    expect(source).toMatch(/setInvoiceOpen\(true\)/);
-  });
-
-  it("opens the source's own rows in a Modal table", () => {
-    expect(source).toMatch(/<Modal/);
-    expect(source).toMatch(/open=\{invoiceOpen\}/);
-    expect(source).toMatch(/dataSource=\{\[\.\.\.rows\]\}/);
-    expect(source).toMatch(/columns=\{invoiceColumns\(money\)\}/);
-  });
-
-  it("keeps the taxable figure out of the trigger", () => {
-    const trigger = source.match(
-      /type="link"[\s\S]*?setInvoiceOpen\(true\)/,
-    )?.[0];
-    expect(trigger).toBeDefined();
-    expect(trigger).not.toMatch(/taxable/);
-  });
-});
-
-/** The invoice popup is a working paper a CA reads, not a raw dump: head-wise
- *  columns because ITC is claimed head by head, a scroll rather than pages
- *  because a total belongs under its invoices, and a totals row because a
- *  table of ₹ values that does not total them is not a table of ₹ values. */
-describe("the invoices behind a source card read head-wise, scrolled, and totalled", () => {
+/** The invoice popup behind a "what the graph knows" tile is a working paper
+ *  a CA reads, not a raw dump: head-wise columns because ITC is claimed head
+ *  by head, a scroll rather than pages because a total belongs under its
+ *  invoices, and a totals row because a table of ₹ values that does not
+ *  total them is not a table of ₹ values. Plan 120 Slice E moved this off a
+ *  per-source upload card and onto the graph-tile modal (`InvoiceRecordsModal`)
+ *  — `invoiceColumns`/`invoiceTotals` themselves are unchanged, reused by the
+ *  new caller exactly as the old one used them. */
+describe("the invoices behind a graph tile read head-wise, scrolled, and totalled", () => {
   it("shows the tax split into heads, not one lump", () => {
     const columns = source.match(/function invoiceColumns[\s\S]*?\n\}/)?.[0];
     expect(columns).toBeDefined();
@@ -72,12 +63,12 @@ describe("the invoices behind a source card read head-wise, scrolled, and totall
     expect(columns).toMatch(/"Cess"/);
   });
 
-  it("scrolls the table instead of paging it, and totals the source's own rows", () => {
-    const modal = source.match(/<Modal[\s\S]*?<\/Modal>/)?.[0];
+  it("scrolls the table instead of paging it, and totals every source's rows together", () => {
+    const modal = source.match(/function InvoiceRecordsModal[\s\S]*?\n\}\n\n(?=function |export function)/)?.[0];
     expect(modal).toBeDefined();
     expect(modal).toMatch(/pagination=\{false\}/);
-    expect(modal).toMatch(/scroll=\{\{ x: "max-content", y: 360 \}\}/);
-    expect(modal).toMatch(/summary=\{invoiceTotals\(summary, money\)\}/);
+    expect(modal).toMatch(/scroll=\{\{ x: "max-content", y: 320 \}\}/);
+    expect(modal).toMatch(/summary=\{invoiceTotals\(sourceSummary\(flat\), money, 1, 6\)\}/);
   });
 
   it("totals every head the columns show", () => {
@@ -107,7 +98,7 @@ describe("the statement section opens an explanation of how its figures arise", 
   });
 });
 
-describe("the run-the-rules section opens each registered rule", () => {
+describe("the read-only actions toolbar opens each registered rule", () => {
   it("fetches the registered rules and opens them from the section", () => {
     expect(source).toMatch(/setRulesOpen\(true\)/);
     expect(source).toMatch(/rulesOpen/);
