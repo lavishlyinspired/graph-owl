@@ -85,6 +85,20 @@ gst:PaymentEvent    rdf:type gst:Class ; gst:label "Payment event" .
 # check and still not be claimable, because the goods had not arrived.
 gst:GoodsReceipt    rdf:type gst:Class ; gst:label "Goods or services receipt event" .
 
+# **A filing period as its own subject, not only the `gst:period` literal
+# every fact below already carries — Plan 107 Slice 1.** Before this class,
+# "what changed between April and May" had no node a query could start
+# from; every such question filtered `gst:period` per fact, by hand, per
+# query. `gst:period` itself is untouched by this addition (a direct
+# decision, not an oversight): the literal stays exactly where it was,
+# and `gst:belongsToPeriod` (below) is purely additive alongside it,
+# because superseding it would touch every rule already binding `?period`
+# as evidence (`pack.toml`'s `GstinTransposition` at minimum) for a
+# benefit ("no drift between the two") this walking-skeleton slice has not
+# yet earned. One instance per distinct period value already present in
+# the fixtures — see `fixtures/filing-periods.ttl`.
+gst:FilingPeriod    rdf:type gst:Class ; gst:label "Filing period" .
+
 gst:supplierGstin rdf:type gst:Property ; gst:label "supplier GSTIN" .
 gst:invoiceNumber rdf:type gst:Property ; gst:label "invoice number" .
 
@@ -155,6 +169,14 @@ gst:amount        rdf:type gst:Property ; gst:label "amount" .
 # Ontology Builder to represent it precisely, not solved here by inventing a
 # second, non-standard way to say "this property has more than one shape".
 gst:issuedBy      rdf:type owl:ObjectProperty ; rdfs:domain gst:PurchaseInvoice ; rdfs:range gst:Supplier ; gst:label "issued by" .
+
+# **The edge `gst:FilingPeriod` exists for — Plan 107 Slice 1.** `gst:period`
+# also appears on `Gstr1Filing` and `Gstr2bStatement` (the same multi-domain
+# shape `issuedBy`'s comment above already documents as a known, accepted
+# limitation of this encoding); `PurchaseInvoice` is this property's single
+# declared domain, matching the pattern already accepted there, not a claim
+# that the other two do not use it too.
+gst:belongsToPeriod rdf:type owl:ObjectProperty ; rdfs:domain gst:PurchaseInvoice ; rdfs:range gst:FilingPeriod ; gst:label "belongs to period" .
 
 # The canonical-entity edges — Plan 109 Slice 2. All three point *down*, from
 # the canonical `gst:Invoice` to the per-source evidence record it was built

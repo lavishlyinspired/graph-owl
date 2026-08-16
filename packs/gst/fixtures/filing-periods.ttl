@@ -1,0 +1,34 @@
+# `gst:FilingPeriod` instances — Plan 107 Slice 1
+# (`plans/107-filing-period.md`), the walking skeleton that gives period-
+# scoped questions a node a query can traverse to, instead of filtering
+# `gst:period` on every fact by hand.
+#
+# Exactly one instance per distinct `gst:period` value already present
+# across every other fixture in this pack — not invented, counted:
+#
+#   grep -oh 'gst:period[^"]*"[0-9-]*"' fixtures/*.ttl \
+#     | grep -o '"[0-9-]*"' | sort -u
+#   "2020-07"
+#   "2026-07"
+#   "2026-08"
+#
+# Each instance carries its own `gst:period` literal as its identifying
+# key — the same predicate the facts pointing at it already carry, not a
+# second, invented label property. `period-summary.sparql` binds a caller-
+# supplied period by this subject's own IRI directly (`VALUES ?period
+# { <{{period}}> }`, `run_pack_query`'s `is_safe_iri` requires an absolute
+# IRI, not a bare literal), so the instance name itself — `period-YYYY-MM`,
+# matching the hyphenated-local-name convention every other fixture already
+# uses (`g1filing-...`, `receipt-...`) — is what a caller needs to know.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:period-2020-07 rdf:type gst:FilingPeriod ;
+    gst:period "2020-07" .
+
+gst:period-2026-07 rdf:type gst:FilingPeriod ;
+    gst:period "2026-07" .
+
+gst:period-2026-08 rdf:type gst:FilingPeriod ;
+    gst:period "2026-08" .

@@ -34,6 +34,7 @@ gst:recipient-self rdf:type gst:Recipient .
 
 gst:g2bstatement-2026-08 rdf:type gst:Gstr2bStatement ;
     gst:period       "2026-08" ;
+    gst:belongsToPeriod gst:period-2026-08 ;
     gst:generatedFor gst:recipient-self .
 
 gst:2b-INV-1010 rdf:type gst:Gstr2bInvoice ;

@@ -75,6 +75,14 @@ source = "gst-gstr1"
 path = "fixtures/goods-receipt.ttl"
 source = "gst-goods-receipt"
 
+# Plan 107 Slice 1 (`plans/107-filing-period.md`). One `gst:FilingPeriod`
+# instance per distinct `gst:period` value already used across every
+# other fixture above — see the file's own comment for how that set was
+# counted, not invented.
+[[documents]]
+path = "fixtures/filing-periods.ttl"
+source = "gst-filing-periods"
+
 # **The identical strategies the hospitality pack uses, over different
 # fields.** `normalized` there matched a phone number; here it matches an
 # invoice number. `composite` pairs it with a date window, because two systems
@@ -205,6 +213,14 @@ value_type = 0
 
 [[predicates]]
 name = "generatedFor"
+value_type = 0
+
+# The edge `gst:FilingPeriod` exists for — Plan 107 Slice 1
+# (`plans/107-filing-period.md`). Points at a `FilingPeriod` subject,
+# traversable the way `issuedBy`/`onInvoice` already are; the pre-existing
+# `period` predicate above is untouched and stays a plain literal.
+[[predicates]]
+name = "belongsToPeriod"
 value_type = 0
 
 [[predicates]]
@@ -784,6 +800,16 @@ label = "Totals agree, tax heads do not (IGST against CGST+SGST)"
 name = "provision-in-force"
 path = "queries/provision-in-force.sparql"
 label = "The Rule 36(4)/Section 16(2)(aa) provision in force on one invoice's own date"
+
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Plan 107 Slice 1
+# (`plans/107-filing-period.md`), the walking skeleton for period-scoped
+# questions: "everything in period X", reached by traversing
+# `belongsToPeriod` rather than filtering `gst:period` per fact.
+[[queries]]
+name = "period-summary"
+path = "queries/period-summary.sparql"
+label = "Everything belonging to one filing period"
 
 [console]
 

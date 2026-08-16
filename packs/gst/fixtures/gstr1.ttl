@@ -75,26 +75,31 @@ gst:supplier-33AAGCV2109L1ZH rdf:type gst:Supplier ;
 # and the same first supplier's July 2020 filing (the historical pair).
 gst:g1filing-27AABCU9603R1ZM-2026-07 rdf:type gst:Gstr1Filing ;
     gst:period    "2026-07" ;
+    gst:belongsToPeriod gst:period-2026-07 ;
     gst:filedDate "2026-08-11" ;
     gst:filedBy   gst:supplier-27AABCU9603R1ZM .
 
 gst:g1filing-29AACCG0527D1Z8-2026-07 rdf:type gst:Gstr1Filing ;
     gst:period    "2026-07" ;
+    gst:belongsToPeriod gst:period-2026-07 ;
     gst:filedDate "2026-08-18" ;
     gst:filedBy   gst:supplier-29AACCG0527D1Z8 .
 
 gst:g1filing-33AAGCV2109L1ZH-2026-07 rdf:type gst:Gstr1Filing ;
     gst:period    "2026-07" ;
+    gst:belongsToPeriod gst:period-2026-07 ;
     gst:filedDate "2026-08-11" ;
     gst:filedBy   gst:supplier-33AAGCV2109L1ZH .
 
 gst:g1filing-27AABCU9603R1ZM-2026-08 rdf:type gst:Gstr1Filing ;
     gst:period    "2026-08" ;
+    gst:belongsToPeriod gst:period-2026-08 ;
     gst:filedDate "2026-09-09" ;
     gst:filedBy   gst:supplier-27AABCU9603R1ZM .
 
 gst:g1filing-27AABCU9603R1ZM-2020-07 rdf:type gst:Gstr1Filing ;
     gst:period    "2020-07" ;
+    gst:belongsToPeriod gst:period-2020-07 ;
     gst:filedDate "2020-08-11" ;
     gst:filedBy   gst:supplier-27AABCU9603R1ZM .
 

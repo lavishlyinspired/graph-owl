@@ -1,0 +1,51 @@
+# Every subject that `belongsToPeriod` one `gst:FilingPeriod` — a direct
+# traversal, not a per-fact filter on the pre-existing `gst:period`
+# literal. A direct lookup for the `run_pack_query` MCP tool, not a
+# detector, the same posture `provision-in-force.sparql` already
+# established (Epic 105 P106 Slice 4a). Plan 107 Slice 1
+# (`plans/107-filing-period.md`), the walking skeleton.
+#
+# **The `period` placeholder below is the `FilingPeriod` subject's own
+# IRI, not a bare period string** — bound the same way
+# `provision-in-force.sparql` binds its own invoice placeholder: as an
+# IRI inside `VALUES`, not a literal.
+#
+# CAUTION for whoever edits this file: `placeholder_names` (the
+# `graph-owl-api` function that scans a registered query for a caller's
+# required bindings) scans the *whole* query text, comments included —
+# writing a placeholder's double-brace form in a comment, even to name
+# a *different* query's placeholder, would silently demand that binding
+# here too. Avoid double braces in this file's prose entirely; say
+# "the period placeholder" instead of writing it out.
+#
+# Found by running the RED test, not assumed: `Catalog::run_pack_query`'s
+# `substitute_pack_query_bindings` requires every binding to be
+# `is_safe_iri`-safe, which requires an absolute-IRI scheme
+# (`has_iri_scheme`) — a bare literal like `"2020-07"` has none and is
+# rejected with a `400` before the query ever runs. A caller names
+# `https://graph-owl.dev/packs/gst#period-2020-07` (see
+# `fixtures/filing-periods.ttl`'s own naming convention), the same way a
+# `provision-in-force.sparql` caller names an invoice by its IRI rather
+# than its invoice number.
+#
+# A period IRI naming no `FilingPeriod` that exists (or one that exists
+# but nothing points at) returns an empty row set — `run_pack_query`'s
+# own established absent-vs-empty convention, not a `NotFound` error.
+#
+# **The pre-existing `gst:period` literal on every fact is untouched by
+# this query and by this slice.** `belongsToPeriod` is purely additive
+# alongside it — a direct decision, not an oversight — so a query
+# binding `?period` as a literal directly (`pack.toml`'s
+# `GstinTransposition` rule's own evidence shape) keeps working exactly
+# as it did before this file existed.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?subject ?type WHERE {
+  VALUES ?period { <{{period}}> }
+  GRAPH ?g {
+    ?subject gst:belongsToPeriod ?period ;
+             a ?type .
+  }
+}
+ORDER BY ?subject
