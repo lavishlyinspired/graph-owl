@@ -183,12 +183,12 @@ export function evidenceGraphIsJustTheSeed(graph: EvidenceGraph): boolean {
  *  whole in one call, unlike the asset explorer's click-to-reveal picture —
  *  marking a node `expandable` here would draw a ring promising an
  *  interaction nothing behind it honours. */
-/** A node's own resolved IRI, read the way a reviewer reads any other term
- *  in this file — falling back to the bare id when the namespace never
- *  resolved. Shared between the rendered picture and the sources list below
- *  it, so both name the same node the same way. */
+/** A node's display name — its own pack-declared label first (Plan 120
+ *  Slice C / Plan 121), then its resolved IRI, then the bare id when the
+ *  namespace never resolved. Shared between the rendered picture and the
+ *  sources list below it, so both name the same node the same way. */
 function nodeLabel(node: EvidenceGraphNode): string {
-  return node.iri ? displayTerm(node.iri) : node.id;
+  return node.label ?? (node.iri ? displayTerm(node.iri) : node.id);
 }
 
 export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Picture {

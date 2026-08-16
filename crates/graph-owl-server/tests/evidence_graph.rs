@@ -941,3 +941,128 @@ async fn a_pack_that_declares_no_blocking_still_serves_the_evidence_graph() {
         "{graph}"
     );
 }
+
+/// A purchase-register invoice pointing at a real `gst:Supplier` node that
+/// also carries `gst:supplierName` — the literal `packs/gst/pack.toml`'s
+/// `[console.labels]` declares for the `Supplier` class (Plan 121 Slice 1).
+/// A separate seed from `seed_invoice_with_a_real_supplier_node`, which
+/// deliberately has no name, so that test keeps proving the `null`
+/// no-declared-label path rather than silently gaining one.
+async fn seed_invoice_with_a_named_supplier(app: &axum::Router) {
+    // `declaredBy: "pack:gst"` — the same shape `loader.py` sends
+    // (`{"iri": manifest.namespace, "declaredBy": f"pack:{manifest.id}"}`),
+    // not the default-to-caller-identity a bare `{"iri": ...}` falls back to.
+    // Label resolution reads this back to find which pack's `[console.labels]`
+    // owns a namespace code, so a test that skips it would prove nothing
+    // about the real pack-install path.
+    let (status, _) = json(
+        app,
+        "POST",
+        "/namespaces",
+        serde_json::json!({"iri": "https://graph-owl.dev/packs/gst#", "declaredBy": "pack:gst"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "namespace declare");
+
+    for (name, value_type) in [
+        ("supplierGstin", 1),
+        ("supplierName", 1),
+        ("invoiceNumber", 1),
+        ("taxAmount", 1),
+        ("issuedBy", 0),
+    ] {
+        let (status, body) = json(
+            app,
+            "POST",
+            "/predicates",
+            serde_json::json!({"namespace": 1024, "name": name, "valueType": value_type, "many": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "predicate {name}: {body}");
+    }
+
+    let turtle = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:supplier-29AACCG0527D1Z8 rdf:type gst:Supplier ;
+            gst:supplierGstin "29AACCG0527D1Z8" ;
+            gst:supplierName "Nimbus Freight Logistics" .
+
+        gst:p-INV-1003 rdf:type gst:PurchaseInvoice ;
+            gst:issuedBy gst:supplier-29AACCG0527D1Z8 ;
+            gst:invoiceNumber "INV-1003" ;
+            gst:taxAmount "45000.00" .
+    "#;
+    let (status, body) = call(
+        app,
+        "POST",
+        "/graph/import/rdf?source=gst-purchase-register&format=turtle",
+        "text/turtle",
+        turtle.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import: {body}");
+}
+
+/// Plan 121 Slice 1 — a node the pack declares a `[console.labels]` predicate
+/// for shows that literal, not its bare id, through the real HTTP layer.
+/// Uses `packs_dir()`'s copy of the real, shipped `packs/gst/pack.toml`
+/// deliberately — a synthetic manifest in this test would prove the
+/// mechanism reads *some* config, not that it reads the one this deployment
+/// actually ships.
+#[tokio::test]
+async fn a_node_with_a_declared_label_predicate_shows_its_literal_not_its_bare_id() {
+    packs_dir();
+    let (app, _db, _url) = test_app().await;
+    seed_invoice_with_a_named_supplier(&app).await;
+    register_and_run_missing_in_gstr2b(&app).await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings.as_array().expect("array")[0]["id"]
+        .as_str()
+        .expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let nodes = graph["nodes"].as_array().expect("nodes array");
+    let supplier = nodes
+        .iter()
+        .find(|n| n["id"] == "supplier-29AACCG0527D1Z8")
+        .unwrap_or_else(|| panic!("supplier node present: {nodes:?}"));
+    assert_eq!(
+        supplier["label"],
+        serde_json::json!("Nimbus Freight Logistics"),
+        "a Supplier node must show the literal packs/gst/pack.toml's \
+         [console.labels] declares for its class: {supplier:?}"
+    );
+
+    // The negative case: the invoice node's own class (`PurchaseInvoice`) has
+    // no `[console.labels]` entry at all, so it must degrade to `null` rather
+    // than fail the whole picture or fabricate a label from nothing.
+    let invoice = nodes
+        .iter()
+        .find(|n| n["id"] == "p-INV-1003")
+        .unwrap_or_else(|| panic!("invoice node present: {nodes:?}"));
+    assert_eq!(
+        invoice["label"],
+        serde_json::Value::Null,
+        "a class with no declared label predicate must degrade to null, not \
+         invent one: {invoice:?}"
+    );
+}

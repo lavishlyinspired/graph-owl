@@ -820,6 +820,15 @@ measures = [
   { name = "taxAmount", label = "Total tax", total = true },
 ]
 
+# **Which literal to show wherever the console renders a bare subject** —
+# Plan 120 Slice C / Plan 121. Keyed by the class `rdf:type` resolves to
+# (matching `Catalog::node_semantic_type`'s own bare local name, e.g.
+# "Supplier", never a prefixed curie), valued by the predicate's own local
+# name in this pack's namespace. Reuses `supplierName`, already declared
+# above for `console.reconciliation.fields.party_name` — no new predicate.
+[console.labels]
+Supplier = "supplierName"
+
 # **Which predicate carries each thing the page needs**, so the console builds
 # its query from the pack's own vocabulary instead of `gst:` compiled into
 # TypeScript. A healthcare pack names `claimNumber`/`memberId`; a banking one

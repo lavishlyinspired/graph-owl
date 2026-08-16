@@ -9227,6 +9227,43 @@ struct EvidenceGraphQuery {
 /// is queue data a reviewer needs to see to do the job, and this is a second
 /// view onto the same finding, not a new privilege.
 ///
+/// A node's own display label, resolved through whichever pack declared its
+/// namespace — Plan 120 Slice C / Plan 121.
+///
+/// **`namespaces` and `console_cache` are computed once per request and
+/// threaded through**, not re-fetched per node: most evidence graphs are
+/// single-pack, and re-reading the same `pack.toml` (or re-querying the
+/// namespace registry) for every node in a 1,000-node walk would be wasted
+/// work for an answer that cannot change mid-request.
+///
+/// Degrades to `None` at every step rather than erroring — no
+/// `semantic_type` (an untyped subject), no namespace registration, no pack
+/// owning that namespace, no `[console.labels]` section, no entry for this
+/// class, no literal on the subject itself. A missing label is the ordinary
+/// case for a class no pack has declared one for, the same posture
+/// [`Catalog::node_semantic_type`] and [`Catalog::node_sources`] already
+/// have for their own lookups in this same handler.
+async fn resolve_node_label(
+    catalog: &Catalog,
+    namespaces: &[graph_owl_api::NamespaceDef],
+    console_cache: &mut std::collections::HashMap<String, Option<serde_json::Value>>,
+    sid: &graph_owl_core::flake::Sid,
+    semantic_type: Option<&str>,
+) -> Option<String> {
+    let class = semantic_type?;
+    let pack_id = namespaces
+        .iter()
+        .find(|ns| ns.code == sid.namespace_code)
+        .and_then(|ns| ns.declared_by.strip_prefix("pack:"))?
+        .to_string();
+    let console = console_cache.entry(pack_id.clone()).or_insert_with(|| {
+        pack_install::read_console_config(&pack_install::packs_base_dir(), &pack_id)
+    });
+    let predicate_name = console.as_ref()?.get("labels")?.get(class)?.as_str()?;
+    let predicate = graph_owl_core::flake::Sid::new(sid.namespace_code, predicate_name);
+    catalog.node_literal(sid, &predicate).await.unwrap_or(None)
+}
+
 /// A node here is any traversal-reachable subject, not necessarily a catalog
 /// asset — a finding's subject belongs to whichever pack raised it — so
 /// unlike [`asset_graph`] nodes carry their resolved IRI where one exists
@@ -9267,6 +9304,11 @@ async fn finding_evidence_graph(
     // budget that keeps that loop bounded here too. A source lookup that
     // fails must not take the whole picture down; it degrades to "sources
     // unknown for this node" rather than a 500 over a provenance question.
+    // Plan 120 Slice C / Plan 121: computed once for the whole request, not
+    // per node — see `resolve_node_label`'s own doc comment for why.
+    let namespaces = catalog.namespaces().await.unwrap_or_default();
+    let mut console_cache = std::collections::HashMap::new();
+
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     for sid in &graph.nodes {
         let sources = catalog.node_sources(sid).await.unwrap_or_default();
@@ -9277,11 +9319,20 @@ async fn finding_evidence_graph(
         // lookup failure is a missing fact, not a reason to fail the whole
         // picture.
         let semantic_type = catalog.node_semantic_type(sid).await.unwrap_or_default();
+        let label = resolve_node_label(
+            &catalog,
+            &namespaces,
+            &mut console_cache,
+            sid,
+            semantic_type.as_deref(),
+        )
+        .await;
         nodes.push(json!({
             "id": sid.id,
             "iri": sid.to_iri(),
             "sources": sources,
             "semanticType": semantic_type,
+            "label": label,
         }));
     }
 

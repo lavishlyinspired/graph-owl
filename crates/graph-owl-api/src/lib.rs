@@ -4331,6 +4331,59 @@ impl Catalog {
         Ok(None)
     }
 
+    /// A subject's own literal value for one predicate — Plan 120 Slice C /
+    /// Plan 121, the mechanism a pack-declared `[console.labels]` entry
+    /// resolves through. Same query shape as [`node_semantic_type`], with
+    /// `p` also bound, and the same "first wins, nothing new persisted"
+    /// posture: a subject asserting the predicate more than once (which
+    /// `many = true` predicates allow) has no ordering this graph promises,
+    /// so this is a display convenience, not a claim about which value is
+    /// canonical.
+    ///
+    /// **Only [`FlakeValue::String`] counts.** A predicate declared as a
+    /// label is expected to hold prose a reviewer reads, not a number, a
+    /// reference or a timestamp — a non-string match is treated the same as
+    /// no match, so a caller cannot accidentally render a `Ref`'s raw debug
+    /// form as if it were somebody's name.
+    ///
+    /// `None`, never an error, when the subject has no such flake — the same
+    /// degrade-not-fail posture [`node_semantic_type`] already has, since a
+    /// missing label is the ordinary case for a class no pack has declared
+    /// one for.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or the read fails.
+    ///
+    /// [`node_semantic_type`]: Self::node_semantic_type
+    pub async fn node_literal(
+        &self,
+        sid: &Sid,
+        predicate: &Sid,
+    ) -> Result<Option<String>, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(sid.clone()),
+                p: Some(predicate.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        for flake in &flakes {
+            if let graph_owl_core::flake::FlakeValue::String(value) = &flake.o {
+                return Ok(Some(value.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Which subject a finding is about, and which pack raised it — Plan 111
     /// Slice F.
     ///
@@ -45122,6 +45175,161 @@ mod node_semantic_type_tests {
                 .is_err(),
             "a missing graph engine must be a named error, not an empty answer \
              indistinguishable from 'this node genuinely has no type'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod node_literal_tests {
+    //! `Catalog::node_literal` — Plan 120 Slice C / Plan 121's resolution
+    //! primitive: a subject's own literal value for one predicate, the way a
+    //! pack-declared `[console.labels]` entry is read.
+
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+    use super::*;
+    use projection_isolation_tests::RecordingGraph;
+
+    fn imported(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    #[tokio::test]
+    async fn a_subject_with_the_predicate_reports_its_string_value() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("supplier-29AACCG0527D1Z8");
+        let predicate = Sid::dsc("supplierName");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: predicate.clone(),
+                o: FlakeValue::String("Nimbus Freight Logistics".to_string()),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let label = catalog
+            .node_literal(&subject, &predicate)
+            .await
+            .expect("ok");
+        assert_eq!(label, Some("Nimbus Freight Logistics".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_subject_with_no_such_predicate_reports_none_not_an_error() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("supplier-29AACCG0527D1Z8");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: Sid::dsc("supplierGstin"),
+                o: FlakeValue::String("29AACCG0527D1Z8".to_string()),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let label = catalog
+            .node_literal(&subject, &Sid::dsc("supplierName"))
+            .await
+            .expect("ok");
+        assert_eq!(
+            label, None,
+            "a predicate the subject never asserted is a missing label, not an error"
+        );
+    }
+
+    /// The dangerous direction to get wrong, per this project's own recorded
+    /// mutation-testing lesson: a `Ref` value matching the predicate must not
+    /// render as if it were a string — `describeEvidenceEdge`-style debug
+    /// text is not a person's name.
+    #[tokio::test]
+    async fn a_non_string_value_on_the_predicate_does_not_count_as_a_match() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("supplier-29AACCG0527D1Z8");
+        let predicate = Sid::dsc("supplierName");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: predicate.clone(),
+                o: FlakeValue::Ref(Sid::dsc("not-a-name")),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let label = catalog
+            .node_literal(&subject, &predicate)
+            .await
+            .expect("ok");
+        assert_eq!(
+            label, None,
+            "a Ref value must not be rendered as a string label"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_subjects_value_does_not_leak_in() {
+        let graph = RecordingGraph::working();
+        let predicate = Sid::dsc("supplierName");
+        graph
+            .assert_flakes(&[Flake {
+                s: Sid::dsc("some-other-supplier"),
+                p: predicate.clone(),
+                o: FlakeValue::String("Wrong Supplier".to_string()),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let label = catalog
+            .node_literal(&Sid::dsc("supplier-29AACCG0527D1Z8"), &predicate)
+            .await
+            .expect("ok");
+        assert_eq!(
+            label, None,
+            "an unrelated subject's own value must not leak in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_graph_engine_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(
+            catalog
+                .node_literal(&Sid::dsc("anything"), &Sid::dsc("supplierName"))
+                .await
+                .is_err(),
+            "a missing graph engine must be a named error, not an empty answer \
+             indistinguishable from 'this node genuinely has no such literal'"
         );
     }
 }

@@ -645,8 +645,11 @@ export interface PathAnswer {
  *
  *  **`iri`, not `name`/`kind` like {@link GraphNode}.** A finding's subject
  *  can be in any pack's namespace, not only `dsc:`, so there is no catalog
- *  asset to resolve a display name from — the resolved IRI (when the
- *  deployment recognises the namespace) is the only label the server has. */
+ *  asset to resolve a display name from the way `GraphNode.name` can —
+ *  {@link EvidenceGraphNode.label} (Plan 120 Slice C / Plan 121) is a pack's
+ *  own opt-in resolution of one declared literal per class; the raw IRI
+ *  remains the fallback the console already had for a class no pack has
+ *  declared one for. */
 export interface EvidenceGraphNode {
   readonly id: string;
   readonly iri: string | null;
@@ -662,6 +665,12 @@ export interface EvidenceGraphNode {
    *  what the graph canvas colours it by instead. `null` when the subject
    *  has no `rdf:type` assertion, not an error. */
   readonly semanticType: string | null;
+  /** The literal a pack's own `[console.labels]` declares for this node's
+   *  class (e.g. a GST Supplier's `supplierName`), resolved server-side.
+   *  `null` for a class no installed pack has declared a label predicate
+   *  for, or a subject that never asserted that predicate itself — not an
+   *  error, and not a reason to invent a label from nothing. */
+  readonly label: string | null;
 }
 
 export interface EvidenceGraphEdge {
