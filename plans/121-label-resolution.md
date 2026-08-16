@@ -188,7 +188,35 @@ handlers call; wire into `assemble_graph_context`.
 **Done when**: criteria met, verified live — expand a real Supplier's
 neighbourhood in Explore and confirm every labeled node reads a name.
 
-### Slice 3: The findings queue's own Subject column shows the resolved label
+### Slice 3 — shipped
+
+`list_findings` now returns `Vec<FindingWithSubjectLabel>` (`#[serde(flatten)]`
+over the unmodified `Finding` domain type, plus `subjectLabel: Option<String>`)
+instead of `Vec<Finding>` directly — a wrapper, not a new field on `Finding`
+itself, since `graph-owl-core` is pure domain/no-I/O and resolving a label
+means reading `[console.labels]` off disk, a presentation concern that
+belongs at the HTTP layer. Per finding, `Sid::from_iri(&finding.subject)`
+(the same parse `Catalog::finding_subject` already does) feeds
+`resolve_node_label`, reused unchanged from Slice 1. Client:
+`PackFinding.subjectLabel?: string | null`; a new `subjectLabelFor(finding)`
+helper in `findingsQueue.tsx` prefers it over `displayTerm(finding.subject)`,
+used by both the queue row's detail line and the evidence panel's headline
+(`toQueueEntry`'s `detail` and the local `subjectLabel` variable — same name,
+different scope, now sharing one resolution instead of two calls to
+`displayTerm`).
+
+Verified: 12/12 `findings.rs` (2 new: a Supplier finding resolves its name;
+an unresolvable subject degrades to null without losing any other field —
+`label`/`governedBy` etc. still present, proving the wrapper didn't drop
+anything), 8/8 `reconcile.rs` and 12/12 `evidence_graph.rs` unaffected,
+77/77 `ui/src/features/review` tests including 2 new `toQueueEntry` cases,
+tsc/eslint clean. Three manual mutation checks (bypassing `subjectLabelFor`
+entirely; bypassing `Sid::from_iri`) all caught, negative-path test
+unaffected by the mutation that only broke the positive path. openapi.json
+diff empty — `/findings`'s response was already unschema'd (no `content`
+under its `200`, matching the untyped precedent Slices 1/2 already used).
+
+### Slice 3 (original scoping, for reference): The findings queue's own Subject column shows the resolved label
 
 **Value**: a reviewer scanning the queue (before opening any finding) reads
 "Nimbus Freight Logistics — SupplierNotFiled", not a raw id.
@@ -207,7 +235,36 @@ resolves to a real Supplier asserts the response carries the resolved name.
 **GREEN/MUTATE/KILL MUTANTS/REFACTOR**: as above.
 **Done when**: criteria met, verified live in the findings queue.
 
-### Slice 4: Prove it against hospitality — the domain-neutrality acceptance example, verbatim
+### Slice 4 — shipped
+
+`[console.labels] Property = "name"`, `Guest = "guestSurname"` added to
+`packs/hospitality/pack.toml` — reusing predicates already declared there,
+no new vocabulary. **Zero Rust or TypeScript changes**, exactly matching
+this pack's own stated acceptance criterion at the top of its file ("zero
+changes to any `.rs` file and zero changes to any `.tsx` file"). Proved with
+one new integration test in `findings.rs` (`real_hospitality_pack` module):
+seeds the real, shipped `packs/hospitality/fixtures/estate.ttl` (read via
+`std::fs::read_to_string`, not hand-copied), records a `hosp:DuplicateGuest`
+finding over `guest-1`, and asserts its evidence-graph node's `label` is
+`"Smith"` — through `GET /findings/{id}/evidence-graph`, the exact same,
+unmodified route Slice 1 built for GST.
+
+**Verified the test is genuine, not vacuous**: temporarily removed the
+`[console.labels]` addition, reran — the test failed (`label: Null`,
+`semanticType: "Guest"`), confirming it actually depends on the
+declaration; restored, reran, green again. 13/13 `findings.rs`, 12/12
+`evidence_graph.rs`, 7/7 `graph_context.rs` — the full set of files this
+mechanism touches across all four slices, run together, all still green.
+No mutation run needed: no new production code path exists to mutate, only
+a declarative config addition exercising a mechanism already mutation-tested
+clean in Slices 1–3.
+
+**Plan 121 complete.** All four slices shipped: the evidence graph, the
+Explore graph view, and the findings queue's own subject column all show a
+pack-declared label instead of a bare id, proven against two unrelated
+domains with the identical, unmodified mechanism.
+
+### Slice 4 (original scoping, for reference): Prove it against hospitality — the domain-neutrality acceptance example, verbatim
 
 **Value**: closes Plan 120's own acceptance example directly: "a hospitality
 subject shows its own declared label the same way, proving the mechanism

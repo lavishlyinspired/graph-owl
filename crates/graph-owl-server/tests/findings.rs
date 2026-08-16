@@ -551,3 +551,171 @@ mod real_gst_pack {
         );
     }
 }
+
+/// Plan 120 Slice C / Plan 121 Slice 4 — the domain-neutrality proof.
+/// Every earlier slice in this mechanism used GST fixtures; this proves the
+/// same, unmodified server code resolves a label for a completely unrelated
+/// domain from nothing but a `pack.toml` declaration — hospitality's own
+/// stated acceptance criterion (`packs/hospitality/pack.toml`'s own header:
+/// "zero changes to any `.rs` file and zero changes to any `.tsx` file").
+mod real_hospitality_pack {
+    use std::path::PathBuf;
+
+    use crate::common::{test_app, token};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use graph_owl_core::finding::{Evidence, Finding};
+    use graph_owl_storage::FindingStore;
+    use graph_owl_storage_postgres::PostgresStorage;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn real_packs_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packs")
+    }
+
+    fn set_packs_dir_to_the_real_one() {
+        unsafe {
+            std::env::set_var("GRAPH_OWL_PACKS_DIR", real_packs_dir());
+        }
+    }
+
+    /// The real, shipped fixture — not a hand-copied subset — so this proves
+    /// the mechanism against the same data `packs/hospitality/pack.toml`
+    /// itself declares under `[[documents]] source = "hospitality-estate"`.
+    fn real_estate_fixture() -> String {
+        std::fs::read_to_string(real_packs_dir().join("hospitality/fixtures/estate.ttl"))
+            .expect("read the real hospitality fixture")
+    }
+
+    async fn seed_the_real_estate_fixture(app: &axum::Router) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "iri": "https://graph-owl.dev/packs/hospitality#",
+                            "declaredBy": "pack:hospitality",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert!(
+            response.status().is_success(),
+            "declare the hospitality namespace"
+        );
+
+        for (name, value_type) in [
+            ("label", 1),
+            ("name", 1),
+            ("guestPhone", 1),
+            ("guestSurname", 1),
+            ("stayedAt", 0),
+            ("bookedBy", 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/predicates")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "namespace": 1024, "name": name,
+                                "valueType": value_type, "many": false,
+                            })
+                            .to_string(),
+                        ))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should be handled");
+            assert!(response.status().is_success(), "declare {name}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graph/import/rdf?source=hospitality-estate&format=turtle")
+                    .header("content-type", "text/turtle")
+                    .body(Body::from(real_estate_fixture()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "import the real hospitality fixture"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_guest_findings_evidence_graph_shows_the_guests_own_surname() {
+        set_packs_dir_to_the_real_one();
+        let (app, _db, url) = test_app().await;
+        seed_the_real_estate_fixture(&app).await;
+
+        let finding = Finding::new(
+            "hospitality",
+            "hosp:DuplicateGuest",
+            "https://graph-owl.dev/packs/hospitality#guest-1",
+            "Two guest records that appear to be the same person",
+            "hosp:GuestRecordPolicy",
+            vec![Evidence {
+                subject: "https://graph-owl.dev/packs/hospitality#guest-1".to_string(),
+                predicate: "1024:guestSurname".to_string(),
+                value: "Smith".to_string(),
+                var: None,
+            }],
+        )
+        .expect("a complete finding");
+        let store = PostgresStorage::connect(&url).await.expect("connect");
+        store.record_finding(&finding).await.expect("record");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/findings/{}/evidence-graph", finding.id))
+                    .header("authorization", format!("Bearer {}", token("system")))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let nodes = body["nodes"].as_array().expect("nodes array");
+        let guest = nodes
+            .iter()
+            .find(|n| n["id"] == "guest-1")
+            .unwrap_or_else(|| panic!("guest-1 node present: {nodes:?}"));
+        assert_eq!(
+            guest["label"],
+            json!("Smith"),
+            "the same, unmodified server code must resolve a hospitality \
+             guest's own surname from nothing but packs/hospitality/pack.toml's \
+             [console.labels] — no GST-specific assumption anywhere in the \
+             mechanism: {guest:?}"
+        );
+    }
+}

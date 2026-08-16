@@ -75,6 +75,15 @@ summary = "Two guest records that appear to be the same person"
 governed_by = "hosp:GuestRecordPolicy"
 
 [console]
+
+# **Plan 120 Slice C / Plan 121 Slice 4 — the domain-neutrality proof for
+# label resolution.** Reuses predicates already declared above (`name`,
+# `guestSurname`) — no new vocabulary, no Rust change, no TSX change, matching
+# this pack's own stated acceptance criterion at the top of this file.
+[console.labels]
+Property = "name"
+Guest = "guestSurname"
+
 [[console.queues]]
 id = "hosp-duplicate-guests"
 label = "Duplicate guests"
