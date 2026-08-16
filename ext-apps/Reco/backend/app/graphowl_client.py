@@ -96,14 +96,20 @@ KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1"}
 #: Row field (main.py's FIELD_LABELS keys) -> `gst:` predicate local
 #: name. Matches `packs/gst/pack.toml`'s `[[predicates]]` and
 #: `ontology.ttl` exactly, as one table, so they cannot drift silently
-#: against each other. `supplier_gstin` is deliberately not here —
-#: `packs/gst`'s own finding queries read it off the *Supplier* subject
-#: (`?supplier gst:supplierGstin ?gstin`), reached via `gst:issuedBy`,
-#: never as a direct literal on the invoice. `rows_to_turtle` asserts it
-#: once, on the Supplier subject.
+#: against each other. `supplier_gstin` and `supplier_name` are
+#: deliberately not here — `packs/gst`'s own finding queries read
+#: `supplierGstin` off the *Supplier* subject (`?supplier
+#: gst:supplierGstin ?gstin`), reached via `gst:issuedBy`, never as a
+#: direct literal on the invoice, and `[console.labels]`
+#: (`packs/gst/pack.toml`, Plan 120 Slice C / Plan 121) plus
+#: `ReconciliationWorkspace.tsx`'s own party-name query read
+#: `supplierName` the identical way. Both `rows_to_turtle` asserts once,
+#: on the Supplier subject — this was found the hard way, 16 August
+#: 2026: `supplier_name` sat in this table until then, so a real
+#: Supplier subject's evidence-graph node resolved its class correctly
+#: but never its name, because the literal was on the invoice instead.
 PREDICATES: dict[str, str] = {
     "invoice_no": "invoiceNumber",
-    "supplier_name": "supplierName",
     "taxable": "taxableValue",
     "invoice_date": "invoiceDate",
     "place_of_supply": "placeOfSupply",
@@ -265,11 +271,16 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
 
         # The Supplier subject — packs/gst's finding queries read the GSTIN
         # off it (`?supplier gst:supplierGstin ?gstin`), not off the
-        # invoice directly.
-        lines.append(
-            f"<{supplier}>\n    a gst:Supplier ;\n    gst:supplierGstin "
-            f"{_turtle_string(gstin_raw)} .\n"
-        )
+        # invoice directly, and [console.labels]/ReconciliationWorkspace.tsx
+        # read the display name the same way. `supplier_name` is optional
+        # (a row missing it is still a real supplier, just an unnamed one)
+        # — omitted rather than written as a blank literal, matching every
+        # other optional field's own rule.
+        supplier_triples = ["a gst:Supplier", f"gst:supplierGstin {_turtle_string(gstin_raw)}"]
+        supplier_name_raw = row.get("supplier_name")
+        if _is_present(supplier_name_raw):
+            supplier_triples.append(f"gst:supplierName {_turtle_string(supplier_name_raw)}")
+        lines.append(f"<{supplier}>\n    " + " ;\n    ".join(supplier_triples) + " .\n")
 
         # The canonical link — one triple, the half this (books, gstr2b
         # or gstr1) upload can assert. The other half(s) land when the

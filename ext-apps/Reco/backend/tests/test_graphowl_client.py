@@ -232,6 +232,34 @@ class TestCanonicalLinking:
         turtle = rows_to_turtle([_row()], "books")
         assert turtle.count("gst:supplierGstin") == 1
 
+    def test_supplier_name_lands_on_the_supplier_not_the_invoice(self):
+        # Plan 120 Slice C / Plan 121's [console.labels] declares
+        # `Supplier = "supplierName"` (packs/gst/pack.toml), and
+        # ReconciliationWorkspace.tsx's own party-name query reads it the
+        # same way (`OPTIONAL { GRAPH ?g { ?party gst:supplierName
+        # ?supplierName } }`, ui/src/features/reconciliation/
+        # ReconciliationWorkspace.tsx:248) — off the party/supplier
+        # subject, never the invoice. Before this fix it landed only on
+        # the invoice via the generic per-row PREDICATES loop, so neither
+        # consumer could ever find it: confirmed live, 16 August 2026 —
+        # a real Supplier subject's evidence-graph node resolved
+        # semanticType "Supplier" correctly but label stayed null, because
+        # the subject genuinely had no gst:supplierName triple at all.
+        turtle = rows_to_turtle(
+            [_row(supplier_gstin="27AAAFN2938K1Z2", supplier_name="Nimbus Freight Logistics")],
+            "books",
+        )
+        supplier_block = next(
+            line for line in turtle.split("\n\n")
+            if line.startswith("<https://graph-owl.dev/packs/gst#supplier-")
+        )
+        assert 'gst:supplierName "Nimbus Freight Logistics"' in supplier_block
+        invoice_block = next(
+            line for line in turtle.split("\n\n")
+            if line.startswith("<https://graph-owl.dev/packs/gst#books-")
+        )
+        assert "gst:supplierName" not in invoice_block
+
     def test_the_invoice_carries_an_issuedby_edge_to_the_supplier(self):
         turtle = rows_to_turtle([_row(supplier_gstin="27AAAFN2938K1Z2")], "books")
         assert "gst:issuedBy <https://graph-owl.dev/packs/gst#supplier-27AAAFN2938K1Z2>" in turtle
