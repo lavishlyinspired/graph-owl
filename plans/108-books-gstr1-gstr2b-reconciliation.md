@@ -1,8 +1,9 @@
 # Plan 108 — Books ↔ GSTR-1 ↔ GSTR-2B: a three-way reconciliation graph, with period-aware carry-forward and receipt timing
 
 **Status**: **Slices 1–5, 7 and 8 shipped 13 August 2026.** Slice 6
-(period-aware carry-forward) remains blocked on `107-filing-period.md`
-Slice 1 (`gst:FilingPeriod`), still unbuilt. **Branch**: main.
+(period-aware carry-forward) is now unblocked — `plans/107-done-filing-period.md`
+Slice 1 (`gst:FilingPeriod`) shipped 16 August 2026, and the full 5-slice
+plan is complete — but Slice 6 itself has not been picked up. **Branch**: main.
 
 **What shipped, and where it went past this plan.** Slices 1–5 and 8 landed
 as written — `gst:Gstr1Invoice`, `gst:filedDate`, `gst:GoodsReceipt`,
@@ -449,7 +450,7 @@ citations unverified.
 ## Next Step
 
 Load `grill-me` on the Parking Lot design questions before Slice 1's RED
-test — the same gate `107-filing-period.md` already puts on its own
+test — the same gate `107-done-filing-period.md` already puts on its own
 parking lot, for the same reason: these are fuzzy calls this document
 deliberately leaves open rather than deciding silently while writing an
 ontology file. Three are load-bearing enough to resolve before writing any
@@ -460,4 +461,4 @@ Then load `planning` to turn Slice 1 (GSTR-1 as a source, including the
 `period`-derivation fix) into a PR-sized implementation plan with TDD
 execution steps. Slices 2–5 and 8 do not depend on Plan 107 and can each
 become their own PR-sized plan once Slice 1 ships; Slice 6 stays blocked on
-`107-filing-period.md` Slice 1 regardless of how far the others progress.
+`107-done-filing-period.md` Slice 1 regardless of how far the others progress.

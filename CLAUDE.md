@@ -679,3 +679,4 @@ Differentiator epics are marked ★ in the roadmap — they are the differentiat
 Completed, kept as historical record — do not delete:
 - `plans/90-done-table-entity.md` — Table walking skeleton (Slices A–E)
 - `plans/91-done-relationships.md` — generic relationship edge (Slices A–C)
+- `plans/107-done-filing-period.md` — `gst:FilingPeriod` as a graph entity (Slices 1–5)
