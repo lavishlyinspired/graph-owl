@@ -34,6 +34,14 @@ export const ROUTES = [
   "vocabulary",
   "review",
   "obligations",
+  // Plan 107 Slice 4 (`plans/107-filing-period.md`): the console surface
+  // for period-list/period-summary/period-diff — "obligation-calendar-
+  // shaped" per the plan's own words, so it gets the identical treatment
+  // as "obligations" above: a route of its own, not a tab, and named
+  // explicitly in App.tsx's deep-link whitelist from the start (that
+  // list's own comment records "obligations" being missing there once
+  // as a real, previously-shipped bug).
+  "filing-periods",
   "connectors",
   "admin",
   "agent",

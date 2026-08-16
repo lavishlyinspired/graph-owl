@@ -1761,6 +1761,19 @@ export const api = {
   },
   obligationCalendar: (pack: string) =>
     request<Obligation[]>(`/packs/${encodeURIComponent(pack)}/obligations`),
+  /** Run one of a pack's registered `[[queries]]` by name — Plan 107
+   *  Slice 4's console surface is the first console caller of
+   *  `POST /packs/{pack}/queries/{name}/run`; every prior caller was the
+   *  `run_pack_query` MCP tool. Same envelope as {@link sparql}/
+   *  {@link cypher} — the server renders every query outcome through one
+   *  `SparqlOutcome`, so this reuses {@link SparqlResult} rather than a
+   *  new type. */
+  runPackQuery: (pack: string, name: string, bindings: Record<string, string> = {}) =>
+    request<SparqlResult>(`/packs/${encodeURIComponent(pack)}/queries/${encodeURIComponent(name)}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bindings }),
+    }),
   decideFinding: (id: string, status: "accepted" | "rejected", reason?: string) =>
     request<void>(`/findings/${id}/decision`, {
       method: "POST",

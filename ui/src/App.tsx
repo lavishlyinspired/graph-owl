@@ -109,6 +109,7 @@ import {
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
 import { ObligationCalendar, setObligationCalendarParams } from "./features/obligations/obligationCalendar";
+import { FilingPeriods } from "./features/filingPeriods/filingPeriods";
 import { ReconciliationWorkspace } from "./features/reconciliation/ReconciliationWorkspace";
 import { AgentChat } from "./features/agentChat/AgentChat";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
@@ -180,6 +181,7 @@ type Section =
   | "vocabulary"
   | "review"
   | "obligations"
+  | "filing-periods"
   | "admin"
   | "agent"
   | "ontology-builder";
@@ -3650,6 +3652,7 @@ function AppShell() {
       // Included explicitly for "agent" from the start rather than
       // repeating that gap.
       named === "obligations" ||
+      named === "filing-periods" ||
       named === "reconciliation" ||
       named === "agent" ||
       named === "ontology-builder"
@@ -4078,6 +4081,7 @@ function AppShell() {
                   { key: "vocabulary", icon: <BookOutlined />, label: "Vocabulary" },
                   { key: "review", icon: <MergeOutlined />, label: "Review" },
                   { key: "obligations", icon: <CalendarOutlined />, label: "Obligations" },
+                  { key: "filing-periods", icon: <HistoryOutlined />, label: "Filing Periods" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                   { key: "agent", icon: <RobotOutlined />, label: "Agent" },
@@ -4187,6 +4191,8 @@ function AppShell() {
                 <ReviewSection />
               ) : section === "obligations" ? (
                 <ObligationCalendar />
+              ) : section === "filing-periods" ? (
+                <FilingPeriods />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
