@@ -238,9 +238,18 @@ def _install_graphowl_pack() -> None:
     INV-1001..INV-2002 demo scenarios, and loading them into reco-now's
     deployment would put graph-owl's own demo invoices into every
     reconciliation reco-now runs. Vocabulary composition is wanted here,
-    not the data — the law data amount-mismatch.sparql actually needs
-    (`law/sections.ttl`, `law/rule-36-4.ttl`) is not a demo fixture and
-    loads with everything else in `packs/gst/pack.toml`'s `[[documents]]`.
+    not the data — `ontology.ttl` (source `gst-ontology`) and the law data
+    amount-mismatch.sparql needs (`law/sections.ttl`, `law/rule-36-4.ttl`)
+    are not demo fixtures and load alongside everything else in
+    `packs/gst/pack.toml`'s `[[documents]]`.
+
+    **`ontology.ttl` was missing from this list until Plan 120 Slice A** —
+    `include_documents=False` skips every `[[documents]]` entry
+    indiscriminately, `ontology.ttl` is one of them, and nothing imported it
+    back individually the way the law data already was. A reco-now
+    deployment never had the GST ontology loaded, so the Ontology Builder's
+    "gst" selector read "No ontology installed yet" — not a broken pack,
+    a startup step that silently skipped a file.
 
     Uses the one-time step `load_pack` already does for packs/gst and
     packs/hospitality, reused here rather than reimplemented. Idempotent
@@ -248,18 +257,22 @@ def _install_graphowl_pack() -> None:
     just the first."""
     try:
         load_pack(GST_PACK_DIR, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN, include_documents=False)
-        # The law data amount-mismatch.sparql needs, imported directly —
-        # `include_documents=False` above excludes it along with the demo
-        # fixtures, since `load_pack` has no partial-document mode. Same
-        # source names packs/gst's own manifest uses, read from its own
-        # directory: not a copy, the canonical file.
-        for name, source in (("sections.ttl", "gst-law"), ("rule-36-4.ttl", "gst-law-rule-36-4")):
-            text = (GST_PACK_DIR / "law" / name).read_text(encoding="utf-8")
+        # The ontology and law data amount-mismatch.sparql needs, imported
+        # directly — `include_documents=False` above excludes them along
+        # with the demo fixtures, since `load_pack` has no partial-document
+        # mode. Same source names packs/gst's own manifest uses, read from
+        # its own directory: not a copy, the canonical file.
+        for name, source in (
+            ("ontology.ttl", "gst-ontology"),
+            ("law/sections.ttl", "gst-law"),
+            ("law/rule-36-4.ttl", "gst-law-rule-36-4"),
+        ):
+            text = (GST_PACK_DIR / name).read_text(encoding="utf-8")
             graphowl_client.import_document(GRAPH_OWL_SERVER, source, text, GRAPH_OWL_TOKEN)
     except LoadError as exc:
         print(f"[graphowl] pack install skipped — {exc}")
     except graphowl_client.IngestError as exc:
-        print(f"[graphowl] law data import skipped — {exc}")
+        print(f"[graphowl] ontology/law data import skipped — {exc}")
 
 
 def _ingest_to_graphowl(kind: str, dataset: dict, mapping: dict) -> threading.Thread:

@@ -16,7 +16,7 @@ this session's use of realistic sample data happened to surface.
 from __future__ import annotations
 
 from app import graphowl_client, main
-from app.main import _auto_map, _ingest_to_graphowl, _select_results
+from app.main import _auto_map, _ingest_to_graphowl, _install_graphowl_pack, _select_results
 from app.reconciliation import STATUS_MATCHED
 
 
@@ -147,4 +147,31 @@ class TestIngestUsesAStableSourceReplacedOnEveryUpload:
         assert sources == ["reco-books", "reco-books"], (
             "a random suffix here is exactly the bug this slice fixes — two "
             f"uploads of the same kind must land in the same graph: {sources}"
+        )
+
+
+class TestInstallGraphowlPackImportsTheOntology:
+    """Plan 120 Slice A — `load_pack(..., include_documents=False)` skips
+    every `[[documents]]` entry in packs/gst/pack.toml, and `ontology.ttl`
+    (source `gst-ontology`) is declared there, right alongside
+    `law/sections.ttl`/`law/rule-36-4.ttl`, which the surrounding code
+    already knows to import directly for the same reason. Missing this one
+    means the Ontology Builder's "gst" selector loads against a deployment
+    that was never given the ontology, and reads as a permanently broken
+    pack rather than a startup step that skipped a file."""
+
+    def test_the_ontology_is_imported_the_same_way_the_law_data_already_is(self, monkeypatch):
+        monkeypatch.setattr(main, "load_pack", lambda *a, **k: None)
+        sources: list[str] = []
+        monkeypatch.setattr(
+            graphowl_client,
+            "import_document",
+            lambda server, source, text, token=None: sources.append(source) or {},
+        )
+
+        _install_graphowl_pack()
+
+        assert "gst-ontology" in sources, (
+            "ontology.ttl must be imported the same way law/sections.ttl and "
+            f"law/rule-36-4.ttl already are: {sources}"
         )
