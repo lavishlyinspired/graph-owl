@@ -1,6 +1,6 @@
 # Plan 107 — filing period as a first-class graph entity
 
-**Status**: story-split, not yet planned or built. **Branch**: main.
+**Status**: Slice 1 shipped 16 August 2026 (`440c78d`), verified live. Slices 2-5 not started. **Branch**: main.
 **Trigger**: an external competitive review of the GST pack against a dedicated
 GSTR-2B reconciliation tool (12 August 2026) observed that graph-owl cannot
 answer "what changed between April and May" as a graph traversal. Verified
@@ -73,7 +73,7 @@ slice, not four.
 
 | Slice | Value | Includes | Defers | Acceptance Examples | Release Constraint |
 |---|---|---|---|---|---|
-| **1. FilingPeriod exists, one query traverses to it** | Proves the entity is worth having; unblocks everything else | `gst:FilingPeriod` class + a `belongsToPeriod`-shaped predicate in `packs/gst/ontology.ttl`; pack loader (or a fixture-load step) creates one `FilingPeriod` subject per distinct `gst:period` value already in the fixtures and links each fact's subject to it; one registered query (`period-summary.sparql` or similar, via the Slice-4a/4b mechanism) answers "everything belonging to period X" via the edge | Cross-period comparison; console UI; any new source data beyond what fixtures already carry | `run_pack_query(gst, period-summary, {period: "2020-07"})` returns every invoice/fact for July 2020, traversing the edge; a period with zero facts returns an empty answer, not `NotFound` (mirrors `run_pack_query`'s own established absent-vs-empty convention) | Ships behind nothing — additive pack content, same posture as Slice 4a |
+| **1. FilingPeriod exists, one query traverses to it** ✅ **Shipped** | Proves the entity is worth having; unblocks everything else | `gst:FilingPeriod` class + `gst:belongsToPeriod` (an `owl:ObjectProperty`, domain `PurchaseInvoice` per the same "known, accepted limitation" `issuedBy` already documents) in `packs/gst/ontology.ttl`; `fixtures/filing-periods.ttl` declares one `FilingPeriod` instance per distinct `gst:period` value already in the fixtures (`period-2020-07`/`period-2026-07`/`period-2026-08`); each existing fixture subject gets a `belongsToPeriod` triple next to its own `gst:period` literal; `queries/period-summary.sparql` (registered via `[[queries]]`, needed its own `[[predicates]]` entry too — a real gap the RED test found, since a property declared only in `ontology.ttl`'s own triples is descriptive, not a runtime registration) answers "everything belonging to period X" by traversing the edge | Cross-period comparison; console UI; any new source data beyond what fixtures already carry | `run_pack_query(gst, period-summary, {period: <the FilingPeriod's own IRI>})` returns every invoice/fact for that period, traversing the edge; a period IRI naming no `FilingPeriod` returns an empty answer, not `NotFound` — both verified live against the real fixtures, not only the synthetic Rust test | Shipped, commit `440c78d` |
 | **2. Cross-period diff, one direction (invoice status across two named periods)** | Answers the reviewer's actual example ("what changed between April and May") for the narrowest real case | A second registered query taking two period bindings, returning invoices present/absent/changed between them, scoped to *status* only (not amount, not every field) | Full field-level diff; more than two periods at once; any "since last N periods" rolling window | Given INV-2001 absent from April's period-linked facts and present in May's, the query reports it as newly appearing; given no change, the query reports nothing for that invoice (silence-is-the-signal, matching this project's own `qlRewrite` convention) | Same as Slice 1 |
 | **3. A subject's full period history** | Answers "show this invoice across every period it's appeared in" — the third example from the trigger | A query parameterized by subject instead of period, traversing every `FilingPeriod` a given fact belongs to, ordered | Aggregation/summarization of the history (that's a console concern, not a query concern) | Given an invoice linked to three periods, the query returns all three in period order | Same as Slice 1 |
 | **4. Console surface** | Makes 1–3 usable by a human, not only the agent | A new admin/obligation-calendar-shaped read-only view: pick a period (or two), see the summary/diff | Editing anything — this is read-only, matching `run_pack_query`'s own non-admin-gated posture | Verified live against a running demo (`agent-browser`), matching every other console slice in this project's own convention | Ships behind nothing; it is additive UI |
@@ -81,15 +81,15 @@ slice, not four.
 
 ## Parking Lot
 
-- **Which predicate name** (`belongsToPeriod` vs. something else) and
-  **whether `gst:period`'s existing literal stays on facts alongside the new
-  edge, or is superseded by it** — a real design question for `planning`,
-  not resolved here. Superseding it outright would touch every existing
-  finding rule that currently binds `?period` as a literal (`pack.toml`'s
-  `GstinTransposition` rule at minimum); keeping both risks the two
-  drifting apart. Load `grill-me` on this specific question before slice 1's
-  RED test, since it is exactly the kind of fuzzy design call `grill-me`
-  exists for, not a call to make silently while writing the ontology file.
+- **Resolved 16 August 2026** (asked directly, `grill-me` itself being
+  user-invocable only): predicate name `belongsToPeriod` (uncontroversial,
+  directly precedented by `governedBy`/`onInvoice`'s camelCase convention).
+  `gst:period`'s existing literal stays on facts unchanged, alongside the
+  new edge — additive only, no rule rewrites. Chosen over superseding it
+  because Slice 1 is the walking skeleton that can stop here if the entity
+  doesn't prove its worth, and superseding is a bigger, riskier bet than
+  this slice has earned; revisit once Slices 2/3 (cross-period comparison)
+  show whether the literal and the edge ever need to be reconciled.
 - **Whether the hospitality pack needs an equivalent** to keep proving
   domain neutrality, or whether "filing period" is legitimately GST-specific
   vocabulary that a differently-shaped temporal grouping (a booking season?
