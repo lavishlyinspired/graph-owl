@@ -345,3 +345,209 @@ async fn a_finding_with_no_evidence_is_refused_and_says_which_one() {
          reconciliation is worse than a failed one, because it looks complete"
     );
 }
+
+/// Plan 121 Slice 3 — the same `[console.labels]` resolution the evidence
+/// graph (Slice 1) and `/graph/context` (Slice 2) already apply reaches the
+/// findings queue's own subject column too, since a reviewer scans this list
+/// before opening any single finding.
+mod real_gst_pack {
+    use std::path::PathBuf;
+
+    use crate::common::{test_app, token};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use graph_owl_core::finding::{Evidence, Finding};
+    use graph_owl_storage::FindingStore;
+    use graph_owl_storage_postgres::PostgresStorage;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn real_packs_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packs")
+    }
+
+    /// Every test in this module writes the identical value — the same
+    /// reasoning `pack_install.rs`'s own copy of this helper documents.
+    fn set_packs_dir_to_the_real_one() {
+        unsafe {
+            std::env::set_var("GRAPH_OWL_PACKS_DIR", real_packs_dir());
+        }
+    }
+
+    async fn seed_a_named_supplier(app: &axum::Router) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "iri": "https://graph-owl.dev/packs/gst#",
+                            "declaredBy": "pack:gst",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert!(response.status().is_success(), "declare the gst namespace");
+
+        for (name, value_type) in [("supplierGstin", 1), ("supplierName", 1)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/predicates")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "namespace": 1024, "name": name,
+                                "valueType": value_type, "many": false,
+                            })
+                            .to_string(),
+                        ))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should be handled");
+            assert!(response.status().is_success(), "declare {name}");
+        }
+
+        let turtle = r#"
+            @prefix gst: <https://graph-owl.dev/packs/gst#> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+            gst:supplier-1 rdf:type gst:Supplier ;
+                gst:supplierGstin "29AACCG0527D1Z8" ;
+                gst:supplierName "Nimbus Freight Logistics" .
+        "#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graph/import/rdf?source=gst-purchase-register&format=turtle")
+                    .header("content-type", "text/turtle")
+                    .body(Body::from(turtle.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK, "import the supplier");
+    }
+
+    #[tokio::test]
+    async fn a_finding_s_subject_shows_its_declared_label_not_its_bare_id() {
+        set_packs_dir_to_the_real_one();
+        let (app, _db, url) = test_app().await;
+        seed_a_named_supplier(&app).await;
+
+        let finding = Finding::new(
+            "gst",
+            "gst:SupplierNotFiled",
+            "https://graph-owl.dev/packs/gst#supplier-1",
+            "Claimed in the register, never filed by the supplier",
+            "gst:Section16",
+            vec![Evidence {
+                subject: "https://graph-owl.dev/packs/gst#supplier-1".to_string(),
+                predicate: "1024:supplierGstin".to_string(),
+                value: "29AACCG0527D1Z8".to_string(),
+                var: None,
+            }],
+        )
+        .expect("a complete finding");
+        let store = PostgresStorage::connect(&url).await.expect("connect");
+        store.record_finding(&finding).await.expect("record");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/findings")
+                    .header("authorization", format!("Bearer {}", token("system")))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let rows = body.as_array().expect("array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0]["subjectLabel"],
+            json!("Nimbus Freight Logistics"),
+            "the queue row's own subject must resolve the same [console.labels] \
+             entry the evidence graph and /graph/context already do: {:?}",
+            rows[0]
+        );
+        // Every other field a reviewer relies on must still be there —
+        // adding subjectLabel must not have replaced the finding's shape.
+        assert_eq!(rows[0]["label"], "gst:SupplierNotFiled");
+        assert_eq!(rows[0]["governedBy"], "gst:Section16");
+    }
+
+    #[tokio::test]
+    async fn a_finding_whose_subject_has_no_declared_label_degrades_to_null() {
+        set_packs_dir_to_the_real_one();
+        let (app, _db, url) = test_app().await;
+        seed_a_named_supplier(&app).await;
+
+        // The invoice class (unlike Supplier) has no [console.labels] entry —
+        // a finding about it must degrade rather than fabricate a name.
+        let finding = Finding::new(
+            "gst",
+            "gst:SomeInvoiceFinding",
+            "https://graph-owl.dev/packs/gst#invoice-never-imported",
+            "s",
+            "gst:Section16",
+            vec![Evidence {
+                subject: "https://graph-owl.dev/packs/gst#invoice-never-imported".to_string(),
+                predicate: "1024:supplierGstin".to_string(),
+                value: "x".to_string(),
+                var: None,
+            }],
+        )
+        .expect("a complete finding");
+        let store = PostgresStorage::connect(&url).await.expect("connect");
+        store.record_finding(&finding).await.expect("record");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/findings")
+                    .header("authorization", format!("Bearer {}", token("system")))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+
+        let rows = body.as_array().expect("array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0]["subjectLabel"],
+            serde_json::Value::Null,
+            "an unresolvable subject must degrade to null: {:?}",
+            rows[0]
+        );
+    }
+}

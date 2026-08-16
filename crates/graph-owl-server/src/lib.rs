@@ -9084,16 +9084,62 @@ async fn list_findings(
     State(catalog): State<Catalog>,
     Auth(_principal): Auth,
     Query(params): Query<ListFindings>,
-) -> Result<Json<Vec<graph_owl_core::finding::Finding>>, AppError> {
+) -> Result<Json<Vec<FindingWithSubjectLabel>>, AppError> {
     let status = match params.status.as_deref() {
         None => None,
         Some(raw) => Some(parse_finding_status(raw)?),
     };
-    Ok(Json(
-        catalog
-            .list_findings(params.pack.as_deref(), status)
-            .await?,
-    ))
+    let findings = catalog
+        .list_findings(params.pack.as_deref(), status)
+        .await?;
+
+    // Plan 120 Slice C / Plan 121 Slice 3: the same `[console.labels]`
+    // resolution the evidence graph and `/graph/context` already apply,
+    // reused here rather than reimplemented — a reviewer scans this queue
+    // before opening any single finding, so a bare subject id here is the
+    // same defect in a third screen. Computed once per request, not per
+    // finding, matching the other two call sites.
+    let namespaces = catalog.namespaces().await.unwrap_or_default();
+    let mut console_cache = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(findings.len());
+    for finding in findings {
+        let subject_label = match graph_owl_core::flake::Sid::from_iri(&finding.subject) {
+            Some(sid) => {
+                let semantic_type = catalog.node_semantic_type(&sid).await.unwrap_or_default();
+                resolve_node_label(
+                    &catalog,
+                    &namespaces,
+                    &mut console_cache,
+                    &sid,
+                    semantic_type.as_deref(),
+                )
+                .await
+            }
+            // A subject not in IRI form (an older finding, or a namespace
+            // this deployment does not resolve) has nothing to resolve
+            // against — degrades to no label, the same posture every other
+            // step here already takes.
+            None => None,
+        };
+        out.push(FindingWithSubjectLabel {
+            finding,
+            subject_label,
+        });
+    }
+    Ok(Json(out))
+}
+
+/// `Finding` plus its subject's resolved display label — Plan 120 Slice C /
+/// Plan 121 Slice 3. A wrapper rather than a new field on `Finding` itself:
+/// `graph-owl-core` is pure domain, no I/O, and resolving a label means
+/// reading a pack's `[console.labels]` off disk — a presentation concern
+/// that belongs at the HTTP layer, not in the stored domain fact.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FindingWithSubjectLabel {
+    #[serde(flatten)]
+    finding: graph_owl_core::finding::Finding,
+    subject_label: Option<String>,
 }
 
 /// `?pack` and `?status` for [`list_findings`].

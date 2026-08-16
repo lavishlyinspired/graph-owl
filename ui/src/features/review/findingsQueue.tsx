@@ -99,6 +99,15 @@ export function displayTerm(term: string): string {
   return tail.length > 0 ? tail : term;
 }
 
+/** A finding's own subject, named the way a reviewer reads it — the
+ *  server-resolved `[console.labels]` literal first (Plan 120 Slice C /
+ *  Plan 121 Slice 3), then the bare local name every finding already had.
+ *  Shared between the queue row's detail line and the evidence panel's
+ *  headline, so both name the same subject the same way. */
+function subjectLabelFor(finding: PackFinding): string {
+  return finding.subjectLabel ?? displayTerm(finding.subject);
+}
+
 /** The local name as a sentence a reviewer can scan — "SupplierNotFiled"
  *  becomes "Supplier Not Filed".
  *
@@ -338,7 +347,7 @@ export function toQueueEntry(finding: PackFinding, title?: string): QueueEntry {
     id: finding.id,
     status: finding.status,
     summary: title ?? humanizeTerm(displayTerm(finding.label)),
-    detail: `${finding.pack}${COPY.separator}${displayTerm(finding.subject)}${COPY.separator}${finding.summary}`,
+    detail: `${finding.pack}${COPY.separator}${subjectLabelFor(finding)}${COPY.separator}${finding.summary}`,
     decidedSummary:
       finding.status === "pending"
         ? undefined
@@ -422,7 +431,7 @@ export function findingsQueue(): QueueConfig {
       // different claims — see `evidenceCandidates`.
       const candidates = graph ? evidenceCandidates(graph) : [];
       const triples = graph ? evidenceTriples(graph) : [];
-      const subjectLabel = displayTerm(finding.subject);
+      const subjectLabel = subjectLabelFor(finding);
       return (
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           {/* The headline, in the pack's own words — what a reviewer scans

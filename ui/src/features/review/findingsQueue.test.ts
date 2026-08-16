@@ -142,6 +142,17 @@ describe("toQueueEntry", () => {
     expect(entry.summary).toBe("Duplicate Guest");
     expect(entry.detail).toContain("hospitality");
   });
+
+  it("prefers the server-resolved subject label over the bare local name — Plan 121 Slice 3", () => {
+    const entry = toQueueEntry(getFinding({ subjectLabel: "Nimbus Freight Logistics" }));
+    expect(entry.detail).toContain("Nimbus Freight Logistics");
+    expect(entry.detail).not.toContain("pr-INV-1003");
+  });
+
+  it("falls back to the bare local name when no subject label was resolved", () => {
+    const entry = toQueueEntry(getFinding({ subjectLabel: null }));
+    expect(entry.detail).toContain("pr-INV-1003");
+  });
 });
 
 describe("humanizeTerm", () => {

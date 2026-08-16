@@ -343,6 +343,11 @@ export interface PackFinding {
   readonly detectedAt: string;
   readonly decidedBy?: string | null;
   readonly reason?: string | null;
+  /** The finding's own subject, resolved through a pack's `[console.labels]`
+   *  declaration the same way {@link EvidenceGraphNode.label} is — Plan 120
+   *  Slice C / Plan 121 Slice 3. `null`/absent for a class no installed pack
+   *  declared one for, not an error. */
+  readonly subjectLabel?: string | null;
 }
 
 /** One open obligation — Epic 105 P8's first real slice
