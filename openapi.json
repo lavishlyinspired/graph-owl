@@ -7187,6 +7187,32 @@
         "summary": "Liveness"
       }
     },
+    "/inbox": {
+      "get": {
+        "operationId": "get_inbox",
+        "responses": {
+          "200": {
+            "description": "The 'waiting on you' feed — pending items merged from agent proposals, change proposals, the resolution queue, findings and extraction claims"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The 'waiting on you' feed — pending items merged from agent proposals, change proposals, the resolution queue, findings and extraction claims"
+      }
+    },
     "/ingest": {
       "post": {
         "operationId": "post_ingest",
@@ -9345,6 +9371,32 @@
           }
         ],
         "summary": "Reject a queued pair; the decision persists"
+      }
+    },
+    "/search": {
+      "get": {
+        "operationId": "get_search",
+        "responses": {
+          "200": {
+            "description": "One search across assets, glossary terms and business metrics"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "One search across assets, glossary terms and business metrics"
       }
     },
     "/sparql": {

@@ -1,6 +1,8 @@
 import { strings } from "../lib/strings";
 import { cn } from "../lib/cn";
 import type { ThemeMode } from "../lib/theme";
+import { SearchBox } from "./SearchBox";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 interface TopBarProps {
   readonly theme: ThemeMode;
@@ -11,9 +13,10 @@ interface TopBarProps {
   /** From `GET /me` once A1 wires it — a placeholder avatar is display data,
    *  not copy, so it is a prop rather than a `strings.ts` entry. */
   readonly userInitials: string;
+  readonly workspaceName: string;
 }
 
-export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, userInitials }: TopBarProps) {
+export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, userInitials, workspaceName }: TopBarProps) {
   return (
     <div className="flex h-[52px] flex-none items-center gap-5 border-b border-gowl-line bg-gowl-panel px-4.5">
       <div className="flex items-center gap-2.5">
@@ -23,13 +26,9 @@ export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, 
         <span className="text-[13px] font-semibold tracking-[0.14em]">{strings.brand}</span>
       </div>
 
-      <div className="flex flex-1 items-center gap-2 rounded-md border border-gowl-line bg-gowl-input px-3 py-1.5 text-gowl-t5">
-        <span aria-hidden="true">{strings.searchIcon}</span>
-        <span className="flex-1 text-[13px]">{strings.searchPlaceholder}</span>
-        <kbd className="rounded bg-gowl-kbd px-1.5 py-0.5 font-mono text-[11px] text-gowl-t4">
-          {strings.searchShortcut}
-        </kbd>
-      </div>
+      <WorkspaceSwitcher name={workspaceName} />
+
+      <SearchBox />
 
       <button
         type="button"

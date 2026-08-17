@@ -42,6 +42,17 @@
 /ui/test-results/
 /ui/playwright-report/
 
+# graphowl-app/ (Plan 122a): the console rebuild that replaces `ui/`, same
+# reasoning as the `/ui/...` block above. A nested `graphowl-app/.gitignore`
+# was tried first and does not work — this file's own bare `.gitignore`
+# pattern (line 20) excludes every nested `.gitignore` from being committed
+# anywhere in the repo, so the rules have to live here instead.
+/graphowl-app/node_modules/
+/graphowl-app/dist/
+/graphowl-app/.stryker-tmp/
+/graphowl-app/tsconfig.tsbuildinfo
+/graphowl-app/src/generated/api.d.ts
+
 # Generated SDK artifacts. The client types are derived from `openapi.json`, and
 # a committed copy is a second thing to keep in step with the first — the same
 # reasoning as `scripts/verify-generated-client.sh`.

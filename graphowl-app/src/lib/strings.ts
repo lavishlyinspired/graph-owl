@@ -23,4 +23,12 @@ export const strings = {
   searchIcon: "⌕",
   inboxIcon: "⚑",
   closeIcon: "×",
+  inboxReasonPlaceholder: "Why? (required)",
+  inboxReasonConfirm: "Confirm reject",
+  inboxReasonCancel: "Cancel",
+  inboxActionFailed: "That didn't go through — try again.",
+  searchNoResults: "No matches.",
+  searchAsset: "ASSET",
+  searchGlossaryTerm: "GLOSSARY TERM",
+  searchBusinessMetric: "BUSINESS METRIC",
 } as const;

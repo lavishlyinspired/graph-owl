@@ -78,6 +78,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/roots", get(list_roots))
         .route("/assets/stats", get(asset_stats))
         .route("/overview", get(overview))
+        .route("/inbox", get(inbox))
+        .route("/search", get(search))
         .route("/graph/reconcile", post(reconcile_projection))
         // Plan 111 Slice A. `POST` rather than `GET` because the request
         // carries two node identities and a list of edge names — a query
@@ -9857,6 +9859,640 @@ async fn overview(
         "graph": overview.graph,
         "recentlyChanged": overview.recently_changed,
     })))
+}
+
+/// One item surfaced in the aggregated "waiting on you" feed (Plan 122a
+/// A1). Composed from five otherwise-independent queues — see
+/// [`merge_inbox`] — normalized to one shape so a single UI list can render
+/// all of them without knowing which queue each came from.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxItem {
+    /// Which queue this came from — lets the UI route "Approve"/"Reject"
+    /// back to the right endpoint without guessing from shape alone.
+    source: &'static str,
+    id: String,
+    tag: String,
+    title: String,
+    detail: String,
+    who: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Per-source counts, reported alongside the merged `items`. A single total
+/// cannot show one queue silently going to zero while another grows —
+/// exactly the failure mode a dropped `.extend()` call would produce and a
+/// count-only response would hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxCounts {
+    agent_proposals: usize,
+    change_proposals: usize,
+    resolution_queue: usize,
+    findings: usize,
+    extraction_claims: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxResponse {
+    items: Vec<InboxItem>,
+    counts: InboxCounts,
+}
+
+/// Normalizes five independently-owned queues into one feed, most-recent
+/// first. Extraction claims carry no timestamp at all (`PendingClaim` has
+/// none — it is a fact about the source text, not an event with a time),
+/// so undated items sort last, in the order their queue returned them,
+/// rather than being given a fabricated "now".
+///
+/// A pure function precisely so this — the part that can silently drop a
+/// whole source or miscount it — is unit-testable without a database, per
+/// this project's own finding that `--lib`-reachable decision logic is what
+/// mutation testing actually verifies quickly; the HTTP shell around it
+/// (`inbox`, below) has nothing left to get wrong.
+fn merge_inbox(
+    agent_proposals: Vec<graph_owl_authz::agent::Proposal>,
+    change_proposals: Vec<graph_owl_core::collaboration::Proposal>,
+    resolution_queue: Vec<graph_owl_core::resolution::ReviewQueueEntry>,
+    findings: Vec<graph_owl_core::finding::Finding>,
+    extraction_claims: Vec<graph_owl_api::extraction::PendingClaim>,
+) -> InboxResponse {
+    let counts = InboxCounts {
+        agent_proposals: agent_proposals.len(),
+        change_proposals: change_proposals.len(),
+        resolution_queue: resolution_queue.len(),
+        findings: findings.len(),
+        extraction_claims: extraction_claims.len(),
+    };
+
+    let mut items: Vec<InboxItem> = Vec::with_capacity(
+        counts.agent_proposals
+            + counts.change_proposals
+            + counts.resolution_queue
+            + counts.findings
+            + counts.extraction_claims,
+    );
+
+    items.extend(agent_proposals.into_iter().map(|p| InboxItem {
+        source: "agent-proposal",
+        id: p.id.to_string(),
+        tag: "AGENT PROPOSAL".to_string(),
+        title: p.target_fqn,
+        detail: p.rationale,
+        who: Some(p.proposed_by.display_name),
+        created_at: Some(p.created_at),
+    }));
+
+    items.extend(change_proposals.into_iter().map(|p| InboxItem {
+        source: "change-proposal",
+        id: p.id.to_string(),
+        tag: "CHANGE PROPOSAL".to_string(),
+        title: p.field,
+        detail: p.rationale,
+        who: Some(p.proposed_by),
+        created_at: Some(p.created_at),
+    }));
+
+    items.extend(resolution_queue.into_iter().map(|r| InboxItem {
+        source: "resolution",
+        id: r.id.to_string(),
+        tag: "POSSIBLE DUPLICATE".to_string(),
+        title: format!("{} ~ {}", r.target, r.candidate),
+        detail: format!("scored {:.2}", r.score),
+        who: None,
+        created_at: Some(r.created_at),
+    }));
+
+    items.extend(findings.into_iter().map(|f| InboxItem {
+        source: "finding",
+        id: f.id.to_string(),
+        tag: f.label,
+        title: f.subject,
+        detail: f.summary,
+        who: None,
+        created_at: Some(f.detected_at),
+    }));
+
+    items.extend(extraction_claims.into_iter().map(|c| InboxItem {
+        source: "extraction-claim",
+        id: c.id.to_string(),
+        tag: "EXTRACTED CLAIM".to_string(),
+        title: format!("{} {}", c.predicate, c.object),
+        detail: c.passage,
+        who: None,
+        created_at: None,
+    }));
+
+    items.sort_by(|a, b| match (a.created_at, b.created_at) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    InboxResponse { items, counts }
+}
+
+/// `?limit` for [`inbox`] — applied **per source**, not to the merged
+/// total: a caller asking for 20 wants up to 20 from *each* of the five
+/// queues, the same way a dashboard with five widgets would ask each
+/// widget for its own page rather than splitting one page five ways.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InboxQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Default and ceiling for [`InboxQuery::limit`]. 20 keeps a fully
+/// populated inbox (all five sources at the default) at 100 items — the
+/// same order of magnitude `review_queue`'s own default (50, one source)
+/// already ships, scaled down because this endpoint fans out across five.
+const INBOX_DEFAULT_LIMIT: usize = 20;
+const INBOX_MAX_LIMIT: usize = 100;
+
+/// `GET /inbox` — Plan 122a A1. The one feed every screen's top bar reads:
+/// *"agents queue here; nothing applies itself"* — anything that would
+/// change the graph without a human's say-so lands in one of the five
+/// queues this composes, never applied on its own.
+///
+/// **Composes read access, invents none.** None of the five source queues
+/// (`/proposals`, `/change-proposals`, `/resolution/queue`, `/findings`,
+/// `/extraction/queue`) filters its results by the calling principal today
+/// — confirmed against each `Catalog` method this calls — so neither does
+/// this aggregation; it would be dishonest for `/inbox` to claim a
+/// narrower view than the queues it is built from actually enforce.
+/// Requiring [`Auth`] anyway (unlike `/change-proposals`, which currently
+/// has none) is this endpoint's own minimum bar, not a claim about what the
+/// five queues themselves restrict.
+async fn inbox(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<InboxQuery>,
+) -> Result<Json<InboxResponse>, AppError> {
+    let limit = query
+        .limit
+        .unwrap_or(INBOX_DEFAULT_LIMIT)
+        .min(INBOX_MAX_LIMIT);
+
+    let proposal_page = PageRequest::new(Some(limit), None)?;
+    let agent_proposals = catalog
+        .list_proposals(
+            None,
+            Some(graph_owl_authz::agent::ProposalStatus::Open),
+            &proposal_page,
+        )
+        .await?
+        .data;
+
+    let (change_proposals, _total) = catalog
+        .list_change_proposals(
+            Some(graph_owl_core::collaboration::ProposalStatus::Pending),
+            limit,
+            0,
+        )
+        .await?;
+
+    let review_filter = graph_owl_storage::ReviewQueueFilter {
+        status: Some(graph_owl_core::resolution::ReviewStatus::Pending),
+        kind: None,
+        min_score: None,
+        max_score: None,
+        limit,
+        offset: 0,
+    };
+    let (resolution_queue, _total) = catalog.review_queue(&principal, &review_filter).await?;
+
+    let mut findings = catalog
+        .list_findings(None, Some(graph_owl_core::finding::FindingStatus::Pending))
+        .await?;
+    findings.truncate(limit);
+
+    let mut extraction_claims = catalog.extraction_queue().await?;
+    extraction_claims.truncate(limit);
+
+    Ok(Json(merge_inbox(
+        agent_proposals,
+        change_proposals,
+        resolution_queue,
+        findings,
+        extraction_claims,
+    )))
+}
+
+#[cfg(test)]
+mod inbox_merge {
+    use super::*;
+    use chrono::{TimeZone, Timelike};
+    use uuid::Uuid;
+
+    fn at(hour: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 8, 17, hour, 0, 0)
+            .unwrap()
+    }
+
+    fn agent_proposal(at_hour: u32) -> graph_owl_authz::agent::Proposal {
+        graph_owl_authz::agent::Proposal {
+            id: Uuid::new_v4(),
+            proposed_by: graph_owl_core::ownership::EntityReference {
+                id: "agent-1".to_string(),
+                kind: graph_owl_core::ownership::OwnerKind::User,
+                display_name: "Agent One".to_string(),
+                inherited: false,
+            },
+            target_fqn: "svc:orders".to_string(),
+            capability: graph_owl_authz::agent::AgentCapability::ProposeDescription,
+            change: serde_json::json!({}),
+            rationale: "seen in three sources".to_string(),
+            confidence: 0.9,
+            status: graph_owl_authz::agent::ProposalStatus::Open,
+            base_version: graph_owl_core::envelope::EntityVersion::initial(),
+            decided_by: None,
+            decided_at: None,
+            created_at: at(at_hour),
+        }
+    }
+
+    fn change_proposal(at_hour: u32) -> graph_owl_core::collaboration::Proposal {
+        graph_owl_core::collaboration::Proposal {
+            id: Uuid::new_v4(),
+            about: Uuid::new_v4(),
+            field: "description".to_string(),
+            current_value: None,
+            proposed_value: Some("a better description".to_string()),
+            rationale: "the old one was empty".to_string(),
+            status: graph_owl_core::collaboration::ProposalStatus::Pending,
+            proposed_by: "mallory".to_string(),
+            decided_by: None,
+            decided_at: None,
+            decision_reason: None,
+            created_at: at(at_hour),
+        }
+    }
+
+    fn review_entry(at_hour: u32) -> graph_owl_core::resolution::ReviewQueueEntry {
+        graph_owl_core::resolution::ReviewQueueEntry {
+            id: Uuid::new_v4(),
+            target: Uuid::new_v4(),
+            candidate: Uuid::new_v4(),
+            score: 0.75,
+            evidence: vec![],
+            status: graph_owl_core::resolution::ReviewStatus::Pending,
+            decided_by: None,
+            decided_at: None,
+            reason: None,
+            created_at: at(at_hour),
+        }
+    }
+
+    fn finding(at_hour: u32) -> graph_owl_core::finding::Finding {
+        graph_owl_core::finding::Finding::new(
+            "gst",
+            "gst:MissingInGstr2b",
+            "1025:inv-1",
+            "claimed, never filed",
+            "gst:Section16",
+            vec![graph_owl_core::finding::Evidence {
+                subject: "1025:inv-1".to_string(),
+                predicate: "taxAmount".to_string(),
+                value: "45000".to_string(),
+                var: None,
+            }],
+        )
+        .map(|mut f| {
+            f.detected_at = at(at_hour);
+            f
+        })
+        .expect("a complete finding")
+    }
+
+    fn claim() -> graph_owl_api::extraction::PendingClaim {
+        graph_owl_api::extraction::PendingClaim {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            subject: "svc:orders".to_string(),
+            predicate: "description".to_string(),
+            object: "append-only".to_string(),
+            confidence: 0.6,
+            passage: "orders is append-only".to_string(),
+            span: (0, 21),
+        }
+    }
+
+    #[test]
+    fn counts_every_source_independently_so_one_going_to_zero_is_visible() {
+        let out = merge_inbox(
+            vec![agent_proposal(1)],
+            vec![change_proposal(1), change_proposal(2)],
+            vec![],
+            vec![finding(1)],
+            vec![claim(), claim(), claim()],
+        );
+        assert_eq!(out.counts.agent_proposals, 1);
+        assert_eq!(out.counts.change_proposals, 2);
+        assert_eq!(out.counts.resolution_queue, 0);
+        assert_eq!(out.counts.findings, 1);
+        assert_eq!(out.counts.extraction_claims, 3);
+        assert_eq!(out.items.len(), 7);
+    }
+
+    /// The mutator this guards against: a copy-pasted `.extend()` call for
+    /// a sixth source, or one of the five silently omitted, both produce a
+    /// plausible-looking non-empty list — only checking each source is
+    /// *present by name* catches either.
+    #[test]
+    fn every_source_is_actually_represented_by_its_own_tag() {
+        let out = merge_inbox(
+            vec![agent_proposal(1)],
+            vec![change_proposal(1)],
+            vec![review_entry(1)],
+            vec![finding(1)],
+            vec![claim()],
+        );
+        let sources: std::collections::HashSet<&str> = out.items.iter().map(|i| i.source).collect();
+        assert_eq!(
+            sources,
+            std::collections::HashSet::from([
+                "agent-proposal",
+                "change-proposal",
+                "resolution",
+                "finding",
+                "extraction-claim",
+            ])
+        );
+    }
+
+    #[test]
+    fn dated_items_sort_most_recent_first_across_every_source() {
+        let out = merge_inbox(
+            vec![agent_proposal(3)],
+            vec![change_proposal(1)],
+            vec![review_entry(5)],
+            vec![finding(2)],
+            vec![],
+        );
+        let hours: Vec<u32> = out
+            .items
+            .iter()
+            .map(|i| i.created_at.expect("dated").hour())
+            .collect();
+        assert_eq!(
+            hours,
+            vec![5, 3, 2, 1],
+            "expected descending, got {hours:?}"
+        );
+    }
+
+    /// The negative case a naive `Option<T>` sort gets backwards: `None`
+    /// sorting *before* every dated item would put extraction claims at
+    /// the top of "most recent first", which is exactly wrong.
+    #[test]
+    fn undated_items_sort_after_every_dated_item_not_before() {
+        let out = merge_inbox(vec![], vec![], vec![], vec![], vec![claim()]);
+        let out_with_one_dated =
+            merge_inbox(vec![], vec![], vec![], vec![finding(1)], vec![claim()]);
+        assert_eq!(out.items[0].source, "extraction-claim");
+        assert_eq!(
+            out_with_one_dated.items.last().unwrap().source,
+            "extraction-claim",
+            "undated item must sort last once a dated item exists"
+        );
+    }
+
+    #[test]
+    fn an_empty_inbox_is_an_empty_list_not_an_error() {
+        let out = merge_inbox(vec![], vec![], vec![], vec![], vec![]);
+        assert_eq!(out.items.len(), 0);
+        assert_eq!(out.counts, InboxCounts::default());
+    }
+}
+
+/// One federated search result — Plan 122a A1's global ⌘K search, which
+/// answers across assets, glossary terms and business metrics without the
+/// caller needing to know which one holds the match.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResult {
+    /// "asset" | "glossary-term" | "business-metric".
+    kind: &'static str,
+    id: String,
+    label: String,
+    fqn: String,
+    detail: Option<String>,
+    /// Only assets have this — `Some("table")`, `Some("service")`, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_kind: Option<&'static str>,
+}
+
+/// Normalizes three otherwise-independent searches into one list. Grouped
+/// by source in a fixed order (assets, then terms, then metrics) rather
+/// than interleaved by score: none of the three stores exposes a
+/// cross-source-comparable relevance number, and inventing one to sort by
+/// would rank results on a value nobody actually computed — the same
+/// "do not fabricate an ordering the data does not support" reasoning
+/// `merge_inbox` applies to undated items, generalized to ranking instead
+/// of dating.
+fn merge_search(
+    assets: Vec<graph_owl_storage::SearchHit>,
+    terms: Vec<graph_owl_storage::GlossaryTermRecord>,
+    metrics: Vec<graph_owl_storage::MetricRecord>,
+) -> Vec<SearchResult> {
+    let mut out = Vec::with_capacity(assets.len() + terms.len() + metrics.len());
+
+    out.extend(assets.into_iter().map(|hit| SearchResult {
+        kind: "asset",
+        id: hit.asset.id.to_string(),
+        label: hit.asset.name,
+        fqn: hit.asset.fully_qualified_name,
+        detail: hit.snippet,
+        asset_kind: Some(hit.asset.kind.as_str()),
+    }));
+
+    out.extend(terms.into_iter().map(|t| SearchResult {
+        kind: "glossary-term",
+        id: t.id.to_string(),
+        label: t.name,
+        fqn: t.fully_qualified_name,
+        detail: Some(t.definition),
+        asset_kind: None,
+    }));
+
+    out.extend(metrics.into_iter().map(|m| SearchResult {
+        kind: "business-metric",
+        id: m.id.to_string(),
+        label: m.name,
+        fqn: m.fully_qualified_name,
+        detail: Some(m.definition),
+        asset_kind: None,
+    }));
+
+    out
+}
+
+/// `?q` for [`search`], plus a per-source cap so a broad query cannot pull
+/// an unbounded number of assets into a quick-search response — the same
+/// concern [`INBOX_MAX_LIMIT`] answers for the inbox.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct SearchQuery {
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+const SEARCH_DEFAULT_LIMIT: usize = 10;
+const SEARCH_MAX_LIMIT: usize = 50;
+
+/// `GET /search` — Plan 122a A1. Federates `/assets/search`,
+/// `/glossary-terms/search` and `/business-metrics/search` behind one ⌘K
+/// box, so the console does not need three requests (or three separate
+/// result lists) for one question a user asked once.
+///
+/// **Composes read access, invents none** — same posture as [`inbox`]. Only
+/// the asset search is principal-filtered today (`search_assets_for`);
+/// glossary and metric search have no such filter in the endpoints this
+/// composes, so this endpoint does not claim one either.
+async fn search(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<SearchQuery>,
+) -> Result<Json<Vec<SearchResult>>, AppError> {
+    let limit = query
+        .limit
+        .unwrap_or(SEARCH_DEFAULT_LIMIT)
+        .min(SEARCH_MAX_LIMIT);
+
+    let asset_filter = graph_owl_storage::AssetFilter {
+        kind: None,
+        owner: None,
+        unowned: false,
+        extension: &[],
+        domain: None,
+        data_product: None,
+        lifecycle: None,
+        tags: &[],
+        certification: None,
+        health: None,
+    };
+    let page = PageRequest::new(Some(limit), None)?;
+    let assets = catalog
+        .search_assets_for(&principal, &query.q, &asset_filter, &page)
+        .await?
+        .data;
+
+    let mut terms = catalog.search_terms(&query.q).await?;
+    terms.truncate(limit);
+
+    let mut metrics = catalog.search_metrics(&query.q).await?;
+    metrics.truncate(limit);
+
+    Ok(Json(merge_search(assets, terms, metrics)))
+}
+
+#[cfg(test)]
+mod search_merge {
+    use super::*;
+    use uuid::Uuid;
+
+    fn asset_hit(name: &str) -> graph_owl_storage::SearchHit {
+        graph_owl_storage::SearchHit {
+            asset: graph_owl_core::Asset {
+                id: Uuid::new_v4(),
+                kind: graph_owl_core::AssetKind::Table,
+                name: name.to_string(),
+                fully_qualified_name: format!("svc.db.{name}"),
+                parent_id: None,
+                description: None,
+                properties: None,
+                extension: None,
+                lifecycle: graph_owl_core::lifecycle::LifecycleState::Active,
+                deprecation: None,
+                owners: vec![],
+                version: graph_owl_core::envelope::EntityVersion::initial(),
+                updated_by: "system".to_string(),
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            snippet: Some(format!("...{name} matched here...")),
+        }
+    }
+
+    fn term(name: &str) -> graph_owl_storage::GlossaryTermRecord {
+        graph_owl_storage::GlossaryTermRecord {
+            id: Uuid::new_v4(),
+            glossary_id: Uuid::new_v4(),
+            name: name.to_string(),
+            fully_qualified_name: format!("finance.{name}"),
+            definition: format!("the {name} term"),
+            status: graph_owl_core::glossary::TermStatus::Approved,
+            synonyms: vec![],
+            abbreviations: vec![],
+            version: graph_owl_core::envelope::EntityVersion::initial(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn metric(name: &str) -> graph_owl_storage::MetricRecord {
+        graph_owl_storage::MetricRecord {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            fully_qualified_name: format!("metrics.{name}"),
+            definition: format!("the {name} metric"),
+            formula: None,
+            unit: None,
+            granularity: None,
+            calculation_type: graph_owl_core::metric::CalculationType::Simple,
+            defined_by: None,
+            source_assets: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn every_source_is_represented_by_its_own_kind() {
+        let out = merge_search(
+            vec![asset_hit("orders")],
+            vec![term("customer")],
+            vec![metric("revenue")],
+        );
+        let kinds: std::collections::HashSet<&str> = out.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            std::collections::HashSet::from(["asset", "glossary-term", "business-metric"])
+        );
+    }
+
+    #[test]
+    fn an_asset_carries_its_own_kind_and_snippet_the_other_two_never_do() {
+        let out = merge_search(vec![asset_hit("orders")], vec![], vec![]);
+        assert_eq!(out[0].asset_kind, Some("table"));
+        assert!(out[0].detail.as_deref().unwrap().contains("orders"));
+    }
+
+    /// The mutator this guards against: a copy-paste that maps glossary
+    /// terms into `SearchResult` using the metric arm's fields (or vice
+    /// versa) still produces a plausible-looking result — only checking
+    /// `asset_kind` is `None` for both non-asset sources, and that their
+    /// `kind` tags differ, catches it.
+    #[test]
+    fn glossary_terms_and_metrics_never_carry_an_asset_kind() {
+        let out = merge_search(vec![], vec![term("customer")], vec![metric("revenue")]);
+        assert!(out.iter().all(|r| r.asset_kind.is_none()));
+        assert_ne!(out[0].kind, out[1].kind);
+    }
+
+    #[test]
+    fn no_matches_anywhere_is_an_empty_list_not_an_error() {
+        assert_eq!(merge_search(vec![], vec![], vec![]).len(), 0);
+    }
 }
 
 async fn asset_stats(

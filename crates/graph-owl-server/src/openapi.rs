@@ -457,6 +457,25 @@ pub static ROUTES: &[Route] = &[
         false,
     ),
     route(
+        "get",
+        "/inbox",
+        "The 'waiting on you' feed — pending items merged from agent proposals, \
+         change proposals, the resolution queue, findings and extraction claims",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/search",
+        "One search across assets, glossary terms and business metrics",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
         "post",
         "/graph/reconcile",
         "Repair the graph projection",
