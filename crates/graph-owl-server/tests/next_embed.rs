@@ -39,16 +39,17 @@ async fn next_serves_the_graphowl_app_bundle_not_the_ui_one_in_the_real_composed
 
     let (app, _db, _url) = test_app().await;
 
-    let response = <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
-        app,
-        axum::http::Request::builder()
-            .method("GET")
-            .uri(format!("/next/static/{asset}"))
-            .body(axum::body::Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should be handled");
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/next/static/{asset}"))
+                .body(axum::body::Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
 
     assert_eq!(
         response.status(),
@@ -68,16 +69,17 @@ async fn next_serves_the_graphowl_app_bundle_not_the_ui_one_in_the_real_composed
 async fn next_root_with_trailing_slash_serves_graphowl_app_in_the_real_composed_app() {
     let (app, _db, _url) = test_app().await;
 
-    let response = <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
-        app,
-        axum::http::Request::builder()
-            .method("GET")
-            .uri("/next/")
-            .body(axum::body::Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should be handled");
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/next/")
+                .body(axum::body::Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
 
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -94,16 +96,17 @@ async fn next_root_with_trailing_slash_serves_graphowl_app_in_the_real_composed_
 async fn next_falls_back_to_graphowl_apps_own_index_html_in_the_real_composed_app() {
     let (app, _db, _url) = test_app().await;
 
-    let response = <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
-        app,
-        axum::http::Request::builder()
-            .method("GET")
-            .uri("/next/overview")
-            .body(axum::body::Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should be handled");
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/next/overview")
+                .body(axum::body::Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
 
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -124,16 +127,17 @@ async fn next_falls_back_to_graphowl_apps_own_index_html_in_the_real_composed_ap
 async fn root_still_serves_the_ui_bundle_unaffected_by_the_next_mount() {
     let (app, _db, _url) = test_app().await;
 
-    let response = <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
-        app,
-        axum::http::Request::builder()
-            .method("GET")
-            .uri("/explore/some/deep/path")
-            .body(axum::body::Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should be handled");
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/explore/some/deep/path")
+                .body(axum::body::Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
 
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)

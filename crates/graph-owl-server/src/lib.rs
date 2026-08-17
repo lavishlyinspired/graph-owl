@@ -9860,6 +9860,7 @@ async fn overview(
         },
         "graph": overview.graph,
         "recentlyChanged": overview.recently_changed,
+        "health": overview.health,
     })))
 }
 

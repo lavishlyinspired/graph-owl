@@ -5181,6 +5181,35 @@ impl Storage for PostgresStorage {
         Ok((row.get("described"), row.get("total")))
     }
 
+    /// Reuses `OWNERS_EXPR` — the same nearest-owned-ancestor expression
+    /// `AssetFilter::unowned` and `recently_changed_visible` already use
+    /// below — rather than a second copy of the walk. Both counts in one
+    /// statement, same reasoning as `count_documented_visible` above: two
+    /// queries could observe different states and produce a ratio above 1.
+    async fn count_unowned_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<(i64, i64), StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok((0, 0));
+        };
+        let row = sqlx::query(&format!(
+            "SELECT count(*) FILTER (WHERE json_array_length(effective_owners.owners) = 0) AS unowned,
+                    count(*) AS total
+             FROM assets
+             LEFT JOIN LATERAL (SELECT {OWNERS_EXPR} AS owners) effective_owners ON true
+             WHERE NOT deleted
+               AND (fully_qualified_name LIKE ANY($1))
+               AND NOT (fully_qualified_name LIKE ANY($2))"
+        ))
+        .bind(&allow)
+        .bind(&deny)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok((row.get("unowned"), row.get("total")))
+    }
+
     async fn recently_changed_visible(
         &self,
         limit: i64,

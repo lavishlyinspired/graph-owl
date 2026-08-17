@@ -2703,6 +2703,29 @@ impl Storage for InMemoryStorage {
         ))
     }
 
+    /// **Direct ownership only** — this backend does not walk inherited
+    /// ownership up the containment chain anywhere else either (no
+    /// `AssetFilter::unowned` support exists in this crate today), so an
+    /// asset counted here as unowned may in fact have an owner via an
+    /// ancestor. Consistent with this crate's existing capability level
+    /// rather than a new gap; the Postgres backend (what `test_app()` and
+    /// production both use) is the one that walks inheritance.
+    async fn count_unowned_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<(i64, i64), StorageError> {
+        let assets = self.assets.lock().unwrap();
+        let visible: Vec<_> = assets
+            .iter()
+            .filter(|a| !a.deleted && predicate.admits(&a.fully_qualified_name))
+            .collect();
+        let unowned = visible.iter().filter(|a| a.owners.is_empty()).count();
+        Ok((
+            i64::try_from(unowned).unwrap_or(i64::MAX),
+            i64::try_from(visible.len()).unwrap_or(i64::MAX),
+        ))
+    }
+
     async fn recently_changed_visible(
         &self,
         limit: i64,

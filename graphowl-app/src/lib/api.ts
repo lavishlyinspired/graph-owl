@@ -75,3 +75,41 @@ export async function performInboxAction(action: InboxAction): Promise<void> {
 // and the fetch that executes it.
 export { resolveInboxAction };
 export type { InboxAction };
+
+export interface OverviewHealth {
+  readonly coveragePct: number;
+  readonly governancePct: number;
+}
+
+export interface GraphSize {
+  readonly flakes: number;
+  readonly nodes: number;
+  readonly edges: number;
+}
+
+export interface RecentlyChangedAsset {
+  readonly id: string;
+  readonly kind: string;
+  readonly name: string;
+  readonly fullyQualifiedName: string;
+  readonly updatedAt: string;
+  readonly updatedBy: string;
+}
+
+export interface OverviewResponse {
+  readonly assets: {
+    readonly total: number;
+    readonly byKind: readonly { readonly kind: string; readonly count: number }[];
+  };
+  readonly documentation: {
+    readonly described: number;
+    readonly total: number;
+  };
+  readonly graph: GraphSize | null;
+  readonly recentlyChanged: readonly RecentlyChangedAsset[];
+  readonly health: OverviewHealth;
+}
+
+export function fetchOverview(): Promise<OverviewResponse> {
+  return apiFetch<OverviewResponse>("/overview");
+}

@@ -2452,6 +2452,20 @@ pub trait Storage: Send + Sync {
         predicate: &AccessPredicate,
     ) -> Result<(i64, i64), StorageError>;
 
+    /// How many visible assets have **no effective owner anywhere up their
+    /// containment chain** — direct or inherited, the same nearest-owned-
+    /// ancestor rule [`AssetFilter::unowned`] already filters by — and how
+    /// many there are in total. Plan 122a A2: the console's "governance"
+    /// health figure is `1 - unowned / total`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn count_unowned_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<(i64, i64), StorageError>;
+
     /// The most recently changed visible assets, newest first.
     ///
     /// # Errors

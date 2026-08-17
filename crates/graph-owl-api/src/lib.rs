@@ -2045,6 +2045,68 @@ pub struct Overview {
     /// `None` when no graph engine is configured — distinct from a graph of
     /// size zero, which is what a configured-but-empty projection looks like.
     pub graph: Option<GraphSize>,
+    /// Plan 122a A2's two health figures. Deliberately not five: a
+    /// "confidence" percentage was found to have no defensible graph-wide
+    /// source (facts carry no `confidence` field; it exists only on a
+    /// narrow review-queue filter) and "validation" has no existing
+    /// distinct-asset pass/fail aggregation, only a raw findings list —
+    /// inventing either would fabricate a number rather than report one.
+    pub health: OverviewHealth,
+}
+
+/// Plan 122a A2. Both are `1 - (gap / total)`, `100.0` when `total` is
+/// zero — an empty catalog has nothing undocumented or unowned, which is
+/// the honest reading of "nothing to report" rather than an arbitrary
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewHealth {
+    /// `described / documented_total * 100` — already computed above as
+    /// `Overview::described` / `Overview::documented_total`; kept as its
+    /// own percentage here so the console does not have to divide two
+    /// fields itself.
+    pub coverage_pct: f64,
+    /// `1 - (unowned / total) * 100`, "unowned" meaning no effective owner
+    /// anywhere up the containment chain — the same nearest-owned-ancestor
+    /// rule `AssetFilter::unowned` filters by.
+    pub governance_pct: f64,
+}
+
+fn health_pct(gap: i64, total: i64) -> f64 {
+    if total == 0 {
+        return 100.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let (gap, total) = (gap as f64, total as f64);
+    (1.0 - gap / total) * 100.0
+}
+
+#[cfg(test)]
+mod health_pct_tests {
+    use super::health_pct;
+
+    #[test]
+    fn no_gap_is_full_health() {
+        assert!((health_pct(0, 10) - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn every_item_gapped_is_zero_health() {
+        assert!((health_pct(10, 10) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_partial_gap_lands_on_the_right_percentage() {
+        assert!((health_pct(3, 10) - 70.0).abs() < 1e-9);
+    }
+
+    /// The vacuous case: an empty catalog has nothing undocumented and
+    /// nothing unowned, which is a real state, not a division-by-zero to
+    /// paper over with 0%.
+    #[test]
+    fn zero_total_is_full_health_not_a_crash_or_zero() {
+        assert!((health_pct(0, 0) - 100.0).abs() < f64::EPSILON);
+    }
 }
 
 /// The size of the graph projection.
@@ -15305,6 +15367,7 @@ impl Catalog {
             .count_assets_by_kind_visible(&predicate)
             .await?;
         let (described, total) = self.storage.count_documented_visible(&predicate).await?;
+        let (unowned, total_for_owners) = self.storage.count_unowned_visible(&predicate).await?;
         // Ten is what fits above the fold without scrolling. A longer list is
         // a worse answer to "what changed lately", not a more complete one.
         let recently_changed = self
@@ -15354,6 +15417,10 @@ impl Catalog {
             documented_total: total,
             recently_changed,
             graph,
+            health: OverviewHealth {
+                coverage_pct: health_pct(total - described, total),
+                governance_pct: health_pct(unowned, total_for_owners),
+            },
         })
     }
 
