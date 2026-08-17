@@ -1,14 +1,26 @@
 //! Plan 122a A0: the dual embed (`ui/dist` at `/`, `graphowl-app/dist` under
-//! `/next/`) is new behaviour with no prior test coverage in this crate —
+//! `/next`) is new behaviour with no prior test coverage in this crate —
 //! written before it shipped, not after, per the project's TDD rule.
 //!
 //! What matters here is not the literal bytes (those come from whatever is
 //! currently built into each `dist/`) but the *routing contract*: each
 //! embed serves its own assets with the right content type and immutable
 //! caching, falls back to its own `index.html` for unknown paths so the
-//! client-side router can resolve them, and — the part that is easy to get
-//! wrong with `Router::nest` — a path outside `/next` must never be
-//! answered by the `/next` sub-router.
+//! client-side router can resolve them, and a path outside `/next` must
+//! never be answered by `router_next()`.
+//!
+//! `router_next()` is `.merge()`d here, exactly as `graph-owl-server`
+//! merges it — an earlier version of this router used `.route("/", ...)`
+//! plus a wildcard under `.nest("/next", ...)`, which every test below
+//! passed while the *live* server still served `ui/dist` at `GET /next/`.
+//! `nest()`'s path rewriting maps an inner `"/"` route to the bare prefix
+//! only (no trailing slash) with no inner path able to express the
+//! trailing-slash form, and `{*path}` never matches an empty remainder —
+//! so `/next/` matched neither registered route and fell through to the
+//! outer fallback. `router_next()` now owns `/next`, `/next/` and
+//! `/next/{*path}` as plain, fully-prefixed routes and is merged rather
+//! than nested; `bare_next_root_with_trailing_slash_serves_graphowl_app`
+//! below is the regression test for exactly that gap.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -93,11 +105,12 @@ async fn next_router_serves_graphowl_app_assets_when_nested_under_next() {
          run `VITE_BASE=/next/ npm run build` in graphowl-app/ first",
     );
 
-    // Nested exactly as `graph-owl-server` nests it — axum strips the
-    // `/next` prefix before the inner router (and this crate's handler)
-    // ever see the path, which is the behaviour the embed build's
-    // `base: "/next/"` asset URLs depend on.
-    let app = axum::Router::new().nest("/next", graph_owl_ui::router_next());
+    // Merged exactly as `graph-owl-server` merges it. `router_next()`'s
+    // routes already carry the `/next` prefix, so there is no automatic
+    // prefix-stripping to rely on here — `serve_next` strips it itself,
+    // which is the behaviour the embed build's `base: "/next/"` asset URLs
+    // depend on.
+    let app = axum::Router::new().merge(graph_owl_ui::router_next());
 
     let response = app
         .oneshot(
@@ -113,7 +126,7 @@ async fn next_router_serves_graphowl_app_assets_when_nested_under_next() {
 
 #[tokio::test]
 async fn next_router_falls_back_to_its_own_index_html_not_the_ui_ones() {
-    let app = axum::Router::new().nest("/next", graph_owl_ui::router_next());
+    let app = axum::Router::new().merge(graph_owl_ui::router_next());
 
     let response = app
         .oneshot(Request::get("/next/overview").body(Body::empty()).unwrap())
@@ -134,12 +147,53 @@ async fn next_router_falls_back_to_its_own_index_html_not_the_ui_ones() {
     );
 }
 
+/// **Regression test.** `GET /next/` — trailing slash, the URL a browser
+/// actually requests for the console root — is the exact request that
+/// served `ui/dist` instead of `graphowl-app/dist` on the live server while
+/// this same assertion, aimed at `/next/overview` instead, passed. See this
+/// file's module doc comment for the `nest()` mechanics that produced the
+/// gap.
+#[tokio::test]
+async fn bare_next_root_with_trailing_slash_serves_graphowl_app() {
+    let app = axum::Router::new().merge(graph_owl_ui::router_next());
+
+    let response = app
+        .oneshot(Request::get("/next/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("/next/static/"),
+        "expected graphowl-app's own index.html (base=/next/), got: {html}"
+    );
+}
+
+/// Companion to the trailing-slash case: `/next` with no slash at all must
+/// resolve identically, not just the two forms this crate happens to test.
+#[tokio::test]
+async fn bare_next_root_without_trailing_slash_serves_graphowl_app() {
+    let app = axum::Router::new().merge(graph_owl_ui::router_next());
+
+    let response = app
+        .oneshot(Request::get("/next").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("/next/static/"),
+        "expected graphowl-app's own index.html (base=/next/), got: {html}"
+    );
+}
+
 #[tokio::test]
 async fn a_path_outside_next_is_not_answered_by_the_next_sub_router() {
-    // `Router::nest` must not swallow anything outside its prefix — if it
-    // did, `/next` would shadow the real console at `/` once merged into
-    // the server's full route table.
-    let app = axum::Router::new().nest("/next", graph_owl_ui::router_next());
+    let app = axum::Router::new().merge(graph_owl_ui::router_next());
 
     let response = app
         .oneshot(Request::get("/overview").body(Body::empty()).unwrap())

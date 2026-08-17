@@ -8,10 +8,11 @@
 //!
 //! **Plan 122a A0–A11**: `graphowl-app/` is the console rebuild that replaces
 //! `ui/`. During the migration both are embedded — `ui/dist` still serves `/`
-//! (`router()`), `graphowl-app/dist` serves under `/next/` (`router_next()`)
-//! — so the working console never breaks mid-rebuild. A11 removes `router()`
-//! and `Assets` (the `ui/` embed) entirely and promotes `router_next()`'s
-//! content to serve `/`.
+//! (`router()`), `graphowl-app/dist` serves under `/next` (`router_next()`,
+//! `.merge()`d — see its doc comment for why not `.nest()`) — so the working
+//! console never breaks mid-rebuild. A11 removes `router()` and `Assets`
+//! (the `ui/` embed) entirely and promotes `router_next()`'s content to
+//! serve `/`.
 
 use axum::{
     Router,
@@ -40,11 +41,32 @@ pub fn router() -> Router {
     Router::new().fallback(get(serve))
 }
 
-/// Serves the in-progress `graphowl-app/` rebuild under `/next/`
+/// Serves the in-progress `graphowl-app/` rebuild under `/next`
 /// (Plan 122a A0). Temporary — removed at A11 once `graphowl-app` replaces
 /// `ui/` as the sole embed.
+///
+/// **`.merge()` this at the call site, never `.nest("/next", ...)`.** Routes
+/// are registered with the `/next` prefix already baked in — three of them,
+/// deliberately, because `axum::routing::path_router::path_for_nested_route`
+/// (traced directly against axum 0.8.9's source while chasing a live bug
+/// this shape produces) maps a nested router's own `"/"` route to the outer
+/// prefix *without* a trailing slash, and there is no inner path that maps
+/// to the prefix *with* one — `path == "/"` is special-cased to `prefix`
+/// alone before the general `format!("{prefix}{path}")` case ever runs. A
+/// catch-all wildcard doesn't fill the gap either: matchit's `{*path}`
+/// requires at least one captured character, so it never matches a bare
+/// trailing slash. The result, confirmed live: `GET /next` and
+/// `GET /next/overview` served `graphowl-app/dist` correctly, while
+/// `GET /next/` — the URL a browser actually requests for the console root
+/// — silently fell through to the outer router's fallback and served
+/// `ui/dist` instead. `.merge()` sidesteps `nest()`'s path rewriting
+/// entirely, so all three of `/next`, `/next/` and `/next/{*path}` are
+/// ordinary routes this router owns outright.
 pub fn router_next() -> Router {
-    Router::new().fallback(get(serve_next))
+    Router::new()
+        .route("/next", get(serve_next))
+        .route("/next/", get(serve_next))
+        .route("/next/{*path}", get(serve_next))
 }
 
 // `axum::routing::get` requires a `Handler`, which is only implemented for
@@ -56,9 +78,11 @@ async fn serve(uri: Uri) -> Response {
 }
 
 async fn serve_next(uri: Uri) -> Response {
-    // Nested under `/next`, so axum strips that prefix before this handler
-    // sees the path — trimming '/' is still needed for the remainder.
-    serve_from::<NextAssets>(uri.path().trim_start_matches('/'), "graphowl-app")
+    // `router_next()` is `.merge()`d, not nested, so axum never strips a
+    // prefix for us — strip `/next` ourselves before looking the path up in
+    // `NextAssets`, whose embedded paths are relative to `graphowl-app/dist`.
+    let path = uri.path().strip_prefix("/next").unwrap_or(uri.path());
+    serve_from::<NextAssets>(path.trim_start_matches('/'), "graphowl-app")
 }
 
 fn serve_from<A: RustEmbed>(path: &str, label: &'static str) -> Response {
