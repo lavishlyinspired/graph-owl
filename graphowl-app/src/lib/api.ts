@@ -129,6 +129,13 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function apiDelete(path: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`${path} responded ${response.status}`);
+  }
+}
+
 export type AssetKind = "service" | "database" | "schema" | "table" | "column";
 
 export interface GraphNode {
@@ -376,4 +383,285 @@ export interface Finding {
 
 export function fetchFindings(): Promise<readonly Finding[]> {
   return apiFetch<readonly Finding[]>("/findings");
+}
+
+// ---- GOVERN group — Validation, Resolution, Drift, Governance (Plan 122a A5) ----
+
+export type Severity = "violation" | "warning" | "info";
+
+export interface ValidationAssignment {
+  readonly id: string;
+  readonly assignee: string;
+  readonly assignedBy: string;
+  readonly assignedAt: string;
+}
+
+export interface ValidationWaiver {
+  readonly id: string;
+  readonly reason: string;
+  readonly waivedBy: string;
+  readonly waivedAt: string;
+  readonly expiresAt: string;
+  readonly expired: boolean;
+}
+
+export interface ValidationFinding {
+  readonly id: string;
+  readonly shape: string;
+  readonly focusNode: string;
+  readonly path: string | null;
+  readonly constraint: string;
+  readonly severity: Severity;
+  readonly message: string;
+  readonly actual: string | null;
+  readonly suggestion: string | null;
+  readonly assignment: ValidationAssignment | null;
+  readonly waiver: ValidationWaiver | null;
+}
+
+export interface ValidationReport {
+  readonly data: readonly ValidationFinding[];
+  readonly computedAtT: number;
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+export function fetchValidationReport(
+  filters: { readonly severity?: Severity; readonly limit?: number } = {},
+): Promise<ValidationReport> {
+  const params = new URLSearchParams();
+  if (filters.severity) params.set("severity", filters.severity);
+  params.set("limit", String(filters.limit ?? 200));
+  return apiFetch<ValidationReport>(`/validation/report?${params.toString()}`);
+}
+
+export interface WaiveFindingRequest {
+  readonly shape: string;
+  readonly focusNode: string;
+  readonly path?: string | null;
+  readonly constraint: string;
+  readonly reason: string;
+  readonly expiresAt: string;
+}
+
+export function waiveFinding(body: WaiveFindingRequest): Promise<ValidationWaiver> {
+  return apiPost<ValidationWaiver>("/validation/waivers", body);
+}
+
+export function revokeWaiver(id: string): Promise<void> {
+  return apiDelete(`/validation/waivers/${encodeURIComponent(id)}`);
+}
+
+export interface AssignFindingRequest {
+  readonly shape: string;
+  readonly focusNode: string;
+  readonly path?: string | null;
+  readonly constraint: string;
+  readonly assignee: string;
+}
+
+export function assignFinding(body: AssignFindingRequest): Promise<ValidationAssignment> {
+  return apiPost<ValidationAssignment>("/validation/assignments", body);
+}
+
+export function unassignFinding(id: string): Promise<void> {
+  return apiDelete(`/validation/assignments/${encodeURIComponent(id)}`);
+}
+
+export type ReviewStatus = "pending" | "confirmed" | "rejected";
+
+export type Evidence =
+  | { readonly kind: "exactFqn" }
+  | { readonly kind: "normalizedFqn" }
+  | { readonly kind: "exactName"; readonly scope: string }
+  | { readonly kind: "nameSimilarity"; readonly metric: string; readonly value: number }
+  | { readonly kind: "structuralOverlap"; readonly sharedColumns: number; readonly total: number }
+  | { readonly kind: "sameParent" }
+  | { readonly kind: "sameSourceSystem" };
+
+export interface ReviewQueueEntry {
+  readonly id: string;
+  readonly target: string;
+  readonly candidate: string;
+  readonly score: number;
+  readonly evidence: readonly Evidence[];
+  readonly status: ReviewStatus;
+  readonly decidedBy: string | null;
+  readonly decidedAt: string | null;
+  readonly reason: string | null;
+  readonly createdAt: string;
+}
+
+export interface ReviewQueuePage {
+  readonly data: readonly ReviewQueueEntry[];
+  readonly total: number;
+}
+
+export function fetchResolutionQueue(
+  filters: { readonly status?: ReviewStatus; readonly limit?: number } = {},
+): Promise<ReviewQueuePage> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  params.set("limit", String(filters.limit ?? 200));
+  return apiFetch<ReviewQueuePage>(`/resolution/queue?${params.toString()}`);
+}
+
+export type Resolution =
+  | { readonly kind: "new" }
+  | { readonly kind: "existing"; readonly entity: string; readonly confidence: number }
+  | { readonly kind: "ambiguous"; readonly candidates: readonly unknown[] };
+
+export function confirmReview(id: string): Promise<Resolution> {
+  return apiPost<Resolution>(`/resolution/queue/${encodeURIComponent(id)}/confirm`, {});
+}
+
+export function rejectReview(id: string, reason: string): Promise<Resolution> {
+  return apiPost<Resolution>(`/resolution/queue/${encodeURIComponent(id)}/reject`, { reason });
+}
+
+export interface BulkDecideOutcome {
+  readonly id: string;
+  readonly ok: boolean;
+  readonly problem?: unknown;
+}
+
+export function bulkDecideReview(
+  ids: readonly string[],
+  decision: "confirm" | "reject",
+  reason?: string,
+): Promise<{ readonly data: readonly BulkDecideOutcome[] }> {
+  return apiPost<{ readonly data: readonly BulkDecideOutcome[] }>("/resolution/queue/bulk", {
+    ids,
+    decision,
+    reason,
+  });
+}
+
+export type DriftKind = "liveEdited" | "unapplied";
+export type DriftStatus = "pending" | "applied" | "ignored";
+
+export interface DriftItem {
+  readonly id: string;
+  readonly assetId: string;
+  readonly fullyQualifiedName: string;
+  readonly field: string;
+  readonly kind: DriftKind;
+  readonly liveValue: string | null;
+  readonly declaredValue: string | null;
+  readonly status: DriftStatus;
+  readonly reportedAt: string;
+  readonly decidedAt: string | null;
+  readonly decidedBy: string | null;
+  readonly reason: string | null;
+}
+
+export interface DriftPage {
+  readonly data: readonly DriftItem[];
+  readonly total: number;
+}
+
+export function fetchDrift(
+  filters: { readonly status?: DriftStatus; readonly limit?: number } = {},
+): Promise<DriftPage> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  params.set("limit", String(filters.limit ?? 200));
+  return apiFetch<DriftPage>(`/drift?${params.toString()}`);
+}
+
+export function applyDrift(id: string): Promise<DriftItem> {
+  return apiPost<DriftItem>(`/drift/${encodeURIComponent(id)}/apply`, {});
+}
+
+export function ignoreDrift(id: string, reason: string): Promise<DriftItem> {
+  return apiPost<DriftItem>(`/drift/${encodeURIComponent(id)}/ignore`, { reason });
+}
+
+export type PolicyEffect = "allow" | "deny";
+
+export type ResourceMatcher =
+  | { readonly type: "all" }
+  | { readonly type: "fqnPrefix"; readonly value: string }
+  | { readonly type: "tagged"; readonly value: string }
+  | { readonly type: "namedGraph"; readonly value: string };
+
+export type MetadataOperation =
+  | "viewBasic"
+  | "viewDetails"
+  | "viewSensitive"
+  | "create"
+  | "editDescription"
+  | "editTags"
+  | "editOwners"
+  | "delete"
+  | "restore";
+
+export interface PolicyRule {
+  readonly name: string;
+  readonly effect: PolicyEffect;
+  readonly operations: readonly MetadataOperation[];
+  readonly resources: ResourceMatcher;
+}
+
+export interface Policy {
+  readonly name: string;
+  readonly rules: readonly PolicyRule[];
+}
+
+export interface PolicyBinding {
+  readonly policy: Policy;
+  readonly roles: readonly string[];
+}
+
+export function fetchPolicies(): Promise<readonly PolicyBinding[]> {
+  return apiFetch<readonly PolicyBinding[]>("/policies");
+}
+
+export function upsertPolicy(policy: Policy, roles: readonly string[]): Promise<PolicyBinding> {
+  return apiPost<PolicyBinding>("/policies", { policy, roles });
+}
+
+export function deletePolicy(name: string): Promise<void> {
+  return apiDelete(`/policies/${encodeURIComponent(name)}`);
+}
+
+export interface DryRunOutcome {
+  readonly admitted: number;
+  readonly denied: number;
+  readonly total: number;
+  readonly examples: readonly string[];
+  readonly admitsEverything: boolean;
+}
+
+export function dryRunPolicy(policy: Policy, roles: readonly string[]): Promise<DryRunOutcome> {
+  return apiPost<DryRunOutcome>("/policies/dry-run", { policy, roles });
+}
+
+export type LifecycleState = "draft" | "active" | "deprecated" | "retired";
+
+export interface AssetCount {
+  readonly count: number;
+  /** `true` when more rows exist past the fetched page — the count is a
+   *  floor, not exact, the same honesty the Lineage "COMPLETE PICTURE" tile
+   *  already uses for a cursor-paged result with no server-side total. */
+  readonly truncated: boolean;
+}
+
+export async function countAssets(
+  filter: { readonly unowned?: boolean; readonly lifecycle?: LifecycleState },
+  sampleSize = 200,
+): Promise<AssetCount> {
+  const params = new URLSearchParams();
+  if (filter.unowned) params.set("unowned", "true");
+  if (filter.lifecycle) params.set("lifecycle", filter.lifecycle);
+  params.set("limit", String(sampleSize));
+  const page = await apiFetch<{ readonly data: readonly unknown[]; readonly paging: { readonly after: string | null } }>(
+    `/assets?${params.toString()}`,
+  );
+  return { count: page.data.length, truncated: page.paging.after !== null };
+}
+
+export function fetchRecertificationQueue(): Promise<readonly unknown[]> {
+  return apiFetch<readonly unknown[]>("/recertification-queue");
 }
