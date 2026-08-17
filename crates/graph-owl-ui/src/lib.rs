@@ -1,9 +1,17 @@
 //! Embedded web console: serves the built single-page application from the
 //! server binary.
 //!
-//! **Status**: Epic 39 Slice A. One binary, one process, no CDN, no reverse
-//! proxy — `00f-ui-architecture.md`. Frontend sources live in `ui/`; this crate
-//! only embeds and serves the build output.
+//! **Status**: Epic 39 Slice A; Plan 122a A0 added a second, temporary embed.
+//! One binary, one process, no CDN, no reverse proxy — `00f-ui-architecture.md`.
+//! Frontend sources live in `ui/`; this crate only embeds and serves the
+//! build output.
+//!
+//! **Plan 122a A0–A11**: `graphowl-app/` is the console rebuild that replaces
+//! `ui/`. During the migration both are embedded — `ui/dist` still serves `/`
+//! (`router()`), `graphowl-app/dist` serves under `/next/` (`router_next()`)
+//! — so the working console never breaks mid-rebuild. A11 removes `router()`
+//! and `Assets` (the `ui/` embed) entirely and promotes `router_next()`'s
+//! content to serve `/`.
 
 use axum::{
     Router,
@@ -18,6 +26,10 @@ use rust_embed::RustEmbed;
 #[folder = "$CARGO_MANIFEST_DIR/../../ui/dist"]
 struct Assets;
 
+#[derive(RustEmbed)]
+#[folder = "$CARGO_MANIFEST_DIR/../../graphowl-app/dist"]
+struct NextAssets;
+
 /// Serves the console.
 ///
 /// **Mount this *after* the API routes.** The SPA fallback must not swallow an
@@ -28,9 +40,29 @@ pub fn router() -> Router {
     Router::new().fallback(get(serve))
 }
 
+/// Serves the in-progress `graphowl-app/` rebuild under `/next/`
+/// (Plan 122a A0). Temporary — removed at A11 once `graphowl-app` replaces
+/// `ui/` as the sole embed.
+pub fn router_next() -> Router {
+    Router::new().fallback(get(serve_next))
+}
+
+// `axum::routing::get` requires a `Handler`, which is only implemented for
+// functions returning a `Future` — so these stay `async fn` even though
+// neither has an `.await` of its own; the work happens synchronously in
+// `serve_from`, which is a plain function for exactly that reason.
 async fn serve(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    if let Some(asset) = Assets::get(path) {
+    serve_from::<Assets>(uri.path().trim_start_matches('/'), "console")
+}
+
+async fn serve_next(uri: Uri) -> Response {
+    // Nested under `/next`, so axum strips that prefix before this handler
+    // sees the path — trimming '/' is still needed for the remainder.
+    serve_from::<NextAssets>(uri.path().trim_start_matches('/'), "graphowl-app")
+}
+
+fn serve_from<A: RustEmbed>(path: &str, label: &'static str) -> Response {
+    if let Some(asset) = A::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         // Content-hashed filenames, so the bytes at a URL never change.
         return (
@@ -44,7 +76,7 @@ async fn serve(uri: Uri) -> Response {
     }
 
     // Client-side route: hand back the shell so the router resolves it.
-    match Assets::get("index.html") {
+    match A::get("index.html") {
         Some(index) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -55,7 +87,7 @@ async fn serve(uri: Uri) -> Response {
             .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Body::from("console assets are not compiled into this binary"),
+            Body::from(format!("{label} assets are not compiled into this binary")),
         )
             .into_response(),
     }

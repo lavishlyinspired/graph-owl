@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+/* Tokens lifted directly from the delivered mockup's own `:root` /
+ * `[data-theme="light"]` blocks (`samples/GraphOWL and Reco Now UI
+ * Mockups3/GraphOWL Console.dc.html`), renamed to the `--gowl-*` convention
+ * this codebase already uses (`ui/src/theme.ts`). Dark is the default, per
+ * the mockup — this app is an instrument panel, not a document.
+ *
+ * Accent is cyan/teal (`--gowl-accent: #5cc7d8` dark / `#0f7f92` light),
+ * reversing Plan 120 Slice F's indigo choice — recorded as a deliberate
+ * decision in `plans/122-frontend-rebuild.md` §1.2, not an oversight. */
+
+:root,
+[data-theme="dark"] {
+  --gowl-bg: #0b0d10;
+  --gowl-panel: #0f1216;
+  --gowl-panel-2: #12161b;
+  --gowl-input: #141920;
+  --gowl-row: #171c23;
+  --gowl-track: #1a1f26;
+
+  --gowl-line: #1e232b;
+  --gowl-line-2: #232a33;
+  --gowl-line-3: #2b323c;
+  --gowl-dim: #3a424d;
+  --gowl-avatar: #2a3039;
+  --gowl-edge: #39414c;
+  --gowl-hover: #3a434f;
+  --gowl-kbd: #262d37;
+
+  --gowl-t0: #ffffff;
+  --gowl-t1: #e6e9ee;
+  --gowl-t2: #d7dce3;
+  --gowl-t3: #c2c9d2;
+  --gowl-t4: #9aa3ae;
+  --gowl-t5: #8b939f;
+  --gowl-t6: #6d7684;
+  --gowl-t7: #5a6472;
+  --gowl-t8: #4d5663;
+
+  --gowl-accent: #5cc7d8;
+  --gowl-accent-hi: #8adae6;
+  --gowl-accent-bg: #12262a;
+  --gowl-accent-border: #1d3d44;
+  --gowl-accent-deep: #0d1c20;
+  --gowl-accent-on: #07242a;
+  --gowl-accent-glow: rgba(92, 199, 216, 0.1);
+
+  --gowl-amber: #d3a35c;
+  --gowl-amber-bg: #1d1810;
+  --gowl-amber-border: #3d3320;
+  --gowl-amber-deep: #171208;
+  --gowl-amber-deep-2: #12100a;
+  --gowl-amber-border-2: #2b2a22;
+
+  --gowl-ok: #63b98c;
+  --gowl-ok-bg: #0f2419;
+  --gowl-ok-border: #1c4331;
+  --gowl-bad: #b8543f;
+  --gowl-bad-bg: #241012;
+  --gowl-bad-row: #100c0d;
+  --gowl-shadow-color: rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="light"] {
+  --gowl-bg: #f6f5f2;
+  --gowl-panel: #ffffff;
+  --gowl-panel-2: #ffffff;
+  --gowl-input: #f4f2ee;
+  --gowl-row: #eeebe5;
+  --gowl-track: #eae7e0;
+
+  --gowl-line: #e4e1da;
+  --gowl-line-2: #dcd8d0;
+  --gowl-line-3: #d0cbc1;
+  --gowl-dim: #b8b2a6;
+  --gowl-avatar: #e8e5de;
+  --gowl-edge: #bdb7ab;
+  --gowl-hover: #a9a29a;
+  --gowl-kbd: #dcd8d0;
+
+  --gowl-t0: #1b1a17;
+  --gowl-t1: #1b1a17;
+  --gowl-t2: #2c2a26;
+  --gowl-t3: #3d3a34;
+  --gowl-t4: #56524a;
+  --gowl-t5: #6b665d;
+  --gowl-t6: #837d73;
+  --gowl-t7: #9a9488;
+  --gowl-t8: #a8a196;
+
+  --gowl-accent: #0f7f92;
+  --gowl-accent-hi: #0b6675;
+  --gowl-accent-bg: #e6f4f7;
+  --gowl-accent-border: #b9dee5;
+  --gowl-accent-deep: #f1f9fb;
+  --gowl-accent-on: #ffffff;
+  --gowl-accent-glow: rgba(15, 127, 146, 0.12);
+
+  --gowl-amber: #a3641a;
+  --gowl-amber-bg: #fdf4e6;
+  --gowl-amber-border: #ecd9b4;
+  --gowl-amber-deep: #fef8ee;
+  --gowl-amber-deep-2: #fefaf3;
+  --gowl-amber-border-2: #e8ddc6;
+
+  --gowl-ok: #1f7a4d;
+  --gowl-ok-bg: #e9f4ed;
+  --gowl-ok-border: #c1dfcc;
+  --gowl-bad: #9c3a24;
+  --gowl-bad-bg: #fdeeea;
+  --gowl-bad-row: #fdf7f5;
+  --gowl-shadow-color: rgba(28, 26, 22, 0.14);
+}
+
+body {
+  margin: 0;
+  background: var(--gowl-bg);
+  color: var(--gowl-t1);
+  font-family:
+    "IBM Plex Sans",
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+.font-mono {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+@theme {
+  --color-gowl-bg: var(--gowl-bg);
+  --color-gowl-panel: var(--gowl-panel);
+  --color-gowl-panel-2: var(--gowl-panel-2);
+  --color-gowl-input: var(--gowl-input);
+  --color-gowl-row: var(--gowl-row);
+  --color-gowl-line: var(--gowl-line);
+  --color-gowl-line-2: var(--gowl-line-2);
+  --color-gowl-t0: var(--gowl-t0);
+  --color-gowl-t1: var(--gowl-t1);
+  --color-gowl-t2: var(--gowl-t2);
+  --color-gowl-t3: var(--gowl-t3);
+  --color-gowl-t4: var(--gowl-t4);
+  --color-gowl-t5: var(--gowl-t5);
+  --color-gowl-t6: var(--gowl-t6);
+  --color-gowl-accent: var(--gowl-accent);
+  --color-gowl-accent-hi: var(--gowl-accent-hi);
+  --color-gowl-accent-bg: var(--gowl-accent-bg);
+  --color-gowl-amber: var(--gowl-amber);
+  --color-gowl-amber-bg: var(--gowl-amber-bg);
+  --color-gowl-ok: var(--gowl-ok);
+  --color-gowl-ok-bg: var(--gowl-ok-bg);
+  --color-gowl-bad: var(--gowl-bad);
+  --color-gowl-bad-bg: var(--gowl-bad-bg);
+}

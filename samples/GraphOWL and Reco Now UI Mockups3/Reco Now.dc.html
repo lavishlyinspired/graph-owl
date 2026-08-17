@@ -1,0 +1,2242 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#f4f2ee;font-family:'Public Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#5b6bb5;text-decoration:none}a:hover{color:#41508f}
+::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#d8d4cb;border-radius:5px}
+</style>
+</helmet>
+
+<div style="width:1440px;margin:0 auto;background:#f4f2ee;color:#1c1b18;min-height:900px;display:flex;flex-direction:column">
+
+  <div style="height:56px;flex:none;display:flex;align-items:center;gap:18px;padding:0 20px;background:#ffffff;border-bottom:1px solid #e3e0d9">
+    <div style="display:flex;align-items:center;gap:9px">
+      <div style="width:22px;height:22px;border-radius:6px;background:#1c1b18;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700">R</div>
+      <span style="font-size:14.5px;font-weight:700;letter-spacing:-.01em">Reco Now</span>
+    </div>
+    <div style="width:1px;height:22px;background:#e3e0d9"></div>
+    <div style="position:relative">
+      <div onClick="{{ onClient }}" style="display:flex;align-items:center;gap:9px;padding:4px 9px;border:1px solid #e3e0d9;border-radius:7px;cursor:pointer" style-hover="border-color:#c9c3b8">
+        <div style="display:flex;flex-direction:column;gap:1px">
+          <span style="font-size:12.5px;font-weight:600">{{ client }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">27XXXXX1234X1Z5 · Maharashtra</span>
+        </div>
+        <span style="color:#a29d93;font-size:11px">▾</span>
+      </div>
+      <sc-if value="{{ clientOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:44px;left:0;width:310px;background:#fff;border:1px solid #d8d4cb;border-radius:9px;box-shadow:0 18px 42px rgba(28,27,24,.16);z-index:60;overflow:hidden">
+          <div style="padding:10px 14px;border-bottom:1px solid #eeebe4;font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.14em;color:#6f6b62">CLIENT · OWN BOOKS, OWN FILING CALENDAR</div>
+          <sc-for list="{{ clients }}" as="c" hint-placeholder-count="3">
+            <div onClick="{{ c.go }}" style="padding:11px 14px;border-bottom:1px solid #f2efe9;cursor:pointer" style-hover="background:#faf9f6">
+              <div style="font-size:12.5px;font-weight:500">{{ c.name }}</div>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62;margin-top:3px">{{ c.gstin }}</div>
+              <div style="font-size:11px;color:#a29d93;margin-top:3px">{{ c.meta }}</div>
+            </div>
+          </sc-for>
+          <div style="padding:9px 14px;font-size:11px;color:#6f6b62">Cases, ITC and follow-ups never cross clients.</div>
+        </div>
+      </sc-if>
+    </div>
+    <div onClick="{{ onPeriodPick }}" style="display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid #e3e0d9;border-radius:6px;font-size:12px;color:#3d3a34;cursor:pointer" style-hover="border-color:#c9c3b8">
+      <span style="font-weight:600">August 2026</span><span style="color:#a29d93">▾</span>
+    </div>
+    <div onClick="{{ onAsk }}" style="flex:1;max-width:330px;display:flex;align-items:center;gap:9px;height:32px;padding:0 11px;background:#faf9f6;border:1px solid #e3e0d9;border-radius:7px;cursor:pointer" style-hover="border-color:#c9c3b8">
+      <span style="color:#a29d93;font-size:12px">⌕</span>
+      <span style="font-size:12px;color:#6f6b62">Ask about this period, or find an invoice</span>
+      <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93;border:1px solid #e3e0d9;border-radius:4px;padding:1px 5px">⌘K</span>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:6px;background:#f4f6fb;border:1px solid #dfe3f2">
+        <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#41508f;letter-spacing:.04em">GRAPHOWL · GST PACK 1.4.2</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:6px;background:#fdf3e7;border:1px solid #f0dcc2">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a86a2c;letter-spacing:.05em">ITC AT RISK</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500;color:#a13f28">₹12.4L</span>
+      </div>
+      <div onClick="{{ onInbox }}" style="position:relative;display:flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid #e3e0d9;border-radius:6px;cursor:pointer" style-hover="border-color:#c9c3b8">
+        <span style="font-size:12px;color:#6f6b62">⚑</span>
+        <span style="font-size:11.5px;color:#3d3a34">Waiting on you</span>
+        <sc-if value="{{ hasPending }}" hint-placeholder-val="{{ true }}">
+          <span style="min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#a13f28;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:9.5px;display:flex;align-items:center;justify-content:center">{{ pendingLabel }}</span>
+        </sc-if>
+      </div>
+      <div style="width:28px;height:28px;border-radius:50%;background:#eae6de;font-size:10.5px;display:flex;align-items:center;justify-content:center;color:#3d3a34;font-weight:600">SK</div>
+    </div>
+  </div>
+
+  <sc-if value="{{ inboxOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;top:56px;right:16px;width:430px;background:#fff;border:1px solid #d8d4cb;border-radius:10px;box-shadow:0 24px 60px rgba(28,27,24,.2);z-index:70;overflow:hidden">
+      <div style="padding:13px 16px;border-bottom:1px solid #eeebe4;display:flex;align-items:center">
+        <span style="font-size:13px;font-weight:600">Waiting on you</span>
+        <span style="font-size:11.5px;color:#6f6b62;margin-left:10px">assistants queue here; nothing sends itself</span>
+        <span onClick="{{ onInbox }}" style="margin-left:auto;color:#a29d93;cursor:pointer">×</span>
+      </div>
+      <sc-for list="{{ inboxItems }}" as="it" hint-placeholder-count="4">
+        <div style="padding:13px 16px;border-bottom:1px solid #f2efe9;background:{{ it.bg }}">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;padding:2px 6px;border-radius:4px;background:#f4f6fb;color:#41508f;border:1px solid #dfe3f2">{{ it.tag }}</span>
+            <span style="font-size:12.5px;font-weight:500">{{ it.title }}</span>
+          </div>
+          <div style="font-size:11.5px;color:#3d3a34;line-height:1.5">{{ it.detail }}</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:9px">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ it.who }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#2f6b4d;margin-left:6px">{{ it.verdict }}</span>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <span onClick="{{ it.onOpen }}" style="padding:4px 9px;border:1px solid #e3e0d9;border-radius:6px;font-size:11px;color:#3d3a34;cursor:pointer">Review</span>
+              <span onClick="{{ it.onReject }}" style="padding:4px 9px;border:1px solid #eed7d1;border-radius:6px;font-size:11px;color:#a13f28;cursor:pointer">Reject</span>
+              <span onClick="{{ it.onApprove }}" style="padding:4px 9px;border-radius:6px;background:#1c1b18;color:#fff;font-size:11px;cursor:pointer">Approve</span>
+            </div>
+          </div>
+        </div>
+      </sc-for>
+      <div style="padding:11px 16px;font-size:11.5px;color:#6f6b62">Automatic assistants never appear here — they only write text. Anything that leaves Reco Now or changes a number needs this queue.</div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ askOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="border-bottom:1px solid #e3e0d9;background:#fff;padding:18px 20px 20px">
+      <div style="max-width:900px;margin:0 auto">
+        <div style="display:flex;align-items:center;gap:10px;height:38px;padding:0 13px;background:#faf9f6;border:1px solid #d8d4cb;border-radius:8px;margin-bottom:14px">
+          <span style="color:#a29d93;font-size:13px">⌕</span>
+          <span style="font-size:13px;color:#1c1b18">Which suppliers are holding up the August close?</span>
+          <span onClick="{{ onAsk }}" style="margin-left:auto;font-size:11.5px;color:#6f6b62;cursor:pointer">Close</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 260px;gap:16px">
+          <div>
+            <div style="font-size:13px;color:#1c1b18;line-height:1.65;margin-bottom:12px">Three suppliers account for ₹10.4 L of the ₹12.4 L at risk: XYZ Pvt Ltd (₹4.82 L, 18 invoices, filing 18 days late on average), ABC Suppliers (₹3.17 L, 12 invoices absent from August 2B) and PQR Industries (₹2.41 L, no GSTR-1 filed). XYZ and ABC have already been contacted; PQR has not.</div>
+            <div style="display:flex;gap:8px">
+              <div onClick="{{ onCopilot }}" style="padding:7px 12px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12px;cursor:pointer">Draft follow-up to PQR</div>
+              <div onClick="{{ goAtRisk }}" style="padding:7px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;cursor:pointer">Open at-risk list</div>
+            </div>
+          </div>
+          <div style="border:1px solid #dfe3f2;background:#f7f8fd;border-radius:8px;padding:12px 14px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#41508f;margin-bottom:9px">ANSWERED FROM</div>
+            <sc-for list="{{ askCites }}" as="c" hint-placeholder-count="4">
+              <div style="font-size:11.5px;color:#3d3a34;padding:5px 0;border-bottom:1px solid #e8ecf7">{{ c }}</div>
+            </sc-for>
+            <div style="font-size:10.5px;color:#6f6b62;margin-top:9px;line-height:1.5">No sentence is shown without a source. Questions it cannot ground return “not enough evidence”.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="flex:1;display:flex;min-height:0">
+
+    <div style="width:{{ navWidth }};flex:none;background:#ffffff;border-right:1px solid #e3e0d9;padding:10px 0 20px;overflow:auto">
+      <div onClick="{{ navToggle }}" style="margin:0 8px 4px;padding:5px 9px;border-radius:6px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;color:#a29d93;font-size:12px" style-hover="background:#f4f2ee;color:#3d3a34">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.14em">{{ navHint }}</span>
+        <span>{{ navIcon }}</span>
+      </div>
+      <sc-for list="{{ nav }}" as="group" hint-placeholder-count="6">
+        <div style="padding:13px 16px 5px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.15em;color:#a29d93">{{ group.short }}</div>
+        <sc-for list="{{ group.items }}" as="item" hint-placeholder-count="3">
+          <div onClick="{{ item.go }}" title="{{ item.name }}" style="margin:0 8px;padding:6.5px 9px;border-radius:6px;font-size:12.5px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;background:{{ item.bg }}" style-hover="background:#f4f2ee">
+            <span style="color:{{ item.color }};font-weight:{{ item.weight }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ item.label }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a13f28">{{ item.badge }}</span>
+          </div>
+        </sc-for>
+      </sc-for>
+    </div>
+
+    <div style="flex:1;min-width:0;overflow:auto">
+
+      <sc-if value="{{ isHome }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:26px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:20px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:22px;font-weight:700;letter-spacing:-.015em">August 2026 close</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">Reconciliation complete. 327 invoices still need a decision before 3B.</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div style="padding:8px 14px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;font-weight:500;cursor:pointer">Re-run reconciliation</div>
+              <div onClick="{{ goRegister }}" style="padding:8px 14px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">Open work queue</div>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #dfe3f2;background:#f4f6fb;border-radius:8px;margin-bottom:14px">
+              <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+              <span style="font-size:12.5px;color:#1c1b18">{{ banner }}</span>
+              <span onClick="{{ dismiss }}" style="margin-left:auto;font-size:11.5px;color:#5b6bb5;cursor:pointer">Dismiss</span>
+            </div>
+          </sc-if>
+
+          <div style="background:#fff;border:1px solid #e6dcf7;border-radius:10px;padding:16px 18px 17px;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
+              <span style="width:7px;height:7px;border-radius:50%;background:#6b4fa8"></span>
+              <span style="font-size:13px;font-weight:600">Close-readiness briefing</span>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f6b62;margin-left:auto">{{ briefing.cites }}</span>
+            </div>
+            <div style="font-size:13px;color:#1c1b18;line-height:1.65;max-width:900px">{{ briefing.text }}</div>
+            <div style="display:flex;gap:8px;margin-top:13px">
+              <div onClick="{{ goIms }}" style="padding:7px 12px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12px;cursor:pointer">{{ briefing.a1 }}</div>
+              <div onClick="{{ goFollowups }}" style="padding:7px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;cursor:pointer">{{ briefing.a2 }}</div>
+              <div onClick="{{ goAgents }}" style="padding:7px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;cursor:pointer">How this was written</div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+            <sc-for list="{{ itcCards }}" as="c" hint-placeholder-count="3">
+              <div style="background:#fff;border:1px solid {{ c.border }};border-radius:10px;padding:16px 18px 17px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.13em;color:#6f6b62;margin-bottom:9px">{{ c.label }}</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:27px;font-weight:500;color:{{ c.color }};letter-spacing:-.02em">{{ c.value }}</div>
+                <div style="font-size:12px;color:#6f6b62;margin-top:6px">{{ c.sub }}</div>
+                <div style="height:4px;border-radius:2px;background:#eeebe4;margin-top:13px;overflow:hidden"><div style="height:100%;width:{{ c.pct }};background:{{ c.color }}"></div></div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1.25fr 1fr;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+                <div style="padding:13px 18px;border-bottom:1px solid #eeebe4;display:flex;align-items:center;justify-content:space-between">
+                  <span style="font-size:13px;font-weight:600">What needs a decision</span>
+                  <span style="font-size:11.5px;color:#6f6b62">sorted by ITC exposure</span>
+                </div>
+                <sc-for list="{{ actions }}" as="a" hint-placeholder-count="5">
+                  <div onClick="{{ a.go }}" style="display:flex;align-items:center;gap:14px;padding:13px 18px;border-bottom:1px solid #f2efe9;cursor:pointer" style-hover="background:#faf9f6">
+                    <span style="width:8px;height:8px;border-radius:2px;background:{{ a.color }};flex:none"></span>
+                    <div style="flex:1">
+                      <div style="font-size:13px;font-weight:500">{{ a.title }}</div>
+                      <div style="font-size:11.5px;color:#6f6b62;margin-top:2px">{{ a.sub }}</div>
+                    </div>
+                    <div style="text-align:right">
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#1c1b18">{{ a.amount }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62;margin-top:2px">{{ a.count }}</div>
+                    </div>
+                    <span style="color:#c3bdb2;font-size:13px">›</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fff;border:1px solid #dfe3f2;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:13px">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+                    <span style="font-size:13px;font-weight:600">What the graph engine did for this period</span>
+                  </div>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">GraphOWL · GST pack 1.4.2</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+                  <sc-for list="{{ engine }}" as="e" hint-placeholder-count="4">
+                    <div style="border:1px solid #eeebe4;border-radius:8px;padding:12px 13px;background:#fbfaf8">
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:19px;color:#41508f">{{ e.n }}</div>
+                      <div style="font-size:12px;color:#1c1b18;margin-top:5px;font-weight:500">{{ e.label }}</div>
+                      <div style="font-size:11px;color:#6f6b62;margin-top:4px;line-height:1.45">{{ e.detail }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="margin-top:13px;font-size:11.5px;color:#6f6b62">Every number above is traceable to individual graph facts — no conclusion appears here without evidence behind it.</div>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:15px 18px 17px">
+                <div style="font-size:13px;font-weight:600;margin-bottom:13px">Period state</div>
+                <sc-for list="{{ periodState }}" as="p" hint-placeholder-count="6">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f2efe9">
+                    <span style="font-size:12.5px;color:#3d3a34">{{ p.label }}</span>
+                    <span style="font-size:11.5px;color:{{ p.color }};font-weight:500">{{ p.value }}</span>
+                  </div>
+                </sc-for>
+                <div style="margin-top:15px;padding:11px 13px;border-radius:8px;background:#faf9f6;border:1px solid #eeebe4">
+                  <div style="font-size:12px;color:#3d3a34;margin-bottom:8px">38 open exceptions · ₹4.2L unresolved exposure</div>
+                  <div style="display:flex;gap:7px">
+                    <div onClick="{{ goExceptions }}" style="flex:1;padding:6px 10px;border-radius:6px;background:#1c1b18;color:#fff;font-size:11.5px;text-align:center;cursor:pointer">Review open items</div>
+                    <div onClick="{{ goPeriods }}" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid #d8d4cb;font-size:11.5px;text-align:center;cursor:pointer">Close period</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:15px 18px 17px">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:13px">
+                  <span style="font-size:13px;font-weight:600">Match rate</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#6f6b62">Apr → Aug</span>
+                </div>
+                <div style="display:flex;align-items:flex-end;gap:10px;height:82px">
+                  <sc-for list="{{ trend }}" as="t" hint-placeholder-count="5">
+                    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#3d3a34">{{ t.pct }}</div>
+                      <div style="width:100%;height:{{ t.h }};background:{{ t.color }};border-radius:3px 3px 0 0"></div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ t.m }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div onClick="{{ goAgents }}" style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:15px 18px 17px;cursor:pointer" style-hover="border-color:#c9c3b8">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px">
+                  <span style="font-size:13px;font-weight:600">Assistants this month</span>
+                  <span style="font-size:11.5px;color:#5b6bb5">Open →</span>
+                </div>
+                <sc-for list="{{ agentMini }}" as="a" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f2efe9">
+                    <span style="font-size:12px;color:#3d3a34">{{ a.label }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#1c1b18">{{ a.value }}</span>
+                  </div>
+                </sc-for>
+                <div style="font-size:11.5px;color:#6f6b62;margin-top:11px">Drafts and explanations only. No filing, no ITC decision, no email sent without you.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isRegister }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:24px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:20px;font-weight:700">Reconciliation register</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">Books 12,482 · GSTR-1 12,306 · GSTR-2B 12,197 · run completed 15 Aug, 09:42</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div style="padding:7px 13px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;cursor:pointer">Export</div>
+              <div style="padding:7px 13px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">Bulk actions</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:1px;background:#e3e0d9;border:1px solid #e3e0d9;border-radius:9px;overflow:hidden;margin-bottom:16px">
+            <sc-for list="{{ buckets }}" as="b" hint-placeholder-count="7">
+              <div style="flex:1;background:{{ b.bg }};padding:11px 13px;cursor:pointer">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62;margin-bottom:6px">{{ b.label }}</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:16px;color:{{ b.color }}">{{ b.n }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:8px;height:32px;padding:0 11px;background:#fff;border:1px solid #e3e0d9;border-radius:7px;width:250px">
+              <span style="color:#a29d93;font-size:12px">⌕</span>
+              <span style="font-size:12px;color:#a29d93">Invoice, GSTIN or supplier</span>
+            </div>
+            <sc-for list="{{ regFilters }}" as="f" hint-placeholder-count="5">
+              <div style="display:flex;align-items:center;gap:6px;height:32px;padding:0 11px;background:#fff;border:1px solid #e3e0d9;border-radius:7px;font-size:12px;color:#3d3a34;cursor:pointer">{{ f }}<span style="color:#a29d93">▾</span></div>
+            </sc-for>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:#6f6b62">Sort<span style="padding:4px 10px;border-radius:6px;background:#fff;border:1px solid #d8d4cb;color:#1c1b18;font-weight:500">ITC at risk ↓</span></div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+            <div style="display:grid;grid-template-columns:34px 116px 1fr 104px 104px 92px 132px 150px;gap:12px;padding:10px 16px;border-bottom:1px solid #e3e0d9;background:#faf9f6;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">
+              <span>☐</span><span>INVOICE</span><span>SUPPLIER</span><span style="text-align:right">BOOKS ITC</span><span style="text-align:right">2B ITC</span><span style="text-align:right">DELTA</span><span>STATE</span><span>WORKFLOW</span>
+            </div>
+            <sc-for list="{{ rows }}" as="r" hint-placeholder-count="9">
+              <div onClick="{{ goCase }}" style="display:grid;grid-template-columns:34px 116px 1fr 104px 104px 92px 132px 150px;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid #f2efe9;cursor:pointer;background:{{ r.bg }}" style-hover="background:#faf9f6">
+                <span style="color:#c3bdb2;font-size:12px">☐</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#1c1b18">{{ r.inv }}</span>
+                <div>
+                  <div style="font-size:12.5px;color:#1c1b18">{{ r.supplier }}</div>
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ r.gstin }}</div>
+                </div>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:right;color:#3d3a34">{{ r.books }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:right;color:#3d3a34">{{ r.twoB }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:right;color:{{ r.deltaColor }}">{{ r.delta }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;padding:3px 7px;border-radius:4px;background:{{ r.stateBg }};color:{{ r.stateColor }};justify-self:start">{{ r.state }}</span>
+                <span style="font-size:11.5px;color:#6f6b62">{{ r.workflow }}</span>
+              </div>
+            </sc-for>
+            <div style="padding:11px 16px;display:flex;align-items:center;justify-content:space-between;font-size:11.5px;color:#6f6b62">
+              <span>Showing 9 of 848 exceptions</span>
+              <span>₹31.1L exposure in this filter</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isCase }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:22px 30px 44px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <span style="font-size:11.5px;color:#6f6b62">August 2026 / <span onClick="{{ goExceptions }}" style="color:#5b6bb5;cursor:pointer">Exceptions</span> / <span onClick="{{ goExceptions }}" style="color:#5b6bb5;cursor:pointer">Tax amount differs · 181</span> / <span style="color:#1c1b18">INV-1025</span></span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">case detail — one invoice at a time</span>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6f6b62">12 of 181 in this group</span>
+              <span onClick="{{ onPrevCase }}" style="padding:4px 9px;border:1px solid #e3e0d9;border-radius:6px;font-size:11px;color:#3d3a34;cursor:pointer;background:#fff">‹ Previous</span>
+              <span onClick="{{ onNextCase }}" style="padding:4px 9px;border:1px solid #e3e0d9;border-radius:6px;font-size:11px;color:#3d3a34;cursor:pointer;background:#fff">Next ›</span>
+            </div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:18px 20px;margin-bottom:14px;display:flex;align-items:flex-start;gap:24px">
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                <h1 style="margin:0;font-size:20px;font-weight:700">INV-1025</h1>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;padding:3px 8px;border-radius:4px;background:#fdf3e7;color:#a86a2c;border:1px solid #f0dcc2">AMOUNT MISMATCH</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;padding:3px 8px;border-radius:4px;background:#eef0f8;color:#41508f;border:1px solid #dfe3f2">WAITING ON VENDOR</span>
+              </div>
+              <div style="font-size:12.5px;color:#6f6b62">XYZ Pvt Ltd · <span style="font-family:'IBM Plex Mono',monospace">29XXXXX4321X1Z9</span> · invoice dated 05 Aug 2026</div>
+            </div>
+            <div style="display:flex;gap:26px;padding-right:8px">
+              <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f6b62;letter-spacing:.1em">BOOKS ITC</div><div style="font-family:'IBM Plex Mono',monospace;font-size:19px;margin-top:5px">₹38,000</div></div>
+              <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f6b62;letter-spacing:.1em">2B ITC</div><div style="font-family:'IBM Plex Mono',monospace;font-size:19px;margin-top:5px">₹37,500</div></div>
+              <div><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a86a2c;letter-spacing:.1em">DIFFERENCE</div><div style="font-family:'IBM Plex Mono',monospace;font-size:19px;margin-top:5px;color:#a13f28">₹500</div></div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 336px;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:14px">
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+                <div style="display:grid;grid-template-columns:150px 1fr 1fr 1fr;gap:12px;padding:11px 18px;border-bottom:1px solid #e3e0d9;background:#faf9f6;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">
+                  <span>FIELD</span><span>BOOKS</span><span>GSTR-1</span><span>GSTR-2B</span>
+                </div>
+                <sc-for list="{{ compare }}" as="c" hint-placeholder-count="7">
+                  <div style="display:grid;grid-template-columns:150px 1fr 1fr 1fr;gap:12px;padding:11px 18px;border-bottom:1px solid #f2efe9;background:{{ c.bg }}">
+                    <span style="font-size:12px;color:#6f6b62">{{ c.field }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:{{ c.aColor }}">{{ c.a }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:{{ c.bColor }}">{{ c.b }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:{{ c.cColor }}">{{ c.c }}</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                  <span style="font-size:13px;font-weight:600">Why this case exists</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">rule + evidence from GraphOWL</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:9px">
+                  <sc-for list="{{ checks }}" as="k" hint-placeholder-count="6">
+                    <div style="display:flex;align-items:center;gap:11px">
+                      <span style="width:17px;height:17px;border-radius:50%;background:{{ k.bg }};color:{{ k.fg }};font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">{{ k.mark }}</span>
+                      <span style="font-size:12.5px;color:#3d3a34">{{ k.text }}</span>
+                      <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#a29d93">{{ k.detail }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="margin-top:16px;padding:13px 15px;border-radius:8px;background:#faf9f6;border:1px solid #eeebe4">
+                  <div style="font-size:12.5px;color:#1c1b18;line-height:1.55">The supplier declared ₹37,500 IGST in GSTR-1 while your books record ₹38,000 on the same taxable value. Every other identifier matches, so this is a tax-value discrepancy at the supplier's end, not a matching failure.</div>
+                  <div style="display:flex;align-items:center;gap:12px;margin-top:11px">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6f6b62">Rule gst.tax-value-mismatch · confidence 0.96 · 4 facts cited</span>
+                    <a href="#" style="font-size:12px;font-weight:500;margin-left:auto">Open investigation in GraphOWL →</a>
+                  </div>
+                </div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                  <span style="font-size:13px;font-weight:600">Evidence chain</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">named graphs · gst:2026-08</span>
+                </div>
+                <div style="display:flex;align-items:stretch;gap:0">
+                  <sc-for list="{{ chain }}" as="s" hint-placeholder-count="4">
+                    <div style="flex:1;display:flex;align-items:center;gap:0">
+                      <div style="flex:1;border:1px solid {{ s.border }};border-radius:8px;padding:11px 12px;background:{{ s.bg }}">
+                        <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">{{ s.src }}</div>
+                        <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;margin-top:7px;color:{{ s.valColor }}">{{ s.value }}</div>
+                        <div style="font-size:11px;color:#6f6b62;margin-top:5px">{{ s.meta }}</div>
+                      </div>
+                      <span style="width:22px;text-align:center;color:#c3bdb2;font-size:12px">{{ s.arrow }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+                  <span style="font-size:13px;font-weight:600">Recommended action</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;padding:2px 6px;border-radius:4px;background:#eef0f8;color:#41508f;border:1px solid #dfe3f2">DRAFTED</span>
+                </div>
+                <div style="font-size:12.5px;color:#6f6b62;line-height:1.55;margin-bottom:13px">Ask the supplier to verify the IGST reported in GSTR-1 for August, then recheck the September 2B for an amendment.</div>
+                <div style="display:flex;flex-direction:column;gap:7px">
+                  <div style="padding:9px 12px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;text-align:center;cursor:pointer">Review &amp; send follow-up</div>
+                  <div style="display:flex;gap:7px">
+                    <div style="flex:1;padding:8px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;text-align:center;cursor:pointer">Mark reviewed</div>
+                    <div style="flex:1;padding:8px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;text-align:center;cursor:pointer">Add note</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                  <span style="font-size:13px;font-weight:600">IMS decision</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;padding:3px 7px;border-radius:4px;background:#f5f0ff;color:#6b4fa8;border:1px solid #e6dcf7">NO ACTION</span>
+                </div>
+                <div style="font-size:12px;color:#6f6b62;line-height:1.5;margin-bottom:12px">Accepting records the supplier's ₹37,500. It changes GSTR-2B on recompute, not just this case.</div>
+                <div style="display:flex;gap:6px">
+                  <div style="flex:1;padding:7px 8px;border-radius:6px;border:1px solid #cfe0d5;background:#f3f8f4;color:#2f6b4d;font-size:11.5px;text-align:center;cursor:pointer">Accept</div>
+                  <div style="flex:1;padding:7px 8px;border-radius:6px;border:1px solid #eed7d1;background:#fdf5f3;color:#a13f28;font-size:11.5px;text-align:center;cursor:pointer">Reject</div>
+                  <div style="flex:1;padding:7px 8px;border-radius:6px;border:1px solid #d8d4cb;font-size:11.5px;text-align:center;cursor:pointer">Pending</div>
+                </div>
+              </div>
+
+              <div onClick="{{ goSuppliers }}" style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px;cursor:pointer" style-hover="border-color:#c9c3b8">
+                <div style="font-size:13px;font-weight:600;margin-bottom:12px">Supplier pattern</div>
+                <div style="font-size:12.5px;margin-bottom:3px">XYZ Pvt Ltd</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93;margin-bottom:12px">382 invoices · ₹4.82L at risk</div>
+                <sc-for list="{{ pattern }}" as="p" hint-placeholder-count="4">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f2efe9">
+                    <span style="font-size:12px;color:#3d3a34">{{ p.label }}</span>
+                    <span style="font-size:11.5px;color:{{ p.color }};font-weight:500">{{ p.value }}</span>
+                  </div>
+                </sc-for>
+                <div style="margin-top:13px;font-size:12px;color:#5b6bb5">Open supplier workspace →</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isAgents }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:24px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:20px;font-weight:700">Assistants</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">They read the graph, draft the words, and stop. Every tax decision stays with you.</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div onClick="{{ onUsage }}" style="padding:7px 13px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;cursor:pointer">Usage report</div>
+              <div onClick="{{ onRules }}" style="padding:7px 13px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">Automation rules</div>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #dfe3f2;background:#f4f6fb;border-radius:8px;margin-bottom:14px">
+              <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+              <span style="font-size:12.5px;color:#1c1b18">{{ banner }}</span>
+              <span onClick="{{ dismiss }}" style="margin-left:auto;font-size:11.5px;color:#5b6bb5;cursor:pointer">Dismiss</span>
+            </div>
+          </sc-if>
+
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px">
+            <sc-for list="{{ usage }}" as="u" hint-placeholder-count="5">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:14px 16px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:8px">{{ u.label }}</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:21px;color:{{ u.color }}">{{ u.value }}</div>
+                <div style="font-size:11px;color:#6f6b62;margin-top:5px">{{ u.sub }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 340px;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62">ONE CHAIN, NOT SEPARATE BOTS</span>
+                  <span style="font-size:11.5px;color:#a29d93">an exception enters left, leaves as your decision</span>
+                </div>
+                <div style="display:flex;align-items:stretch">
+                  <sc-for list="{{ pipeline }}" as="p" hint-placeholder-count="6">
+                    <div style="flex:1;display:flex;align-items:center">
+                      <div style="flex:1;border:1px solid {{ p.border }};border-radius:8px;padding:10px 11px;background:{{ p.bg }}">
+                        <div style="font-family:'IBM Plex Mono',monospace;font-size:8.5px;letter-spacing:.12em;color:{{ p.tagColor }};margin-bottom:6px">{{ p.tag }}</div>
+                        <div style="font-size:11.5px;color:#1c1b18;line-height:1.3">{{ p.name }}</div>
+                        <div style="font-size:10px;color:#6f6b62;margin-top:5px;line-height:1.4">{{ p.detail }}</div>
+                      </div>
+                      <span style="width:16px;text-align:center;color:#c3bdb2;font-size:11px">{{ p.arrow }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="margin-top:12px;font-size:11.5px;color:#6f6b62">The first three stages are GraphOWL agents; Reco owns the last two. Each hands over fact ids, so the sentence you read on a case is traceable to the same evidence the matcher used.</div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+                <div style="display:grid;grid-template-columns:1.5fr 150px 118px 92px 140px;gap:12px;padding:10px 18px;border-bottom:1px solid #e3e0d9;background:#faf9f6;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">
+                  <span>ASSISTANT · WHERE IT SHOWS UP</span><span>TRIGGER</span><span>RUNS</span><span style="text-align:right">ACCEPTED</span><span>CONTROL</span>
+                </div>
+                <sc-for list="{{ assistants }}" as="a" hint-placeholder-count="6">
+                  <div style="display:grid;grid-template-columns:1.5fr 150px 118px 92px 140px;gap:12px;align-items:center;padding:13px 18px;border-bottom:1px solid #f2efe9;background:{{ a.selBg }}">
+                    <div>
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span style="font-size:12.5px;font-weight:500">{{ a.name }}</span>
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;padding:2px 6px;border-radius:4px;background:{{ a.modeBg }};color:{{ a.modeColor }}">{{ a.mode }}</span>
+                      </div>
+                      <div style="font-size:11.5px;color:#6f6b62;margin-top:3px">{{ a.desc }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#41508f;margin-top:3px">{{ a.surface }}</div>
+                    </div>
+                    <div>
+                      <div style="font-size:11.5px;color:#3d3a34">{{ a.trigger }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93;margin-top:2px">{{ a.next }}</div>
+                    </div>
+                    <div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:12px">{{ a.runs }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93;margin-top:2px">{{ a.tokens }}</div>
+                    </div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:right;color:{{ a.acceptColor }}">{{ a.accepted }}</span>
+                    <div style="display:flex;align-items:center;gap:7px">
+                      <div onClick="{{ a.onToggle }}" style="width:32px;height:18px;border-radius:9px;background:{{ a.switchBg }};border:1px solid {{ a.switchBorder }};padding:2px;cursor:pointer;display:flex;justify-content:{{ a.switchPos }}">
+                        <div style="width:12px;height:12px;border-radius:50%;background:{{ a.knob }}"></div>
+                      </div>
+                      <span onClick="{{ a.onRun }}" style="font-size:11px;color:#41508f;cursor:pointer;padding:3px 8px;border:1px solid #dfe3f2;border-radius:6px">See output</span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fff;border:1px solid #dfe3f2;border-radius:10px;overflow:hidden">
+                <div style="padding:13px 18px;border-bottom:1px solid #eeebe4;display:flex;align-items:center;gap:10px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:#5b6bb5"></span>
+                  <span style="font-size:13px;font-weight:600">Latest output · {{ outSel.name }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;padding:2px 6px;border-radius:4px;background:#f4f6fb;color:#41508f;border:1px solid #dfe3f2">{{ outSel.kind }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93;margin-left:auto">{{ outSel.when }}</span>
+                </div>
+                <div style="padding:16px 18px 18px">
+                  <div style="padding:14px 16px;border-radius:8px;border:1px solid #dfe3f2;background:#f7f8fd;font-size:13px;color:#1c1b18;line-height:1.7">{{ outSel.text }}</div>
+                  <div style="display:flex;align-items:center;gap:12px;margin-top:13px">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">you already see this at</span>
+                    <span onClick="{{ onOutOpen }}" style="font-size:12px;color:#5b6bb5;cursor:pointer">{{ outSel.dest }} →</span>
+                    <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#41508f">{{ outSel.mode }}</span>
+                  </div>
+                  <div style="margin-top:15px;padding-top:14px;border-top:1px solid #f2efe9">
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:9px">READ FROM</div>
+                    <sc-for list="{{ outSel.cites }}" as="c" hint-placeholder-count="4">
+                      <div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #f2efe9">
+                        <span style="color:#2f6b4d;font-size:10px;margin-top:2px">✓</span>
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#3d3a34;line-height:1.5">{{ c }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                  <div style="font-size:11.5px;color:#6f6b62;margin-top:12px;line-height:1.55">{{ outSel.also }}</div>
+                </div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+                <div style="padding:13px 18px;border-bottom:1px solid #eeebe4;display:flex;align-items:center;justify-content:space-between">
+                  <span style="font-size:13px;font-weight:600">Where AI appears in Reco Now</span>
+                  <span style="font-size:11.5px;color:#6f6b62">no chat window — it works inside the screens you already use</span>
+                </div>
+                <sc-for list="{{ aiMap }}" as="m" hint-placeholder-count="8">
+                  <div style="display:grid;grid-template-columns:190px 1fr 110px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid #f2efe9">
+                    <span style="font-size:12.5px;font-weight:500">{{ m.surface }}</span>
+                    <span style="font-size:12px;color:#3d3a34">{{ m.use }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#41508f;justify-self:start;padding:3px 7px;border-radius:4px;background:#f4f6fb;border:1px solid #dfe3f2">{{ m.mode }}</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:13px">
+                  <span style="font-size:13px;font-weight:600">Awaiting your approval</span>
+                  <span style="font-size:11.5px;color:#6f6b62">6 drafts · ₹9.8L exposure</span>
+                </div>
+                <sc-for list="{{ drafts }}" as="d" hint-placeholder-count="3">
+                  <div style="border:1px solid #eeebe4;border-radius:9px;padding:13px 15px;margin-bottom:10px;background:#fbfaf8">
+                    <div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">
+                      <span style="font-size:12.5px;font-weight:600">{{ d.supplier }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;padding:2px 6px;border-radius:4px;background:#fdf3e7;color:#a86a2c;border:1px solid #f0dcc2">{{ d.reason }}</span>
+                      <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#a13f28">{{ d.amount }}</span>
+                    </div>
+                    <div style="font-size:12px;color:#3d3a34;line-height:1.55;padding-left:11px;border-left:2px solid #dfe3f2">{{ d.body }}</div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:11px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ d.cites }}</span>
+                      <div style="margin-left:auto;display:flex;gap:7px">
+                        <div style="padding:5px 11px;border-radius:6px;border:1px solid #d8d4cb;font-size:11.5px;cursor:pointer">Edit</div>
+                        <div style="padding:5px 11px;border-radius:6px;background:#1c1b18;color:#fff;font-size:11.5px;cursor:pointer">Approve &amp; send</div>
+                      </div>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="font-size:13px;font-weight:600;margin-bottom:14px">Where the tokens went</div>
+                <sc-for list="{{ tokenSplit }}" as="t" hint-placeholder-count="4">
+                  <div style="margin-bottom:13px">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+                      <span style="font-size:12px;color:#3d3a34">{{ t.label }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#6f6b62">{{ t.value }}</span>
+                    </div>
+                    <div style="height:6px;border-radius:3px;background:#f2efe9;overflow:hidden"><div style="height:100%;width:{{ t.pct }};background:{{ t.color }}"></div></div>
+                  </div>
+                </sc-for>
+                <div style="padding-top:12px;border-top:1px solid #f2efe9;display:flex;justify-content:space-between">
+                  <span style="font-size:12px;color:#6f6b62">Cost this period</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:13px">₹9,840</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;margin-top:6px">
+                  <span style="font-size:12px;color:#6f6b62">Per resolved case</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:12px">₹11.90</span>
+                </div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="font-size:13px;font-weight:600;margin-bottom:12px">What assistants may not do</div>
+                <sc-for list="{{ limits }}" as="l" hint-placeholder-count="4">
+                  <div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #f2efe9">
+                    <span style="color:#a13f28;font-size:11px;margin-top:2px">✕</span>
+                    <div>
+                      <div style="font-size:12px;color:#1c1b18">{{ l.text }}</div>
+                      <div style="font-size:11px;color:#6f6b62;margin-top:2px">{{ l.meta }}</div>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fff;border:1px solid #dfe3f2;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px">
+                  <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+                  <span style="font-size:13px;font-weight:600">Grounding</span>
+                </div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:#41508f">98.2%</div>
+                <div style="font-size:12px;color:#6f6b62;margin-top:7px;line-height:1.55">of generated sentences cite a GraphOWL fact id. Uncited sentences are dropped before they reach a case.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isPipeline }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:22px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:20px;font-weight:700">Upload &amp; map</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">Three files in, one reconciliation out. Mapping is the only place you tell the system what a column means.</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div onClick="{{ onUpload }}" style="padding:7px 13px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;cursor:pointer" style-hover="border-color:#a29d93">Add a file</div>
+              <div onClick="{{ onRecon }}" style="padding:7px 13px;border-radius:7px;background:{{ reconBg }};color:{{ reconColor }};font-size:12.5px;font-weight:600;cursor:pointer">{{ reconLabel }}</div>
+            </div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 20px 17px;margin-bottom:14px">
+            <div style="display:flex;align-items:flex-start">
+              <sc-for list="{{ pipeSteps }}" as="s" hint-placeholder-count="5">
+                <div style="flex:1;display:flex;align-items:flex-start">
+                  <div style="display:flex;flex-direction:column;gap:5px;min-width:0">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <span style="width:19px;height:19px;border-radius:50%;background:{{ s.dotBg }};border:1px solid {{ s.dotBorder }};color:{{ s.dotColor }};font-size:9px;display:flex;align-items:center;justify-content:center;flex:none">{{ s.glyph }}</span>
+                      <span style="font-size:12.5px;color:{{ s.color }};font-weight:500;white-space:nowrap">{{ s.name }}</span>
+                    </div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93;padding-left:28px;white-space:nowrap">{{ s.meta }}</span>
+                  </div>
+                  <div style="flex:1;height:1px;background:{{ s.lineColor }};margin:10px 12px 0"></div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #dfe3f2;background:#f4f6fb;border-radius:8px;margin-bottom:14px">
+              <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+              <span style="font-size:12.5px;color:#1c1b18">{{ banner }}</span>
+              <span onClick="{{ dismiss }}" style="margin-left:auto;font-size:11.5px;color:#5b6bb5;cursor:pointer">Dismiss</span>
+            </div>
+          </sc-if>
+
+          <div style="display:grid;grid-template-columns:236px 1fr;gap:14px;align-items:start">
+            <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:12px 0 14px">
+              <div style="padding:4px 16px 10px;font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.14em;color:#a29d93">FILES IN THIS PERIOD</div>
+              <sc-for list="{{ dsTabs }}" as="d" hint-placeholder-count="3">
+                <div onClick="{{ d.go }}" style="margin:0 8px 2px;padding:9px 10px;border-radius:6px;cursor:pointer;background:{{ d.bg }};border-left:2px solid {{ d.border }}" style-hover="background:#f4f2ee">
+                  <div style="display:flex;align-items:center;gap:7px">
+                    <span style="font-size:12.5px;color:{{ d.color }};font-weight:500">{{ d.name }}</span>
+                    <span style="margin-left:auto;font-size:10px;color:#2f6b4d">{{ d.mark }}</span>
+                  </div>
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#a29d93;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ d.meta }}</div>
+                </div>
+              </sc-for>
+              <div style="margin:12px 14px 0;padding-top:12px;border-top:1px solid #f2efe9;font-size:11.5px;color:#6f6b62;line-height:1.6">Each file is mapped and confirmed on its own. One unconfirmed file blocks reconciliation.</div>
+            </div>
+
+            <div>
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                <span style="font-size:14px;font-weight:600">{{ dsName }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6f6b62">{{ dsRows }}</span>
+                <span onClick="{{ onToggleRaw }}" style="font-size:11.5px;color:#5b6bb5;cursor:pointer">Show raw data</span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#a29d93">PREVIEW ROW</span>
+                  <sc-for list="{{ sampleRows }}" as="r" hint-placeholder-count="3">
+                    <span onClick="{{ r.go }}" style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 8px;border-radius:5px;background:{{ r.bg }};border:1px solid {{ r.border }};color:{{ r.color }};cursor:pointer">{{ r.label }}</span>
+                  </sc-for>
+                  <span onClick="{{ onAutoMap }}" style="font-size:11.5px;color:#5b6bb5;cursor:pointer;padding:4px 9px;border:1px solid #dfe3f2;border-radius:6px">Re-propose</span>
+                </div>
+              </div>
+
+              <sc-if value="{{ showRaw }}" hint-placeholder-val="{{ false }}">
+                <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:auto;margin-bottom:12px">
+                  <div style="display:flex;border-bottom:1px solid #e3e0d9;background:#faf9f6">
+                    <sc-for list="{{ rawHead }}" as="h" hint-placeholder-count="8">
+                      <span style="flex:1;min-width:128px;padding:8px 12px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f6b62;white-space:nowrap">{{ h }}</span>
+                    </sc-for>
+                  </div>
+                  <sc-for list="{{ rawBody }}" as="row" hint-placeholder-count="3">
+                    <div style="display:flex;border-bottom:1px solid #f2efe9">
+                      <sc-for list="{{ row }}" as="c" hint-placeholder-count="8">
+                        <span style="flex:1;min-width:128px;padding:8px 12px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#3d3a34;white-space:nowrap">{{ c }}</span>
+                      </sc-for>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+                <div style="display:grid;grid-template-columns:1.2fr 1.2fr 1.2fr 96px;gap:12px;padding:10px 18px;border-bottom:1px solid #e3e0d9;background:#faf9f6;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">
+                  <span>FIELD</span><span>COLUMN</span><span>VALUE IN THIS ROW</span><span style="text-align:right">CONFIDENCE</span>
+                </div>
+                <sc-for list="{{ mapRows }}" as="m" hint-placeholder-count="11">
+                  <div style="display:grid;grid-template-columns:1.2fr 1.2fr 1.2fr 96px;gap:12px;align-items:center;padding:11px 18px;border-bottom:1px solid #f2efe9" style-hover="background:#faf9f6">
+                    <div>
+                      <span style="font-size:12.5px;color:#1c1b18;font-weight:500">{{ m.label }}<span style="color:#a13f28">{{ m.reqMark }}</span></span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#a29d93;margin-left:6px">{{ m.multiMark }}</span>
+                    </div>
+                    <div onClick="{{ m.onPick }}" style="display:flex;align-items:center;gap:7px;padding:5px 9px;border:1px solid #e3e0d9;border-radius:6px;cursor:pointer;background:#fff" style-hover="border-color:#a29d93">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ m.colColor }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.colLabel }}</span>
+                      <span style="margin-left:auto;color:#a29d93;font-size:10px">▾</span>
+                    </div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ m.sampleColor }}">{{ m.sample }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:{{ m.confColor }};text-align:right">{{ m.conf }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:flex;align-items:center;gap:12px;padding:11px 18px">
+                  <span style="font-size:11.5px;color:#6f6b62">{{ mapCount }}</span>
+                  <div onClick="{{ onConfirmDs }}" style="margin-left:auto;padding:6px 12px;border-radius:7px;border:1px solid #dfe3f2;background:#f4f6fb;font-size:12px;color:#41508f;cursor:pointer">{{ dsConfirmLabel }}</div>
+                </div>
+              </div>
+
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+                <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:14px 16px 16px">
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:10px">COLUMNS NOT MAPPED</div>
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:11px">
+                    <sc-for list="{{ unmapped }}" as="u" hint-placeholder-count="3">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 7px;border-radius:4px;background:#faf9f6;border:1px solid #e3e0d9;color:#6f6b62">{{ u }}</span>
+                    </sc-for>
+                  </div>
+                  <div style="font-size:11.5px;color:#6f6b62;line-height:1.6">Kept with the source row, not discarded. You can map them later without re-uploading the file.</div>
+                </div>
+                <div style="background:#fff;border:1px solid #dfe3f2;border-radius:10px;padding:14px 16px 16px">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px">
+                    <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#41508f">WHAT MAPPING DECIDES</span>
+                  </div>
+                  <div style="font-size:12px;color:#3d3a34;line-height:1.65">Matching keys, reason codes and the sentence on every case inherit these choices. The mapping is saved as a template, so next month starts already mapped and you only confirm what changed.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isAnalytics }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:24px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:20px;font-weight:700">Analytics</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">Five periods of reconciliation behaviour. Every cell traces back to cases, and every case to graph evidence.</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div onClick="{{ onAnExport }}" style="padding:7px 13px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;cursor:pointer">Export working</div>
+              <div onClick="{{ onAnReport }}" style="padding:7px 13px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">Build client report</div>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #dfe3f2;background:#f4f6fb;border-radius:8px;margin-bottom:14px">
+              <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+              <span style="font-size:12.5px;color:#1c1b18">{{ banner }}</span>
+              <span onClick="{{ dismiss }}" style="margin-left:auto;font-size:11.5px;color:#5b6bb5;cursor:pointer">Dismiss</span>
+            </div>
+          </sc-if>
+
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+            <sc-for list="{{ anKpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:14px 16px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:8px">{{ k.label }}</div>
+                <div style="display:flex;align-items:baseline;gap:9px">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:21px;color:#1c1b18">{{ k.value }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:{{ k.deltaColor }}">{{ k.delta }}</span>
+                </div>
+                <div style="height:26px;display:flex;align-items:flex-end;gap:3px;margin-top:9px">
+                  <sc-for list="{{ k.spark }}" as="s" hint-placeholder-count="5">
+                    <div style="flex:1;height:{{ s.h }};background:{{ s.color }};border-radius:2px 2px 0 0"></div>
+                  </sc-for>
+                </div>
+                <div style="font-size:11px;color:#6f6b62;margin-top:6px">{{ k.sub }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 380px;gap:14px;margin-bottom:14px">
+            <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+              <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62">EXCEPTIONS BY REASON × PERIOD</span>
+                <span style="font-size:11.5px;color:#a29d93">darker = more exposure; click a cell to open those cases</span>
+              </div>
+              <div style="display:grid;grid-template-columns:186px repeat(5,1fr);gap:5px;align-items:center">
+                <span></span>
+                <sc-for list="{{ anMonths }}" as="m" hint-placeholder-count="5">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93;text-align:center">{{ m }}</span>
+                </sc-for>
+                <sc-for list="{{ heat }}" as="row" hint-placeholder-count="6">
+                  <span style="font-size:12px;color:#3d3a34">{{ row.label }}</span>
+                  <sc-for list="{{ row.cells }}" as="c" hint-placeholder-count="5">
+                    <div onClick="{{ c.go }}" title="{{ c.title }}" style="height:34px;border-radius:5px;background:{{ c.bg }};display:flex;align-items:center;justify-content:center;cursor:pointer">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:{{ c.color }}">{{ c.v }}</span>
+                    </div>
+                  </sc-for>
+                </sc-for>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
+                <span style="font-size:11px;color:#6f6b62">less</span>
+                <sc-for list="{{ heatScale }}" as="s" hint-placeholder-count="5">
+                  <span style="width:26px;height:9px;border-radius:2px;background:{{ s }}"></span>
+                </sc-for>
+                <span style="font-size:11px;color:#6f6b62">more exposure</span>
+                <span style="margin-left:auto;font-size:11.5px;color:#6f6b62">Supplier-not-filed is the only reason that has not improved.</span>
+              </div>
+            </div>
+
+            <div style="background:#fff;border:1px solid #e6dcf7;border-radius:10px;padding:16px 18px 18px">
+              <div style="display:flex;align-items:center;gap:9px;margin-bottom:11px">
+                <span style="width:7px;height:7px;border-radius:50%;background:#6b4fa8"></span>
+                <span style="font-size:13px;font-weight:600">What changed, and why</span>
+              </div>
+              <div style="font-size:12.5px;color:#1c1b18;line-height:1.65">Match rate rose 6 points since April. Two thirds of that came from cross-period matching rather than better data: the graph now links an invoice to the period its supplier actually filed in, so 47 cases a month stop being mismatches.</div>
+              <div style="font-size:12.5px;color:#1c1b18;line-height:1.65;margin-top:10px">Exposure fell 49% because follow-ups went out earlier — median 4 days after the case opened, down from 19. Supplier-not-filed is unchanged; it does not respond to anything you do internally.</div>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62;margin-top:12px;padding-top:11px;border-top:1px solid #f2efe9">Written from 5 periods of case data · 22 facts cited</div>
+              <div style="display:flex;gap:7px;margin-top:11px">
+                <div onClick="{{ onAnReport }}" style="padding:7px 12px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12px;cursor:pointer">Put this in the report</div>
+                <div onClick="{{ onAnCites }}" style="padding:7px 12px;border-radius:7px;border:1px solid #d8d4cb;font-size:12px;cursor:pointer">Show the 22 facts</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 380px;gap:14px">
+            <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+              <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62">SUPPLIER PORTFOLIO · EXPOSURE VS FILING BEHAVIOUR</span>
+                <span style="font-size:11.5px;color:#a29d93">bubble size = invoice count</span>
+              </div>
+              <div style="position:relative;height:280px;margin:14px 0 0;border-left:1px solid #e3e0d9;border-bottom:1px solid #e3e0d9">
+                <div style="position:absolute;left:0;right:0;top:50%;border-top:1px dashed #eeebe4"></div>
+                <div style="position:absolute;top:0;bottom:0;left:50%;border-left:1px dashed #eeebe4"></div>
+                <span style="position:absolute;left:8px;top:6px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93">CHASE HARD</span>
+                <span style="position:absolute;right:8px;top:6px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93">RENEGOTIATE TERMS</span>
+                <span style="position:absolute;left:8px;bottom:8px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93">FINE</span>
+                <span style="position:absolute;right:8px;bottom:8px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#a29d93">WATCH VALUE</span>
+                <sc-for list="{{ quadrant }}" as="q" hint-placeholder-count="7">
+                  <div onClick="{{ q.go }}" style="position:absolute;left:{{ q.x }};top:{{ q.y }};transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer">
+                    <div style="width:{{ q.size }};height:{{ q.size }};border-radius:50%;background:{{ q.fill }};border:1.5px solid {{ q.border }}"></div>
+                    <span style="font-size:11px;color:#3d3a34;white-space:nowrap">{{ q.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;justify-content:space-between;margin-top:8px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">
+                <span>← lower ITC exposure</span><span>late filing rate ↑ / on time ↓</span><span>higher exposure →</span>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
+                  <span style="font-size:13px;font-weight:600">Cost to resolve a case</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6f6b62">model spend ÷ cases closed</span>
+                </div>
+                <div style="display:flex;align-items:flex-end;gap:10px;height:96px">
+                  <sc-for list="{{ costTrend }}" as="c" hint-placeholder-count="5">
+                    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#3d3a34">{{ c.v }}</span>
+                      <div style="width:100%;height:{{ c.h }};background:{{ c.color }};border-radius:4px 4px 0 0"></div>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ c.m }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="font-size:11.5px;color:#6f6b62;margin-top:12px;line-height:1.55">Falling because explanations are now generated once per case and reused, not regenerated on every open.</div>
+              </div>
+
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px">
+                <div style="font-size:13px;font-weight:600;margin-bottom:13px">Assistant contribution</div>
+                <sc-for list="{{ contribution }}" as="c" hint-placeholder-count="4">
+                  <div style="margin-bottom:12px">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+                      <span style="font-size:12px;color:#3d3a34">{{ c.label }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#6f6b62">{{ c.value }}</span>
+                    </div>
+                    <div style="height:7px;border-radius:4px;background:#f2efe9;overflow:hidden"><div style="height:100%;width:{{ c.pct }};background:{{ c.color }}"></div></div>
+                  </div>
+                </sc-for>
+                <div style="font-size:11.5px;color:#6f6b62;margin-top:4px;line-height:1.55">Time saved is measured against the median manual review time recorded before assistants were switched on.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isGeneric }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:24px 30px 44px">
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px">
+            <div>
+              <h1 style="margin:0 0 4px;font-size:20px;font-weight:700">{{ generic.title }}</h1>
+              <p style="margin:0;font-size:12.5px;color:#6f6b62">{{ generic.desc }}</p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <div onClick="{{ onSecondary }}" style="padding:7px 13px;border-radius:7px;border:1px solid #d8d4cb;background:#fff;font-size:12.5px;cursor:pointer" style-hover="border-color:#a29d93">{{ generic.secondary }}</div>
+              <div onClick="{{ onPrimary }}" style="padding:7px 13px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">{{ generic.primary }}</div>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #dfe3f2;background:#f4f6fb;border-radius:8px;margin-bottom:14px">
+              <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+              <span style="font-size:12.5px;color:#1c1b18">{{ banner }}</span>
+              <span onClick="{{ dismiss }}" style="margin-left:auto;font-size:11.5px;color:#5b6bb5;cursor:pointer">Dismiss</span>
+            </div>
+          </sc-if>
+
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+            <sc-for list="{{ generic.kpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:14px 16px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:8px">{{ k.label }}</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:21px;color:{{ k.color }}">{{ k.value }}</div>
+                <div style="font-size:11px;color:#6f6b62;margin-top:5px">{{ k.sub }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:16px 18px 18px;margin-bottom:14px">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62">{{ generic.viz.title }}</span>
+              <span style="font-size:11.5px;color:#a29d93">{{ generic.viz.hint }}</span>
+            </div>
+
+            <sc-if value="{{ generic.viz.isBars }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:11px">
+                <sc-for list="{{ generic.viz.items }}" as="b" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:14px">
+                    <span style="width:170px;font-size:12px;color:#3d3a34">{{ b.label }}</span>
+                    <div style="flex:1;height:9px;border-radius:5px;background:#f2efe9;overflow:hidden">
+                      <div style="height:100%;width:{{ b.pct }};background:{{ b.color }};border-radius:5px"></div>
+                    </div>
+                    <span style="width:132px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#6f6b62">{{ b.value }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ generic.viz.isSplit }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="display:flex;height:26px;border-radius:6px;overflow:hidden;gap:2px;margin-bottom:14px">
+                  <sc-for list="{{ generic.viz.items }}" as="s" hint-placeholder-count="5">
+                    <div style="width:{{ s.pct }};background:{{ s.color }}"></div>
+                  </sc-for>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:18px">
+                  <sc-for list="{{ generic.viz.items }}" as="s" hint-placeholder-count="5">
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <span style="width:9px;height:9px;border-radius:2px;background:{{ s.color }}"></span>
+                      <span style="font-size:12px;color:#3d3a34">{{ s.label }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#6f6b62">{{ s.value }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ generic.viz.isSeries }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:flex-end;gap:10px;height:120px">
+                <sc-for list="{{ generic.viz.items }}" as="s" hint-placeholder-count="6">
+                  <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;height:100%;justify-content:flex-end">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#3d3a34">{{ s.value }}</span>
+                    <div style="width:100%;height:{{ s.h }};background:{{ s.color }};border-radius:4px 4px 0 0"></div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ s.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ generic.viz.isFlow }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:14px">
+                <sc-for list="{{ generic.viz.chains }}" as="ch" hint-placeholder-count="1">
+                  <div>
+                    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:9px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#41508f">{{ ch.name }}</span>
+                      <span style="font-size:11px;color:#a29d93">{{ ch.meta }}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;flex-wrap:wrap">
+                      <sc-for list="{{ ch.steps }}" as="st" hint-placeholder-count="5">
+                        <div style="display:flex;align-items:center">
+                          <div style="border:1px solid {{ st.color }};border-radius:8px;padding:9px 12px;background:#fbfaf8">
+                            <div style="font-size:12px;color:#1c1b18">{{ st.label }}</div>
+                            <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f6b62;margin-top:3px">{{ st.sub }}</div>
+                          </div>
+                          <span style="width:24px;text-align:center;color:#c3bdb2;font-size:12px">→</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;align-items:start">
+            <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;overflow:hidden">
+              <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:10px;padding:9px 18px;background:#f4f6fb;border-bottom:1px solid #dfe3f2">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#41508f">{{ selLabel }}</span>
+                  <div style="display:flex;gap:7px;margin-left:6px">
+                    <sc-for list="{{ bulkActions }}" as="ba" hint-placeholder-count="3">
+                      <div onClick="{{ ba.go }}" style="padding:4px 10px;border-radius:6px;border:1px solid #dfe3f2;background:#fff;font-size:11.5px;color:#41508f;cursor:pointer">{{ ba.label }}</div>
+                    </sc-for>
+                  </div>
+                  <span onClick="{{ clearSel }}" style="margin-left:auto;font-size:11.5px;color:#6f6b62;cursor:pointer">Clear</span>
+                </div>
+              </sc-if>
+              <sc-if value="{{ hasDone }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:10px;padding:9px 18px;background:#f5f9f6;border-bottom:1px solid #dfeae1">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#2f6b4d">{{ doneLabel }}</span>
+                  <span style="font-size:11.5px;color:#6f6b62">nothing reaches the portal until you file 3B</span>
+                  <span onClick="{{ onUndo }}" style="margin-left:auto;font-size:11.5px;color:#41508f;cursor:pointer">Undo all</span>
+                </div>
+              </sc-if>
+              <div style="display:grid;grid-template-columns:{{ generic.gridSel }};gap:12px;padding:10px 18px;border-bottom:1px solid #e3e0d9;background:#faf9f6;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#6f6b62">
+                <span>☐</span>
+                <sc-for list="{{ generic.cols }}" as="c" hint-placeholder-count="5">
+                  <span>{{ c }}</span>
+                </sc-for>
+                <span></span>
+              </div>
+              <sc-for list="{{ generic.rows }}" as="r" hint-placeholder-count="7">
+                <div onClick="{{ r.onOpen }}" style="display:grid;grid-template-columns:{{ generic.gridSel }};gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #f2efe9;cursor:pointer;background:{{ r.bg }}" style-hover="background:#faf9f6">
+                  <span onClick="{{ r.onToggle }}" style="font-size:12px;color:{{ r.markColor }};cursor:pointer">{{ r.mark }}</span>
+                  <sc-for list="{{ r.cells }}" as="cell" hint-placeholder-count="5">
+                    <div>
+                      <div style="font-family:{{ cell.font }};font-size:{{ cell.size }};color:{{ cell.color }}">{{ cell.t }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93;margin-top:2px">{{ cell.sub }}</div>
+                    </div>
+                  </sc-for>
+                  <span style="font-size:11px;color:{{ r.openColor }};background:{{ r.openBg }};justify-self:end;padding:3px 9px;border:1px solid {{ r.openBorder }};border-radius:6px;white-space:nowrap">{{ r.openLabel }}</span>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="background:#fff;border:1px solid #dfe3f2;border-radius:10px;padding:15px 17px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px">
+                  <span style="width:7px;height:7px;border-radius:2px;background:#5b6bb5"></span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#41508f">FROM THE GRAPH</span>
+                </div>
+                <div style="font-size:12.5px;color:#3d3a34;line-height:1.6">{{ generic.graphNote }}</div>
+              </div>
+              <div style="background:#fff;border:1px solid #e3e0d9;border-radius:10px;padding:15px 17px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:10px">NEXT</div>
+                <sc-for list="{{ generic.related }}" as="rel" hint-placeholder-count="3">
+                  <div onClick="{{ rel.go }}" style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f2efe9;cursor:pointer">
+                    <span style="font-size:12px;color:#5b6bb5">{{ rel.name }}</span>
+                    <span style="font-size:11px;color:#a29d93">{{ rel.meta }}</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="background:#fbfaf8;border:1px solid #e3e0d9;border-radius:10px;padding:15px 17px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:#6b4fa8"></span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6b4fa8">ASSISTANT · READ THIS SCREEN</span>
+                </div>
+                <div style="font-size:12.5px;color:#3d3a34;line-height:1.6;margin-bottom:12px">{{ generic.copilot }}</div>
+                <div onClick="{{ onCopilot }}" style="padding:8px 12px;border-radius:7px;background:#1c1b18;color:#fff;font-size:12px;text-align:center;cursor:pointer">{{ generic.copilotAction }}</div>
+                <div style="font-size:10.5px;color:#a29d93;margin-top:9px;line-height:1.5">Suggestion only, built from graph facts. Nothing runs until you press it.</div>
+              </div>
+            </div>
+          </div>
+
+          <sc-if value="{{ hasDrawer }}" hint-placeholder-val="{{ false }}">
+            <div style="position:fixed;top:56px;right:0;bottom:0;width:392px;background:#fff;border-left:1px solid #e3e0d9;box-shadow:-18px 0 42px rgba(28,27,24,.12);z-index:30;display:flex;flex-direction:column">
+              <div style="padding:18px 20px 15px;border-bottom:1px solid #eeebe4;display:flex;align-items:flex-start;gap:12px">
+                <div style="flex:1">
+                  <div style="font-size:16px;font-weight:700;margin-bottom:4px">{{ drawer.title }}</div>
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6f6b62">{{ drawer.sub }}</div>
+                </div>
+                <span onClick="{{ closeDrawer }}" style="font-size:15px;color:#a29d93;cursor:pointer;line-height:1">×</span>
+              </div>
+              <div style="flex:1;overflow:auto;padding:16px 20px 20px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#6f6b62;margin-bottom:10px">RECORD</div>
+                <sc-for list="{{ drawer.facts }}" as="f" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid #f2efe9">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93">{{ f.k }}</span>
+                    <div>
+                      <div style="font-size:12.5px;color:#1c1b18">{{ f.v }}</div>
+                      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a29d93;margin-top:2px">{{ f.s }}</div>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="margin-top:18px;padding:12px 14px;border-radius:8px;border:1px solid #dfe3f2;background:#f7f8fd;font-size:12px;color:#3d3a34;line-height:1.6">{{ drawer.note }}</div>
+              </div>
+              <div style="padding:14px 20px 18px;border-top:1px solid #eeebe4;display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ drawer.actions }}" as="a" hint-placeholder-count="3">
+                  <div onClick="{{ a.go }}" style="padding:9px 12px;border-radius:7px;background:{{ a.bg }};border:1px solid {{ a.border }};color:{{ a.color }};font-size:12.5px;text-align:center;cursor:pointer">{{ a.label }}</div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+const M = "'IBM Plex Mono',monospace";
+const S = "'Public Sans',sans-serif";
+const cell = (t, o) => Object.assign({ t, sub:'', font:S, size:'12.5px', color:'#1c1b18' }, o || {});
+const mono = (t, color) => cell(t, { font:M, size:'12px', color: color || '#3d3a34' });
+
+const heatRow = (label, vals, levels, go) => ({ label, cells: vals.map((v, i) => {
+  const scale = ['#f4f2ee','#f7e6dc','#eec5b0','#d99578','#a13f28'];
+  const lv = levels[i];
+  return { v, go, bg: scale[lv], color: lv > 2 ? '#fff' : '#3d3a34', title: label + ' \u00b7 \u20b9' + v.replace('\u20b9','') + ' L' };
+}) });
+
+class Component extends DCLogic {
+  state = { screen: 'home', sel: {}, drawer: null, banner: null, off: {}, ask: false,
+            navOpen: true, client: 'ABC Manufacturing Pvt Ltd', clientOpen: false, inbox: false, done: {}, approved: {}, runOut: 'Case explainer',
+            ds: 'books', rowSel: 1, showRaw: false, okDs: {} };
+  pickDs(d){ return () => this.setState({ ds: d }); }
+  pickSampleRow(i){ return () => this.setState({ rowSel: i }); }
+  toggleRaw(){ return () => this.setState({ showRaw: !this.state.showRaw }); }
+  confirmDs(d, n){ return () => { const o = Object.assign({}, this.state.okDs); o[d] = true; this.setState({ okDs: o, banner: n + ' mapping confirmed. All three files must be confirmed before reconciliation runs.' }); }; }
+  showOut(name){ return () => this.setState({ screen: 'agents', runOut: name, banner: name + ' ran on August 2026. Its latest output is open below, and the same text is on the screen where it is used.' }); }
+  go(s){ return () => this.setState({ screen: s, sel: {}, drawer: null, banner: null, clientOpen: false, inbox: false }); }
+  act(text){ return () => this.setState({ banner: text, drawer: null }); }
+  toggleNav(){ return () => this.setState({ navOpen: !this.state.navOpen }); }
+  toggleClient(){ return () => this.setState({ clientOpen: !this.state.clientOpen, inbox: false }); }
+  pickClient(c, g){ return () => this.setState({ client: c, clientOpen: false, banner: 'Switched to ' + c + ' (' + g + '). Period, cases and ITC figures reload for that client.' }); }
+  toggleInbox(){ return () => this.setState({ inbox: !this.state.inbox, clientOpen: false }); }
+  decide(id, verdict){ return () => { const a = Object.assign({}, this.state.approved); a[id] = verdict; this.setState({ approved: a }); }; }
+  finish(keys, label){ return () => { const d = Object.assign({}, this.state.done); keys.forEach(k => { d[this.state.screen + ':' + k] = label; }); this.setState({ done: d, drawer: null, sel: {},
+      banner: label + ' \u2014 recorded on ' + keys.length + ' ' + (keys.length === 1 ? 'row' : 'rows') + '. Nothing reaches the portal until you file 3B.' }); }; }
+  undo(){ return () => this.setState({ done: {}, banner: 'Reverted the decisions from this session.' }); }
+  toggleRow(i){ return (e) => { if (e && e.stopPropagation) e.stopPropagation(); const sel = Object.assign({}, this.state.sel); sel[i] = !sel[i]; this.setState({ sel }); }; }
+  openRow(row){ return () => this.setState({ drawer: row }); }
+  toggleAgent(name){ return () => { const off = Object.assign({}, this.state.off); off[name] = !off[name]; this.setState({ off, banner: (off[name] ? 'Paused ' : 'Resumed ') + name + '.' }); }; }
+  toggleAsk(){ return () => this.setState({ ask: !this.state.ask }); }
+
+  viz(cur){
+    const bars = (title, hint, items) => ({ isBars:true, title, hint, items });
+    const series = (title, hint, items) => ({ isSeries:true, title, hint, items });
+    const flow = (title, hint, chains) => ({ isFlow:true, title, hint, chains });
+    const split = (title, hint, items) => ({ isSplit:true, title, hint, items });
+    const V = {
+      reset: bars('BEFORE YOU RESET', 'two of four checks pass', [
+        { label:'Exports taken', value:'4 files', pct:'100%', color:'#2f6b4d' },
+        { label:'Approvals cleared', value:'9 waiting', pct:'40%', color:'#a86a2c' },
+        { label:'Cases decided', value:'521 of 848', pct:'61%', color:'#a86a2c' },
+        { label:'Period filed', value:'3B not filed', pct:'4%', color:'#a13f28' }
+      ]),
+      deliverables: bars('EXPORT READINESS', 'what is blocking the rest', [
+        { label:'Ready now', value:'3 of 6', pct:'50%', color:'#2f6b4d' },
+        { label:'Drafted, needs a read', value:'1', pct:'17%', color:'#41508f' },
+        { label:'Needs your approval', value:'1', pct:'17%', color:'#a86a2c' },
+        { label:'Needs 24 IMS decisions', value:'1', pct:'17%', color:'#a13f28' }
+      ]),
+      authority: bars('EXPOSURE BY STATUTORY BASIS', 'which section each rupee at risk rests on', [
+        { label:'s.16(2)(aa) \u00b7 supplier filed', value:'42 \u00b7 \u20b94.2 L', pct:'100%', color:'#a13f28' },
+        { label:'s.16(4) \u00b7 time limit', value:'92 \u00b7 \u20b98.2 L', pct:'88%', color:'#a86a2c' },
+        { label:'s.16(2)(b) \u00b7 goods received', value:'14 \u00b7 \u20b91.6 L', pct:'33%', color:'#a86a2c' },
+        { label:'s.17(5) \u00b7 blocked credit', value:'11 \u00b7 \u20b91.4 L', pct:'26%', color:'#a13f28' },
+        { label:'firm policy \u00b7 tolerance', value:'96 \u00b7 \u20b90.6 L', pct:'14%', color:'#c3bdb2' }
+      ]),
+      obligations: series('DAYS LEFT ON EACH DEADLINE', 'shorter bar means less time', [
+        { label:'2B', value:'28 d', h:'28%', color:'#e0b98f' },
+        { label:'3B', value:'34 d', h:'34%', color:'#e0b98f' },
+        { label:'CN', value:'44 d', h:'44%', color:'#c6cee9' },
+        { label:'G1', value:'55 d', h:'55%', color:'#c6cee9' },
+        { label:'16(4)', value:'105 d', h:'100%', color:'#a13f28' },
+        { label:'G9', value:'136 d', h:'100%', color:'#dcd7cc' }
+      ]),
+      periods: flow('PERIOD LIFECYCLE · AUGUST 2026', 'the close gate will not pass with unresolved exposure', [
+        { name:'AUGUST', meta:'day 17 of the cycle', steps:[
+          { label:'Books imported', sub:'15 Aug', color:'#2f6b4d' },
+          { label:'2B generated', sub:'14 Aug', color:'#2f6b4d' },
+          { label:'Reconciled', sub:'848 exceptions', color:'#2f6b4d' },
+          { label:'IMS actions', sub:'24 pending', color:'#a86a2c' },
+          { label:'Close period', sub:'38 open', color:'#a13f28' },
+          { label:'File 3B', sub:'due 20 Sep', color:'#c3bdb2' } ] }
+      ]),
+      exceptions: bars('EXPOSURE BY REASON', 'width = ITC at risk, not case count', [
+        { label:'Supplier not filed', value:'₹4.2 L · 42', pct:'100%', color:'#a13f28' },
+        { label:'Tax amount differs', value:'₹3.1 L · 181', pct:'74%', color:'#a86a2c' },
+        { label:'Only in books', value:'₹1.8 L · 263', pct:'43%', color:'#a86a2c' },
+        { label:'Only in 2B', value:'₹1.4 L · 125', pct:'33%', color:'#5b6bb5' },
+        { label:'Cross-period', value:'₹1.4 L · 47', pct:'33%', color:'#6b4fa8' },
+        { label:'Duplicate', value:'₹0.8 L · 18', pct:'19%', color:'#a29d93' }
+      ]),
+      crossperiod: flow('WHY AN INVOICE LANDS IN A LATER 2B', 'the graph walks this path for every cross-period case', [
+        { name:'INV-0987', meta:'auto-matched, 0.98', steps:[
+          { label:'Invoice 28 Jul', sub:'books · July', color:'#c3bdb2' },
+          { label:'Supplier files', sub:'GSTR-1 on 11 Aug', color:'#a86a2c' },
+          { label:'August period', sub:'gst:FilingPeriod', color:'#6b4fa8' },
+          { label:'GSTR-2B Aug', sub:'ITC claimable now', color:'#2f6b4d' } ] }
+      ]),
+      itc: split('ITC POSITION · ₹3.42 Cr IN BOOKS', 'one bar, every rupee accounted for', [
+        { label:'Reconciled', value:'₹2.91 Cr', pct:'85%', color:'#2f6b4d' },
+        { label:'Needs review', value:'₹18.7 L', pct:'5.5%', color:'#a86a2c' },
+        { label:'At risk', value:'₹12.4 L', pct:'3.6%', color:'#a13f28' },
+        { label:'Potentially ineligible', value:'₹4.2 L', pct:'1.2%', color:'#6b4fa8' },
+        { label:'Recoverable later', value:'₹8.2 L', pct:'2.4%', color:'#5b6bb5' }
+      ]),
+      atrisk: bars('EXPOSURE BY SUPPLIER', 'chase from the top — 5 suppliers hold 74% of the risk', [
+        { label:'XYZ Pvt Ltd', value:'₹4.82 L · 38 d', pct:'100%', color:'#a13f28' },
+        { label:'ABC Suppliers', value:'₹3.17 L · 26 d', pct:'66%', color:'#a13f28' },
+        { label:'PQR Industries', value:'₹2.41 L · 19 d', pct:'50%', color:'#a86a2c' },
+        { label:'Meridian Steel', value:'₹0.96 L · 12 d', pct:'20%', color:'#a86a2c' },
+        { label:'Northline Logistics', value:'₹0.58 L · 6 d', pct:'12%', color:'#5b6bb5' }
+      ]),
+      eligibility: bars('WHY CREDIT MAY NOT BE CLAIMABLE', 'matched in 2B, still not automatically eligible', [
+        { label:'Goods not yet received', value:'14 · ₹1.6 L', pct:'100%', color:'#a86a2c' },
+        { label:'Possible blocked credit', value:'11 · ₹1.4 L', pct:'79%', color:'#a13f28' },
+        { label:'RCM self-invoice missing', value:'7 · ₹0.7 L', pct:'50%', color:'#a86a2c' },
+        { label:'ISD / wrong GSTIN', value:'6 · ₹0.5 L', pct:'43%', color:'#5b6bb5' }
+      ]),
+      suppliers: bars('PORTFOLIO BY EXCEPTION RATE', '214 of 1,482 suppliers produced an exception this period', [
+        { label:'Clean', value:'1,268', pct:'86%', color:'#2f6b4d' },
+        { label:'1 – 5 exceptions', value:'158', pct:'11%', color:'#a86a2c' },
+        { label:'6 – 20 exceptions', value:'46', pct:'3%', color:'#a13f28' },
+        { label:'Over 20', value:'10', pct:'1%', color:'#a13f28' }
+      ]),
+      risk: series('LATE FILING RATE · XYZ PVT LTD', '12 periods, each bar traceable to a filing date in the graph', [
+        { label:'Sep', value:'8%', h:'16%', color:'#dcd7cc' }, { label:'Oct', value:'14%', h:'28%', color:'#dcd7cc' },
+        { label:'Nov', value:'22%', h:'44%', color:'#e0b98f' }, { label:'Dec', value:'18%', h:'36%', color:'#e0b98f' },
+        { label:'Jan', value:'26%', h:'52%', color:'#e0b98f' }, { label:'Feb', value:'31%', h:'62%', color:'#c9803a' },
+        { label:'Mar', value:'29%', h:'58%', color:'#c9803a' }, { label:'Apr', value:'34%', h:'68%', color:'#c9803a' },
+        { label:'May', value:'38%', h:'76%', color:'#a13f28' }, { label:'Jun', value:'41%', h:'82%', color:'#a13f28' },
+        { label:'Jul', value:'36%', h:'72%', color:'#a13f28' }, { label:'Aug', value:'31%', h:'62%', color:'#a13f28' }
+      ]),
+      followups: flow('FOLLOW-UP LIFECYCLE', 'drafted by the assistant, sent by you', [
+        { name:'XYZ PVT LTD', meta:'₹4.1 L · 5 invoices', steps:[
+          { label:'Case raised', sub:'11 Aug', color:'#c3bdb2' },
+          { label:'Draft written', sub:'cites 5 invoices', color:'#5b6bb5' },
+          { label:'You approved', sub:'12 Aug', color:'#2f6b4d' },
+          { label:'Awaiting reply', sub:'9 days', color:'#a86a2c' },
+          { label:'Amendment in 2B', sub:'expected Sep', color:'#c3bdb2' } ] }
+      ]),
+      queue: bars('QUEUE BURN-DOWN', '327 cases open, 64 cleared today', [
+        { label:'Cleared today', value:'64', pct:'20%', color:'#2f6b4d' },
+        { label:'In progress', value:'88', pct:'27%', color:'#5b6bb5' },
+        { label:'Untouched', value:'175', pct:'53%', color:'#a86a2c' }
+      ]),
+      ims: flow('IMS → GSTR-2B → 3B', 'an IMS action recomputes 2B, so it is not just a status', [
+        { name:'CURRENT PERIOD', meta:'24 records pending', steps:[
+          { label:'Supplier files', sub:'GSTR-1', color:'#c3bdb2' },
+          { label:'IMS record', sub:'appears', color:'#6b4fa8' },
+          { label:'Your action', sub:'accept / reject / pending', color:'#a86a2c' },
+          { label:'2B recomputed', sub:'on change', color:'#5b6bb5' },
+          { label:'GSTR-3B', sub:'deemed accepted if untouched', color:'#a13f28' } ] }
+      ]),
+      approvals: bars('AWAITING SIGN-OFF BY TYPE', 'threshold ₹50,000', [
+        { label:'Write-off', value:'₹3.17 L · 1', pct:'100%', color:'#a13f28' },
+        { label:'Claim cross-period', value:'₹1.4 L · 1', pct:'44%', color:'#6b4fa8' },
+        { label:'IMS reject', value:'₹1.2 L · 1', pct:'38%', color:'#a86a2c' },
+        { label:'Bulk accept', value:'₹0.6 L · 1', pct:'19%', color:'#5b6bb5' }
+      ]),
+      analytics: series('MATCH RATE VS ITC AT RISK', 'bar height = match rate, label = exposure that month', [
+        { label:'Apr', value:'₹8.2L', h:'62%', color:'#dcd7cc' },
+        { label:'May', value:'₹5.4L', h:'71%', color:'#dcd7cc' },
+        { label:'Jun', value:'₹6.7L', h:'79%', color:'#dcd7cc' },
+        { label:'Jul', value:'₹4.9L', h:'76%', color:'#dcd7cc' },
+        { label:'Aug', value:'₹4.2L', h:'88%', color:'#1c1b18' }
+      ]),
+      imports: flow('THIS PERIOD’S LOADS', 'each load is kept as its own version, never overwritten', [
+        { name:'AUGUST 2026', meta:'6 imports, 37,102 rows', steps:[
+          { label:'GSTR-2B', sub:'14 Aug 22:10', color:'#2f6b4d' },
+          { label:'GSTR-1', sub:'14 Aug 22:12', color:'#2f6b4d' },
+          { label:'IMS', sub:'14 Aug 22:14', color:'#2f6b4d' },
+          { label:'ERP goods receipt', sub:'18 rows rejected', color:'#a86a2c' },
+          { label:'Books', sub:'15 Aug 09:38', color:'#2f6b4d' } ] }
+      ]),
+      datasources: bars('SYNC RELIABILITY · 30 DAYS', 'a degraded source silently ages every case built on it', [
+        { label:'GST Portal — filings', value:'100%', pct:'100%', color:'#2f6b4d' },
+        { label:'GST Portal — IMS', value:'97%', pct:'97%', color:'#2f6b4d' },
+        { label:'Tally books export', value:'93%', pct:'93%', color:'#2f6b4d' },
+        { label:'ERP goods receipt', value:'71%', pct:'71%', color:'#a86a2c' },
+        { label:'Vendor master', value:'88%', pct:'88%', color:'#a86a2c' }
+      ]),
+      mappings: bars('MAPPING COMPLETENESS', '28 of 31 required fields mapped', [
+        { label:'Mapped and validated', value:'24', pct:'77%', color:'#2f6b4d' },
+        { label:'Mapped, needs check', value:'4', pct:'13%', color:'#a86a2c' },
+        { label:'Unmapped (optional)', value:'3', pct:'10%', color:'#c3bdb2' }
+      ]),
+      rules: bars('CASES AVOIDED BY EACH RULE', 'what your tolerance settings did this period', [
+        { label:'Tax tolerance ± ₹10', value:'96 auto-matched', pct:'100%', color:'#2f6b4d' },
+        { label:'Cross-period window', value:'47 matched forward', pct:'49%', color:'#6b4fa8' },
+        { label:'Invoice normalisation', value:'31 matched', pct:'32%', color:'#5b6bb5' },
+        { label:'GSTIN transposition', value:'9 suggested', pct:'9%', color:'#a86a2c' }
+      ]),
+      gstins: bars('EXPOSURE BY REGISTRATION', 'three registrations, one corporate group in the graph', [
+        { label:'27 · Maharashtra', value:'₹8.1 L · 24 cases', pct:'100%', color:'#a13f28' },
+        { label:'24 · Gujarat', value:'₹3.6 L · 11 cases', pct:'44%', color:'#a86a2c' },
+        { label:'29 · Karnataka', value:'₹0.7 L · 3 cases', pct:'9%', color:'#5b6bb5' }
+      ]),
+      users: bars('WORKLOAD', 'cases currently assigned', [
+        { label:'Sneha Kulkarni', value:'88 open', pct:'100%', color:'#5b6bb5' },
+        { label:'Rahul Mehta', value:'64 open', pct:'73%', color:'#5b6bb5' },
+        { label:'Anita Rao', value:'9 approvals', pct:'10%', color:'#6b4fa8' },
+        { label:'Unassigned', value:'96 cases', pct:'100%', color:'#a13f28' }
+      ])
+    };
+    return V[cur] || V.exceptions;
+  }
+
+  rowActs(cur){
+    const A = {
+      reset:['Archive this period','Export before reset','Reset now'],
+      deliverables:['Download','Copy to clipboard','Print / PDF'],
+      authority:['Open the section','View flagged cases','Cite in working paper'],
+      obligations:['Open the work','Assign owner','Snooze reminder'],
+      periods:['Open period','Close with exceptions','Export working'],
+      exceptions:['Open cases','Assign owner','Create follow-ups'],
+      crossperiod:['Accept match','Move to September','Inspect evidence'],
+      itc:['Open invoices','Export schedule','Flag for review'],
+      atrisk:['Draft follow-up','Assign owner','Mark chased'],
+      eligibility:['Mark ineligible','Claim anyway','Ask preparer'],
+      suppliers:['Open supplier','Draft follow-up','View graph'],
+      risk:['Open supplier','Export scorecard','Flag high risk'],
+      followups:['Open thread','Resend','Mark resolved'],
+      queue:['Start reviewing','Reassign','Bulk accept'],
+      ims:['Accept','Reject','Keep pending'],
+      approvals:['Approve','Return for detail','Delegate'],
+      analytics:['Drill into period','Export series','Pin to dashboard'],
+      imports:['View rows','Re-import','Roll back load'],
+      datasources:['Sync now','Test connection','Pause'],
+      mappings:['Edit mapping','Preview transform','Reset to pack default'],
+      rules:['Edit rule','Simulate on August','Restore default'],
+      gstins:['Open registration','Set filing calendar','Remove'],
+      users:['Edit role','Reassign cases','Deactivate']
+    };
+    return A[cur] || A.exceptions;
+  }
+
+  copilot(cur){
+    const C = {
+      reset: { text:'August is not filed and 9 approvals are still waiting. Resetting now would leave those decisions unmade against a period you have already reported on.', action:'Archive instead' },
+      deliverables: { text:'The client report is drafted but reads as if the 24 IMS decisions are already made. Worth deciding those before it goes out.', action:'Open the IMS queue' },
+      authority: { text:'38 flags rest on firm policy rather than law \u2014 all of them the \u20b910 rounding tolerance. Worth saying so explicitly in the client report.', action:'Label the 38 as policy' },
+      obligations: { text:'\u20b98.2 L sits inside the s.16(4) window with 105 days left. Last year the same pool shrank to \u20b91.1 L once follow-ups went out in September.', action:'Start the September chase' },
+      periods: { text:'Two blockers stand between you and closing August: 24 IMS records with no action, and ₹4.2 L of exposure on 11 suppliers with no follow-up sent.', action:'Draft the 11 follow-ups' },
+      exceptions: { text:'96 of the 181 amount mismatches are under ₹1,000 and sit inside your rounding tolerance pattern from July.', action:'Group them for bulk accept' },
+      crossperiod: { text:'38 of 47 cross-period cases resolved on the filing-date path alone. The remaining 9 have no supplier filing in either period.', action:'Escalate the 9 to follow-up' },
+      itc: { text:'₹8.2 L of the at-risk pool matches the profile that got recovered last period — suppliers who filed one cycle late.', action:'Build a recovery watchlist' },
+      atrisk: { text:'XYZ, ABC and PQR account for 74% of exposure and have all been contacted before. Their reply rate is 60% within 9 days.', action:'Draft a firmer second notice' },
+      eligibility: { text:'14 cases are timing, not eligibility — goods arrive after the invoice. They become claimable next period without any action.', action:'Move 14 to September' },
+      suppliers: { text:'96 suppliers were merged from two source records this period. Two of those merges look weak — similar names, no shared PAN.', action:'Review the 2 weak merges' },
+      risk: { text:'XYZ has slipped for four consecutive periods. Every score component traces to filing dates the graph holds.', action:'Export the evidence pack' },
+      followups: { text:'7 threads have had no reply for over 9 days. Historically a second notice recovers 40% of them.', action:'Draft second notices' },
+      queue: { text:'Sorted by exposure, the top 40 cases carry 61% of the money in this queue. The rest are under ₹2,000 each.', action:'Queue the top 40 first' },
+      ims: { text:'6 records will be deemed accepted when 3B is filed. Two of them are the disputed amounts from XYZ.', action:'Hold the 2 disputed as pending' },
+      approvals: { text:'The ABC write-off is the only item above your delegation threshold that has been waiting more than two days.', action:'Nudge the approver' },
+      analytics: { text:'Match rate improved 6 points since April, and follow-up volume fell 75%. Most of the gain came from cross-period auto-matching.', action:'Add to the client report' },
+      imports: { text:'18 goods-receipt rows failed on GSTIN format. All 18 are the same supplier with a trailing space.', action:'Fix and re-import the 18' },
+      datasources: { text:'ERP goods receipt has missed 29% of its syncs this month, which is why 14 eligibility flags could not be confirmed.', action:'Open a ticket with IT' },
+      mappings: { text:'Your GRN Date column maps to a field the GST pack added in 1.4.2. Three optional fields are still unmapped.', action:'Auto-map the 3' },
+      rules: { text:'Widening tax tolerance from ₹10 to ₹25 would auto-match 41 more cases worth ₹0.3 L, and hide 2 real mismatches.', action:'Simulate ₹25 tolerance' },
+      gstins: { text:'The Gujarat registration has 11 open cases and no assigned preparer.', action:'Assign a preparer' },
+      users: { text:'96 cases have no owner. Sneha is at 88 open, Rahul at 64.', action:'Distribute the 96' }
+    };
+    return C[cur] || C.exceptions;
+  }
+
+  screens(){
+    const rel = (name, key, meta) => ({ name, meta, go: this.go(key) });
+    return {
+      reset: {
+        title:'New session', desc:'Clear this period and start again \u2014 another month, another client, or another jurisdiction.',
+        primary:'Reset and start over', secondary:'Archive first',
+        kpis:[{label:'IN THIS SESSION',value:'848 cases',sub:'327 still undecided',color:'#a86a2c'},{label:'DECISIONS MADE',value:'521',sub:'kept in the audit log',color:'#2f6b4d'},{label:'EXPORTS TAKEN',value:'4',sub:'safe to reset',color:'#2f6b4d'},{label:'ARCHIVED PERIODS',value:'4',sub:'Apr \u2013 Jul, read-only',color:'#1c1b18'}],
+        grid:'1.3fr 1fr 1.4fr 130px', cols:['WHAT RESETS','WHAT SURVIVES','WHY','STATE'],
+        rows:[
+          [cell('Uploaded files'), cell('Import history'), cell('You can re-import the same file version'), mono('CLEARED','#a86a2c')],
+          [cell('Column mappings'), cell('Saved as a template'), cell('Next month reuses this mapping'), mono('KEPT','#2f6b4d')],
+          [cell('Reconciliation results'), cell('Closed periods'), cell('Apr \u2013 Jul stay browsable and read-only'), mono('KEPT','#2f6b4d')],
+          [cell('Open cases and drafts'), cell('Decisions and approvals'), cell('An audit trail you cannot delete by resetting'), mono('LOGGED','#41508f')],
+          [cell('Selected period'), cell('Client and GSTINs'), cell('Switch month or jurisdiction from the header'), mono('CLEARED','#a86a2c')]
+        ],
+        graphNote:'Resetting clears the working session, not the graph. Facts, evidence and resolved supplier identities stay in GraphOWL, which is why next month starts warm rather than from nothing.',
+        related:[rel('Deliverables','deliverables','export first'), rel('Periods','periods','archived months'), rel('Imports','imports','file history')]
+      },
+      deliverables: {
+        title:'Deliverables', desc:'What leaves the system at the end of a period \u2014 for the client, the CA and your own file.',
+        primary:'Generate client report', secondary:'Working paper (.xlsx)',
+        kpis:[{label:'READY TO EXPORT',value:'3 of 6',sub:'3 need a decision first',color:'#a86a2c'},{label:'GENERATED THIS PERIOD',value:'12',sub:'3 regenerated',color:'#1c1b18'},{label:'SENT TO CLIENT',value:'4',sub:'last on 15 Aug',color:'#2f6b4d'},{label:'RETAINED',value:'8 years',sub:'with the evidence behind them',color:'#1c1b18'}],
+        grid:'1.4fr 110px 1.3fr 140px 130px', cols:['DELIVERABLE','FORMAT','WHAT IT CONTAINS','STATE','TAKE IT AWAY'],
+        rows:[
+          [cell('GSTR-3B working paper',{sub:'Table 4 build-up'}), mono('.xlsx'), cell('4A5, 4B2 and 4C with the invoices behind each'), mono('READY','#2f6b4d'), cell('Download \u00b7 Print')],
+          [cell('ITC register',{sub:'invoice level'}), mono('.xlsx'), cell('12,482 rows with reason code and citation'), mono('READY','#2f6b4d'), cell('Download')],
+          [cell('Reconciliation summary',{sub:'CA review copy'}), mono('.csv'), cell('Every bucket, exception and decision'), mono('READY','#2f6b4d'), cell('Download \u00b7 Copy')],
+          [cell('Client report',{sub:'plain language'}), mono('.md / PDF'), cell('Findings, risk, and what you did about it'), mono('DRAFTED','#41508f'), cell('Copy \u00b7 .md \u00b7 Print')],
+          [cell('Supplier follow-up pack',{sub:'6 letters'}), mono('.md'), cell('One letter per supplier, invoices cited'), mono('NEEDS APPROVAL','#a86a2c'), cell('Review first')],
+          [cell('IMS action sheet',{sub:'portal checklist'}), mono('.csv'), cell('Accept, reject or pending per record'), mono('NEEDS DECISION','#a86a2c'), cell('24 pending')]
+        ],
+        graphNote:'Every export carries the case ids and fact ids behind each number, so a reviewer can walk from a figure in the working paper back to the source row it came from without asking you.',
+        related:[rel('Approvals','approvals','sign-off first'), rel('IMS','ims','24 pending'), rel('New session','reset','when it is all out')]
+      },
+      authority: {
+        title:'Authority', desc:'The law behind every flag. A finding you cannot cite is a finding you cannot defend to a client or an officer.',
+        primary:'Add to working paper', secondary:'Rule reference',
+        kpis:[{label:'FLAGS WITH A CITATION',value:'810 of 848',sub:'38 are firm policy',color:'#2f6b4d'},{label:'SECTIONS RELIED ON',value:'11',sub:'CGST Act, rules, advisories',color:'#1c1b18'},{label:'AMENDED THIS YEAR',value:'3',sub:'IMS rules, Oct 2025',color:'#a86a2c'},{label:'UNCITED IN A REPORT',value:'0',sub:'blocked from export',color:'#2f6b4d'}],
+        grid:'1.3fr 1fr 1.3fr 96px 110px', cols:['WHAT WE FLAG','AUTHORITY','WHAT IT REQUIRES','CASES','STATUS'],
+        rows:[
+          [cell('Supplier has not filed',{sub:'ITC not available yet'}), mono('s.16(2)(aa) CGST'), cell('Credit only if the supplier reported the invoice'), mono('42'), mono('IN FORCE','#2f6b4d')],
+          [cell('Claim window closing',{sub:'\u20b98.2 L at stake'}), mono('s.16(4) CGST'), cell('By 30 Nov of the next year, or the annual return'), mono('92'), mono('IN FORCE','#2f6b4d')],
+          [cell('Goods received after invoice'), mono('s.16(2)(b) CGST'), cell('No credit before the goods actually arrive'), mono('14'), mono('IN FORCE','#2f6b4d')],
+          [cell('Possible blocked credit'), mono('s.17(5) CGST'), cell('Named categories can never be claimed'), mono('11'), mono('IN FORCE','#a13f28')],
+          [cell('IMS inaction is acceptance'), mono('Rule 60 + IMS advisory'), cell('No action means the record is deemed accepted'), mono('24'), mono('AMENDED 2025','#a86a2c')],
+          [cell('Credit note held too long'), mono('IMS advisory Oct 2025'), cell('A credit note may be kept pending one period only'), mono('3'), mono('AMENDED 2025','#a86a2c')],
+          [cell('Rounding tolerance \u00b1 \u20b910',{sub:'not a legal test'}), mono('\u2014 firm policy'), cell('Differences under \u20b910 are not chased'), mono('96'), mono('POLICY','#6f6b62')]
+        ],
+        graphNote:'Citations arrive with the GST knowledge pack, so when the law changes the pack version changes and every affected case is re-explained under the new authority. Nothing is hard-coded into the product.',
+        related:[rel('Obligations','obligations','dated duties'), rel('Eligibility','eligibility','38 flagged'), rel('Rules','rules','how flags are set')]
+      },
+      obligations: {
+        title:'Obligations', desc:'What is due, when, and what lapses if you miss it.',
+        primary:'Add to calendar', secondary:'Notify owners',
+        kpis:[{label:'DUE IN 30 DAYS',value:'4',sub:'2 need action now',color:'#a86a2c'},{label:'AT RISK OF LAPSING',value:'\u20b98.2 L',sub:'92 invoices',color:'#a13f28'},{label:'RECURRING',value:'6',sub:'monthly and annual',color:'#1c1b18'},{label:'MISSED EVER',value:'0',sub:'across 12 periods',color:'#2f6b4d'}],
+        grid:'1.4fr 110px 1.2fr 110px 120px', cols:['OBLIGATION','DUE','WHY IT MATTERS','EXPOSURE','STATE'],
+        rows:[
+          [cell('GSTR-3B \u00b7 August 2026',{sub:'monthly return'}), mono('20 Sep'), cell('IMS records left untouched are accepted on filing'), mono('\u20b912.4 L','#a13f28'), mono('OPEN','#a86a2c')],
+          [cell('IMS actions before 2B recompute',{sub:'draft 2B on the 14th'}), mono('14 Sep'), cell('Actions after this force a recompute'), mono('24 rec'), mono('DUE SOON','#a86a2c')],
+          [cell('s.16(4) claim window \u00b7 FY 2025-26'), mono('30 Nov'), cell('Unclaimed credit lapses permanently'), mono('\u20b98.2 L','#a13f28'), mono('AT RISK','#a13f28')],
+          [cell('Credit note held in IMS',{sub:'one period only'}), mono('30 Sep'), cell('Must be accepted or rejected next period'), mono('3 rec'), mono('OPEN','#a86a2c')],
+          [cell('GSTR-1 \u00b7 September 2026',{sub:'outward supplies'}), mono('11 Oct'), cell('Your own filing \u2014 it feeds your buyers\u2019 2B'), mono('\u2014'), mono('SCHEDULED','#6f6b62')],
+          [cell('Annual return \u00b7 FY 2025-26',{sub:'GSTR-9'}), mono('31 Dec'), cell('Closes the year and the claim window with it'), mono('\u2014'), mono('SCHEDULED','#6f6b62')]
+        ],
+        graphNote:'Filing periods and claim windows are modelled as dated entities in the graph, which is what lets a case say \u201cclaimable until 30 November\u201d instead of just \u201cunmatched\u201d.',
+        related:[rel('Authority','authority','the law behind each'), rel('Periods','periods','close lifecycle'), rel('IMS','ims','24 pending')]
+      },
+      periods: {
+        title:'Periods', desc:'Each filing month has its own lifecycle. Nothing closes with silent exceptions.',
+        primary:'Close August', secondary:'Period comparison',
+        kpis:[{label:'CURRENT',value:'Aug 2026',sub:'open · 38 exceptions',color:'#1c1b18'},{label:'CLOSED FY-TD',value:'4',sub:'Apr – Jul',color:'#1c1b18'},{label:'CARRIED FORWARD',value:'47',sub:'cross-period invoices',color:'#6b4fa8'},{label:'AVG CLOSE TIME',value:'6.2 d',sub:'from 2B generation',color:'#1c1b18'}],
+        grid:'104px 110px 110px 110px 110px 1fr', cols:['PERIOD','BOOKS','GSTR-2B','IMS','3B','STATE'],
+        rows:[
+          [cell('August 2026',{sub:'current'}), mono('Imported','#2f6b4d'), mono('Generated','#2f6b4d'), mono('24 pending','#a86a2c'), mono('Not filed','#6f6b62'), cell('Open · 38 exceptions, ₹4.2L exposure')],
+          [cell('July 2026'), mono('Imported','#2f6b4d'), mono('Generated','#2f6b4d'), mono('Complete','#2f6b4d'), mono('Filed 20 Aug','#2f6b4d'), cell('Closed with 9 exceptions')],
+          [cell('June 2026'), mono('Imported','#2f6b4d'), mono('Generated','#2f6b4d'), mono('Complete','#2f6b4d'), mono('Filed 20 Jul','#2f6b4d'), cell('Closed clean')],
+          [cell('May 2026'), mono('Imported','#2f6b4d'), mono('Generated','#2f6b4d'), mono('Complete','#2f6b4d'), mono('Filed 20 Jun','#2f6b4d'), cell('Closed with 14 exceptions')],
+          [cell('April 2026'), mono('Imported','#2f6b4d'), mono('Generated','#2f6b4d'), mono('Complete','#2f6b4d'), mono('Filed 20 May','#2f6b4d'), cell('Closed clean')]
+        ],
+        graphNote:'The graph models the filing period as its own entity, so an invoice can belong to July in your books and August in 2B without either being wrong.',
+        related:[rel('Cross-period','crossperiod','47 invoices'), rel('Exceptions','exceptions','38 open'), rel('ITC position','itc','₹3.42 Cr')]
+      },
+      exceptions: {
+        title:'Exceptions by reason', desc:'Reason groups for the whole period. Pick a group to get its invoices; open one invoice to get its case detail.',
+        primary:'Assign selected', secondary:'Bulk export',
+        kpis:[{label:'OPEN',value:'848',sub:'327 need a decision',color:'#a13f28'},{label:'RESOLVED THIS MONTH',value:'1,204',sub:'62% within 3 days',color:'#2f6b4d'},{label:'UNASSIGNED',value:'96',sub:'no owner',color:'#a86a2c'},{label:'OLDEST',value:'38 d',sub:'supplier not filed',color:'#a13f28'}],
+        grid:'1.5fr 90px 116px 116px 130px', cols:['REASON','COUNT','ITC EXPOSURE','OWNER','SLA'],
+        rows:[
+          [cell('Supplier has not filed GSTR-1',{sub:'chase the supplier'}), mono('42'), mono('₹4.2L','#a13f28'), cell('Sneha'), mono('12 breached','#a13f28')],
+          [cell('Tax amount differs',{sub:'verify GSTR-1 value'}), mono('181'), mono('₹3.1L','#a13f28'), cell('Sneha'), mono('on track','#2f6b4d')],
+          [cell('Only in books',{sub:'not reported by supplier'}), mono('263'), mono('₹1.8L','#a86a2c'), cell('Rahul'), mono('4 at risk','#a86a2c')],
+          [cell('Only in 2B',{sub:'unrecorded purchase'}), mono('125'), mono('₹1.4L','#a86a2c'), cell('Unassigned','#a86a2c'), mono('—')],
+          [cell('Cross-period',{sub:'late supplier filing'}), mono('47'), mono('₹1.4L'), cell('Auto-resolved'), mono('n/a')],
+          [cell('Possible duplicate',{sub:'same GSTIN, amount, date'}), mono('18'), mono('₹0.8L','#a86a2c'), cell('Rahul'), mono('on track','#2f6b4d')],
+          [cell('GSTIN transposition',{sub:'suggested fix available'}), mono('9'), mono('₹0.4L'), cell('Auto-suggested'), mono('n/a')]
+        ],
+        graphNote:'Reason codes are not string rules. Each one is a query over the evidence graph, which is why a case can carry its own explanation and citations.',
+        related:[rel('Register','register','invoice level'), rel('Follow-ups','followups','12 open'), rel('Review queue','queue','work sequentially')]
+      },
+      crossperiod: {
+        title:'Cross-period', desc:'Invoice date, books period and 2B period are three different things.',
+        primary:'Accept all suggested', secondary:'Explain rule',
+        kpis:[{label:'CROSS-PERIOD',value:'47',sub:'this month',color:'#6b4fa8'},{label:'AUTO-MATCHED',value:'38',sub:'by the graph',color:'#2f6b4d'},{label:'NEEDS REVIEW',value:'9',sub:'ambiguous',color:'#a86a2c'},{label:'ITC DEFERRED',value:'₹1.4L',sub:'claimable in August',color:'#1c1b18'}],
+        grid:'110px 1fr 104px 104px 104px 110px', cols:['INVOICE','SUPPLIER','INV DATE','BOOKS','2B PERIOD','RESULT'],
+        rows:[
+          [mono('INV-0987'), cell('Kalyan Polymers'), mono('28 Jul'), mono('July'), mono('August'), mono('MATCHED','#2f6b4d')],
+          [mono('INV-0991'), cell('Trident Chemicals'), mono('30 Jul'), mono('July'), mono('August'), mono('MATCHED','#2f6b4d')],
+          [mono('INV-0994'), cell('Meridian Steel Co'), mono('31 Jul'), mono('July'), mono('not yet'), mono('PENDING','#a86a2c')],
+          [mono('INV-1002'), cell('Sarvottam Traders'), mono('02 Aug'), mono('August'), mono('September?'), mono('WATCH','#a86a2c')],
+          [mono('INV-0975'), cell('XYZ Pvt Ltd'), mono('22 Jul'), mono('July'), mono('August'), mono('MATCHED','#2f6b4d')]
+        ],
+        graphNote:'Invoice → supplier filing → FilingPeriod is a two-hop path in the graph. That path is what lets the system say “late filing”, not a guess based on dates.',
+        related:[rel('Periods','periods','lifecycle'), rel('Exception case','case','see one'), rel('Suppliers','suppliers','who files late')]
+      },
+      itc: {
+        title:'ITC position', desc:'August 2026. Language here is deliberately cautious — the system does not certify eligibility.',
+        primary:'Export working', secondary:'Reason breakdown',
+        kpis:[{label:'BOOKS ITC',value:'₹3.42 Cr',sub:'12,482 invoices',color:'#1c1b18'},{label:'AVAILABLE IN 2B',value:'₹3.18 Cr',sub:'12,197 invoices',color:'#1c1b18'},{label:'RECONCILED',value:'₹2.91 Cr',sub:'matched on all fields',color:'#2f6b4d'},{label:'AT RISK',value:'₹12.4 L',sub:'146 invoices',color:'#a13f28'}],
+        grid:'1.5fr 130px 110px 1fr', cols:['CATEGORY','AMOUNT','INVOICES','WHAT IT MEANS'],
+        rows:[
+          [cell('Reconciled, eligible per available data'), mono('₹2.91 Cr','#2f6b4d'), mono('9,842'), cell('All identifiers and tax heads agree with 2B')],
+          [cell('Needs review'), mono('₹18.7 L','#a86a2c'), mono('327'), cell('Present in both, something differs')],
+          [cell('Not available in 2B'), mono('₹12.4 L','#a13f28'), mono('146'), cell('Supplier has not reported it yet')],
+          [cell('Potentially ineligible'), mono('₹4.2 L','#a13f28'), mono('38'), cell('Blocked credit, RCM or goods not received')],
+          [cell('Recoverable next period'), mono('₹8.2 L'), mono('92'), cell('Expected in September 2B on amendment')]
+        ],
+        graphNote:'“Eligible per available data” is as far as the system will go. Self-assessment cases the 2B classification does not capture stay flagged for you.',
+        related:[rel('At risk','atrisk','₹12.4L'), rel('Eligibility','eligibility','38 flagged'), rel('Exceptions','exceptions','848')]
+      },
+      atrisk: {
+        title:'ITC at risk', desc:'Ranked by money, then by how long it has been sitting there.',
+        primary:'Create follow-ups', secondary:'Notify owners',
+        kpis:[{label:'TOTAL AT RISK',value:'₹12.4 L',sub:'146 invoices',color:'#a13f28'},{label:'SUPPLIERS',value:'42',sub:'to be contacted',color:'#1c1b18'},{label:'OVER 30 DAYS',value:'₹3.6 L',sub:'24 invoices',color:'#a13f28'},{label:'RECOVERED LAST MONTH',value:'₹5.1 L',sub:'after follow-up',color:'#2f6b4d'}],
+        grid:'1.4fr 116px 96px 130px 120px', cols:['SUPPLIER','EXPOSURE','INVOICES','REASON','AGE'],
+        rows:[
+          [cell('XYZ Pvt Ltd',{sub:'29XXXXX4321X1Z9'}), mono('₹4.82 L','#a13f28'), mono('18'), cell('Amount + late filing'), mono('38 d','#a13f28')],
+          [cell('ABC Suppliers',{sub:'27XXXXX7788X1Z3'}), mono('₹3.17 L','#a13f28'), mono('12'), cell('Not in 2B'), mono('26 d','#a13f28')],
+          [cell('PQR Industries',{sub:'27XXXXX8899X1Z2'}), mono('₹2.41 L','#a86a2c'), mono('9'), cell('Not filed'), mono('19 d','#a86a2c')],
+          [cell('Meridian Steel Co',{sub:'24XXXXX1122X1Z7'}), mono('₹0.96 L','#a86a2c'), mono('4'), cell('Not filed'), mono('12 d')],
+          [cell('Northline Logistics',{sub:'07XXXXX3344X1Z6'}), mono('₹0.58 L'), mono('3'), cell('Only in 2B'), mono('6 d')]
+        ],
+        graphNote:'Supplier-level exposure aggregates across every invoice the graph resolved to that entity — including records filed under a slightly different legal name.',
+        related:[rel('Follow-ups','followups','draft messages'), rel('Supplier risk','risk','behaviour'), rel('Assistants','agents','drafted 6')]
+      },
+      eligibility: {
+        title:'Eligibility', desc:'Cases where the invoice matches but the credit may still not be claimable.',
+        primary:'Mark decisions', secondary:'Rule reference',
+        kpis:[{label:'FLAGGED',value:'38',sub:'₹4.2 L',color:'#a86a2c'},{label:'GOODS NOT RECEIVED',value:'14',sub:'timing issue',color:'#a86a2c'},{label:'BLOCKED CREDIT',value:'11',sub:'section 17(5) candidates',color:'#a13f28'},{label:'DECIDED',value:'13',sub:'by you, this month',color:'#2f6b4d'}],
+        grid:'110px 1fr 116px 130px 130px', cols:['INVOICE','SUPPLIER','AMOUNT','FLAG','EVIDENCE'],
+        rows:[
+          [mono('INV-1025'), cell('XYZ Pvt Ltd'), mono('₹38,000'), cell('Goods received 18 Aug',{sub:'after invoice date'}), cell('GRN 4482')],
+          [mono('INV-1088'), cell('Sarvottam Traders'), mono('₹64,200'), cell('Possible blocked credit',{sub:'motor vehicle'}), cell('Item master')],
+          [mono('INV-1094'), cell('Trident Chemicals'), mono('₹22,900'), cell('RCM — self-invoice missing'), cell('Books only')],
+          [mono('INV-1101'), cell('Anand Auto Components'), mono('₹18,400'), cell('Goods in transit at period end'), cell('GRN pending')],
+          [mono('INV-1112'), cell('Northline Logistics'), mono('₹12,600'), cell('ISD credit — wrong GSTIN'), cell('2B category')]
+        ],
+        graphNote:'The graph models goods receipt as an event separate from the invoice, so a timing issue looks like a timing issue rather than a mismatch.',
+        related:[rel('ITC position','itc','summary'), rel('Exception case','case','worked example'), rel('Rules','rules','eligibility rules')]
+      },
+      suppliers: {
+        title:'Suppliers', desc:'One row per resolved supplier entity, across books, GSTR-1 and 2B.',
+        primary:'Contact selected', secondary:'Segment',
+        kpis:[{label:'ACTIVE SUPPLIERS',value:'1,482',sub:'this period',color:'#1c1b18'},{label:'WITH EXCEPTIONS',value:'214',sub:'14%',color:'#a86a2c'},{label:'HIGH RISK',value:'28',sub:'behaviour-scored',color:'#a13f28'},{label:'MERGED IDENTITIES',value:'96',sub:'by entity resolution',color:'#41508f'}],
+        grid:'1.4fr 90px 90px 96px 116px 96px', cols:['SUPPLIER','INVOICES','MATCHED','MISMATCH','ITC AT RISK','RISK'],
+        rows:[
+          [cell('XYZ Pvt Ltd',{sub:'29XXXXX4321X1Z9 · 2 identities merged'}), mono('382'), mono('344'), mono('18','#a86a2c'), mono('₹4.82 L','#a13f28'), mono('HIGH','#a13f28')],
+          [cell('ABC Suppliers',{sub:'27XXXXX7788X1Z3'}), mono('294'), mono('271'), mono('11','#a86a2c'), mono('₹3.17 L','#a13f28'), mono('HIGH','#a13f28')],
+          [cell('PQR Industries',{sub:'27XXXXX8899X1Z2'}), mono('188'), mono('176'), mono('6'), mono('₹2.41 L','#a86a2c'), mono('MEDIUM','#a86a2c')],
+          [cell('Kalyan Polymers',{sub:'27XXXXX5566X1Z4'}), mono('142'), mono('141'), mono('1'), mono('₹0.12 L'), mono('LOW','#2f6b4d')],
+          [cell('Trident Chemicals',{sub:'33XXXXX7788X1Z1'}), mono('118'), mono('112'), mono('4'), mono('₹0.61 L'), mono('MEDIUM','#a86a2c')]
+        ],
+        graphNote:'“2 identities merged” means the graph resolved two source records — an ERP master row and a CRM account — to one supplier at 0.97 confidence. You can inspect and reverse that.',
+        related:[rel('Supplier risk','risk','behaviour detail'), rel('At risk','atrisk','exposure'), rel('Follow-ups','followups','chase list')]
+      },
+      risk: {
+        title:'Supplier risk', desc:'Behaviour observed over 12 periods, traceable to individual filings.',
+        primary:'Export scorecard', secondary:'Adjust weights',
+        kpis:[{label:'SCORED',value:'1,482',sub:'12-period window',color:'#1c1b18'},{label:'HIGH RISK',value:'28',sub:'₹9.4 L exposure',color:'#a13f28'},{label:'IMPROVED',value:'44',sub:'vs last quarter',color:'#2f6b4d'},{label:'NEW TO PORTFOLIO',value:'19',sub:'unscored',color:'#6f6b62'}],
+        grid:'1.3fr 116px 116px 116px 116px', cols:['SUPPLIER','LATE FILING','AMOUNT DIFFS','CORRECTIONS','GSTIN ERRORS'],
+        rows:[
+          [cell('XYZ Pvt Ltd',{sub:'8 late filings, avg 18 d'}), mono('31% · high','#a13f28'), mono('7%','#a86a2c'), mono('3','#a86a2c'), mono('low','#2f6b4d')],
+          [cell('ABC Suppliers',{sub:'consistent 2B gaps'}), mono('24% · high','#a13f28'), mono('4%'), mono('1'), mono('low','#2f6b4d')],
+          [cell('PQR Industries',{sub:'improving'}), mono('12% · medium','#a86a2c'), mono('2%'), mono('0'), mono('medium','#a86a2c')],
+          [cell('Sarvottam Traders',{sub:'2 transpositions caught'}), mono('6% · low','#2f6b4d'), mono('1%'), mono('0'), mono('high','#a13f28')],
+          [cell('Kalyan Polymers',{sub:'clean'}), mono('2% · low','#2f6b4d'), mono('0%'), mono('0'), mono('low','#2f6b4d')]
+        ],
+        graphNote:'Each score decomposes into the facts behind it — eight late filings, three amount mismatches, two corrected invoices — so a risk label can always be defended to the supplier.',
+        related:[rel('Suppliers','suppliers','portfolio'), rel('Exceptions','exceptions','their cases'), rel('Analytics','analytics','trends')]
+      },
+      followups: {
+        title:'Follow-ups', desc:'Who needs chasing, why, and what has already been sent.',
+        primary:'Send approved', secondary:'Template',
+        kpis:[{label:'OPEN',value:'12',sub:'₹9.8 L exposure',color:'#a13f28'},{label:'AWAITING REPLY',value:'7',sub:'avg 9 days',color:'#a86a2c'},{label:'RESOLVED 30D',value:'34',sub:'₹5.1 L recovered',color:'#2f6b4d'},{label:'DRAFTED',value:'6',sub:'need your approval',color:'#41508f'}],
+        grid:'1.3fr 1fr 116px 120px 116px', cols:['SUPPLIER','ISSUE','AMOUNT','STATUS','LAST CONTACT'],
+        rows:[
+          [cell('XYZ Pvt Ltd',{sub:'5 invoices'}), cell('IGST difference'), mono('₹4.1 L','#a13f28'), mono('WAITING','#a86a2c'), mono('09 Aug')],
+          [cell('ABC Suppliers',{sub:'12 invoices'}), cell('Not reported in 2B'), mono('₹3.17 L','#a13f28'), mono('SENT','#41508f'), mono('12 Aug')],
+          [cell('PQR Industries',{sub:'9 invoices'}), cell('Late filing'), mono('₹2.41 L','#a86a2c'), mono('OPEN','#a13f28'), mono('—')],
+          [cell('Meridian Steel Co',{sub:'4 invoices'}), cell('GSTR-1 not filed'), mono('₹0.96 L'), mono('DRAFTED','#41508f'), mono('—')],
+          [cell('Anand Auto Components',{sub:'1 invoice'}), cell('GSTIN transposition'), mono('₹0.39 L'), mono('RESOLVED','#2f6b4d'), mono('06 Aug')]
+        ],
+        graphNote:'A drafted message lists only invoices the graph can evidence — invoice number, declared value and the filing it appeared in — so the supplier can verify without a phone call.',
+        related:[rel('Assistants','agents','6 drafts'), rel('At risk','atrisk','ranked'), rel('Suppliers','suppliers','portfolio')]
+      },
+      queue: {
+        title:'Review queue', desc:'Work cases one at a time, grouped by reason. Keyboard-driven.',
+        primary:'Start reviewing', secondary:'Assign to me',
+        kpis:[{label:'IN QUEUE',value:'327',sub:'need a decision',color:'#1c1b18'},{label:'YOURS',value:'88',sub:'Sneha',color:'#1c1b18'},{label:'AVG TIME',value:'42 s',sub:'per case',color:'#2f6b4d'},{label:'DONE TODAY',value:'64',sub:'₹2.1 L cleared',color:'#2f6b4d'}],
+        grid:'1.5fr 96px 116px 120px 120px', cols:['GROUP','CASES','EXPOSURE','ASSIGNED','SUGGESTED ACTION'],
+        rows:[
+          [cell('Amount mismatch under ₹1,000',{sub:'likely rounding'}), mono('96'), mono('₹0.6 L'), cell('Sneha'), cell('Bulk accept 2B value')],
+          [cell('Amount mismatch over ₹1,000'), mono('85'), mono('₹2.5 L','#a86a2c'), cell('Sneha'), cell('Follow up individually')],
+          [cell('Missing in 2B — supplier not filed'), mono('42'), mono('₹4.2 L','#a13f28'), cell('Rahul'), cell('Create follow-ups')],
+          [cell('Only in 2B — book the purchase'), mono('39'), mono('₹1.4 L'), cell('Unassigned','#a86a2c'), cell('Send to accounts')],
+          [cell('GSTIN transposition suggested'), mono('9'), mono('₹0.4 L'), cell('Auto'), cell('Accept suggestion')]
+        ],
+        graphNote:'Groups are built from the same reason queries the graph uses to raise the case, so a bulk decision applies to exactly the cases you inspected.',
+        related:[rel('Exceptions','exceptions','all reasons'), rel('Register','register','invoice level'), rel('Approvals','approvals','sign-off')]
+      },
+      ims: {
+        title:'IMS', desc:'Accept, reject or keep pending. These actions change GSTR-2B on recompute.',
+        primary:'Submit actions', secondary:'Sync IMS',
+        kpis:[{label:'PENDING ACTION',value:'24',sub:'before 3B filing',color:'#a86a2c'},{label:'ACCEPTED',value:'11,904',sub:'this period',color:'#2f6b4d'},{label:'REJECTED',value:'38',sub:'₹1.2 L',color:'#a13f28'},{label:'DEEMED ACCEPTED',value:'6',sub:'if no action taken',color:'#6b4fa8'}],
+        grid:'104px 1.2fr 110px 110px 130px 120px', cols:['INVOICE','SUPPLIER','BOOKS','IMS','CATEGORY','ACTION'],
+        rows:[
+          [mono('INV-1148'), cell('XYZ Pvt Ltd'), mono('₹47,800'), mono('₹47,800'), cell('B2B'), mono('NO ACTION','#a86a2c')],
+          [mono('INV-1025'), cell('XYZ Pvt Ltd'), mono('₹38,000'), mono('₹37,500','#a13f28'), cell('B2B'), mono('REVIEW','#a86a2c')],
+          [mono('CN-0042'), cell('Trident Chemicals'), mono('−₹8,400'), mono('−₹8,400'), cell('Credit note'), mono('ACCEPT','#2f6b4d')],
+          [mono('INV-1162'), cell('Sarvottam Traders'), mono('₹41,200'), mono('₹41,200'), cell('B2B · duplicate?'), mono('PENDING','#6b4fa8')],
+          [mono('IMP-0018'), cell('Global Imports SEZ'), mono('₹1,12,000'), mono('₹1,12,000'), cell('Import of goods'), mono('ACCEPT','#2f6b4d')]
+        ],
+        graphNote:'IMS is a separate evidence source in the graph, not a status column. That is why a record can be matched in reconciliation and still be awaiting an IMS decision.',
+        related:[rel('Exception case','case','worked example'), rel('Periods','periods','before 3B'), rel('Review queue','queue','work through')]
+      },
+      approvals: {
+        title:'Approvals', desc:'Decisions that need a second signature before the period closes.',
+        primary:'Approve selected', secondary:'Delegate',
+        kpis:[{label:'AWAITING',value:'9',sub:'₹6.4 L',color:'#a86a2c'},{label:'APPROVED 30D',value:'112',sub:'avg 1.2 d',color:'#2f6b4d'},{label:'RETURNED',value:'4',sub:'sent back for detail',color:'#a13f28'},{label:'THRESHOLD',value:'₹50,000',sub:'above this needs sign-off',color:'#1c1b18'}],
+        grid:'1.4fr 116px 120px 120px 130px', cols:['DECISION','AMOUNT','REQUESTED BY','TYPE','WAITING'],
+        rows:[
+          [cell('Write off ITC — supplier untraceable',{sub:'ABC Suppliers, 12 invoices'}), mono('₹3.17 L','#a13f28'), cell('Sneha'), cell('Write-off'), mono('3 d','#a86a2c')],
+          [cell('Accept 2B value over books',{sub:'96 rounding cases'}), mono('₹0.6 L'), cell('Sneha'), cell('Bulk accept'), mono('1 d')],
+          [cell('Reject IMS records',{sub:'38 records'}), mono('₹1.2 L','#a86a2c'), cell('Rahul'), cell('IMS'), mono('2 d')],
+          [cell('Claim cross-period ITC',{sub:'47 invoices'}), mono('₹1.4 L'), cell('Rahul'), cell('Claim'), mono('5 d','#a86a2c')]
+        ],
+        graphNote:'Every approval carries the case evidence with it, so the approver sees the same three-way comparison and citations the preparer saw.',
+        related:[rel('Review queue','queue','preparer view'), rel('Periods','periods','close gate'), rel('Users','users','who can approve')]
+      },
+      analytics: {
+        title:'Analytics', desc:'Operational trends across periods, not a chart wall.',
+        primary:'Build view', secondary:'Schedule email',
+        kpis:[{label:'MATCH RATE',value:'94%',sub:'+2 pts vs July',color:'#2f6b4d'},{label:'ITC AT RISK',value:'₹4.2 L',sub:'down from ₹4.9 L',color:'#2f6b4d'},{label:'AVG RESOLUTION',value:'2.8 d',sub:'from 4.1 d',color:'#2f6b4d'},{label:'RECURRING OFFENDERS',value:'11',sub:'3+ periods',color:'#a13f28'}],
+        grid:'1fr 96px 96px 96px 96px 96px', cols:['METRIC','APR','MAY','JUN','JUL','AUG'],
+        rows:[
+          [cell('Match rate'), mono('88%'), mono('91%'), mono('93%'), mono('92%'), mono('94%','#2f6b4d')],
+          [cell('ITC at risk'), mono('₹8.2 L'), mono('₹5.4 L'), mono('₹6.7 L'), mono('₹4.9 L'), mono('₹4.2 L','#2f6b4d')],
+          [cell('Exceptions raised'), mono('1,412'), mono('1,108'), mono('964'), mono('902'), mono('848','#2f6b4d')],
+          [cell('Cross-period invoices'), mono('62'), mono('54'), mono('48'), mono('51'), mono('47')],
+          [cell('Supplier follow-ups'), mono('48'), mono('36'), mono('29'), mono('24'), mono('12','#2f6b4d')]
+        ],
+        graphNote:'Because supplier identity is resolved in the graph, a “recurring offender” count survives a supplier changing its trade name mid-year.',
+        related:[rel('Supplier risk','risk','who drives it'), rel('Periods','periods','comparison'), rel('ITC position','itc','current')]
+      },
+      imports: {
+        title:'Imports', desc:'Every file and pull that fed this period.',
+        primary:'Upload books', secondary:'Fetch from portal',
+        kpis:[{label:'IMPORTS THIS PERIOD',value:'6',sub:'all succeeded',color:'#2f6b4d'},{label:'ROWS INGESTED',value:'37,102',sub:'books + 2B + GSTR-1',color:'#1c1b18'},{label:'REJECTED ROWS',value:'18',sub:'bad GSTIN format',color:'#a86a2c'},{label:'LAST IMPORT',value:'15 Aug',sub:'09:38',color:'#1c1b18'}],
+        grid:'1.4fr 120px 110px 110px 120px', cols:['FILE / SOURCE','TYPE','ROWS','IMPORTED','STATE'],
+        rows:[
+          [cell('books_aug.xlsx',{sub:'uploaded by Sneha'}), mono('BOOKS'), mono('12,482'), mono('15 Aug 09:38'), mono('OK','#2f6b4d')],
+          [cell('GSTR2B_AUG_2026.json',{sub:'GST portal pull'}), mono('GSTR-2B'), mono('12,197'), mono('14 Aug 22:10'), mono('OK','#2f6b4d')],
+          [cell('GSTR1_AUG_2026.json',{sub:'GST portal pull'}), mono('GSTR-1'), mono('12,306'), mono('14 Aug 22:12'), mono('OK','#2f6b4d')],
+          [cell('IMS_records_aug.json',{sub:'GST portal pull'}), mono('IMS'), mono('12,197'), mono('14 Aug 22:14'), mono('OK','#2f6b4d')],
+          [cell('grn_aug.csv',{sub:'ERP export'}), mono('GOODS RECEIPT'), mono('9,884'), mono('15 Aug 07:02'), mono('18 REJECTED','#a86a2c')]
+        ],
+        graphNote:'An import does not overwrite anything. Each load becomes its own named graph, which is how a case can show what the July file said next to the August file.',
+        related:[rel('Sources','datasources','connections'), rel('Mappings','mappings','column → field'), rel('Periods','periods','period state')]
+      },
+      datasources: {
+        title:'Sources', desc:'Connections behind the imports.',
+        primary:'Add source', secondary:'Test connections',
+        kpis:[{label:'CONNECTED',value:'5',sub:'1 needs attention',color:'#1c1b18'},{label:'AUTO-SYNC',value:'4',sub:'daily 22:00',color:'#2f6b4d'},{label:'FAILED 30D',value:'2',sub:'both retried',color:'#a86a2c'},{label:'CLIENT GSTINS',value:'3',sub:'under this login',color:'#1c1b18'}],
+        grid:'1.3fr 130px 130px 130px 110px', cols:['SOURCE','TYPE','SCHEDULE','LAST RUN','STATE'],
+        rows:[
+          [cell('GST Portal — filings'), mono('API'), cell('Daily 22:00'), mono('14 Aug 22:10'), mono('HEALTHY','#2f6b4d')],
+          [cell('GST Portal — IMS'), mono('API'), cell('Daily 22:00'), mono('14 Aug 22:14'), mono('HEALTHY','#2f6b4d')],
+          [cell('Tally books export'), mono('FILE DROP'), cell('Manual'), mono('15 Aug 09:38'), mono('HEALTHY','#2f6b4d')],
+          [cell('ERP goods receipt'), mono('DATABASE'), cell('Daily 07:00'), mono('15 Aug 07:02'), mono('DEGRADED','#a86a2c')],
+          [cell('Vendor master'), mono('DATABASE'), cell('Weekly'), mono('11 Aug'), mono('HEALTHY','#2f6b4d')]
+        ],
+        graphNote:'Reco does not store its own copy of supplier identity. It reads the resolved entity from the graph, so a vendor master fix propagates to every open case.',
+        related:[rel('Imports','imports','runs'), rel('Mappings','mappings','field mapping'), rel('Suppliers','suppliers','resolved entities')]
+      },
+      mappings: {
+        title:'Mappings', desc:'How your columns become the fields the engine reconciles on.',
+        primary:'Save mapping', secondary:'Auto-detect',
+        kpis:[{label:'MAPPED FIELDS',value:'28',sub:'of 31 required',color:'#a86a2c'},{label:'UNMAPPED',value:'3',sub:'optional fields',color:'#6f6b62'},{label:'TRANSFORMS',value:'6',sub:'trim, upper, date parse',color:'#1c1b18'},{label:'REUSED FROM',value:'July',sub:'template applied',color:'#1c1b18'}],
+        grid:'1.2fr 1.2fr 130px 1fr', cols:['YOUR COLUMN','ONTOLOGY FIELD','TRANSFORM','SAMPLE'],
+        rows:[
+          [cell('Party GSTIN'), mono('gst:Supplier.hasGSTIN','#41508f'), cell('upper, trim'), mono('29XXXXX4321X1Z9')],
+          [cell('Bill No'), mono('gst:Invoice.documentNumber','#41508f'), cell('trim'), mono('INV-1025')],
+          [cell('Bill Date'), mono('gst:Invoice.documentDate','#41508f'), cell('parse DD/MM/YYYY'), mono('05/08/2026')],
+          [cell('Assessable Value'), mono('gst:Invoice.taxableValue','#41508f'), cell('decimal 2'), mono('200000.00')],
+          [cell('IGST Amt'), mono('gst:Invoice.igstAmount','#41508f'), cell('decimal 2'), mono('38000.00')],
+          [cell('GRN Date'), mono('gst:GoodsReceipt.occurredOn','#41508f'), cell('parse'), mono('18/08/2026')]
+        ],
+        graphNote:'Ontology field names come from the GST knowledge pack. When the pack updates, new fields appear here rather than requiring a product release.',
+        related:[rel('Imports','imports','apply on load'), rel('Rules','rules','matching config'), rel('Sources','datasources','connections')]
+      },
+      rules: {
+        title:'Rules', desc:'Matching tolerance and reason codes. Changes take effect on the next run.',
+        primary:'Save & re-run', secondary:'Restore defaults',
+        kpis:[{label:'ACTIVE RULES',value:'62',sub:'from GST pack 1.4.2',color:'#1c1b18'},{label:'CUSTOMISED',value:'7',sub:'by your firm',color:'#41508f'},{label:'TOLERANCE',value:'₹10',sub:'per tax head',color:'#1c1b18'},{label:'LAST CHANGED',value:'02 Aug',sub:'by Rahul',color:'#6f6b62'}],
+        grid:'1.5fr 130px 130px 1fr', cols:['RULE','SETTING','SOURCE','EFFECT'],
+        rows:[
+          [cell('Tax value tolerance'), mono('± ₹10'), cell('Customised'), cell('96 rounding cases auto-matched')],
+          [cell('Invoice number normalisation'), mono('ON'), cell('GST pack'), cell('Strips prefixes and leading zeros')],
+          [cell('Cross-period window'), mono('2 periods'), cell('Customised'), cell('47 late filings matched forward')],
+          [cell('GSTIN transposition detection'), mono('ON'), cell('GST pack'), cell('9 suggested fixes this period')],
+          [cell('Duplicate detection'), mono('GSTIN + amount + date'), cell('GST pack'), cell('18 flagged, none auto-merged')],
+          [cell('Goods receipt check'), mono('ON'), cell('GST pack 1.4.2'), cell('14 timing flags raised')]
+        ],
+        graphNote:'Rules are pack-shipped queries over the graph. A firm-level override is recorded as a customisation, so an upgrade never silently changes your matching behaviour.',
+        related:[rel('Mappings','mappings','fields'), rel('Exceptions','exceptions','resulting cases'), rel('Assistants','agents','automation')]
+      },
+      gstins: {
+        title:'GSTINs', desc:'Registrations under this client, each with its own filing calendar.',
+        primary:'Add GSTIN', secondary:'Import list',
+        kpis:[{label:'REGISTRATIONS',value:'3',sub:'2 states',color:'#1c1b18'},{label:'FILING DUE',value:'20 Sep',sub:'GSTR-3B August',color:'#a86a2c'},{label:'OPEN EXCEPTIONS',value:'38',sub:'across all',color:'#a86a2c'},{label:'ITC AT RISK',value:'₹12.4 L',sub:'combined',color:'#a13f28'}],
+        grid:'1fr 1.2fr 116px 116px 130px', cols:['GSTIN','ENTITY','STATE','EXCEPTIONS','3B DUE'],
+        rows:[
+          [mono('27XXXXX1234X1Z5'), cell('ABC Manufacturing Pvt Ltd'), cell('Maharashtra'), mono('24','#a86a2c'), mono('20 Sep')],
+          [mono('24XXXXX1234X1Z8'), cell('ABC Manufacturing Pvt Ltd'), cell('Gujarat'), mono('11','#a86a2c'), mono('20 Sep')],
+          [mono('29XXXXX1234X1Z2'), cell('ABC Logistics LLP'), cell('Karnataka'), mono('3'), mono('20 Sep')]
+        ],
+        graphNote:'The graph knows these three registrations belong to one corporate group, which is how an inter-branch transaction stops looking like an unmatched invoice.',
+        related:[rel('Periods','periods','per registration'), rel('ITC position','itc','combined'), rel('Users','users','access')]
+      },
+      users: {
+        title:'Users', desc:'Who can see and decide what.',
+        primary:'Invite user', secondary:'Roles',
+        kpis:[{label:'USERS',value:'8',sub:'2 partners',color:'#1c1b18'},{label:'APPROVERS',value:'2',sub:'above ₹50,000',color:'#1c1b18'},{label:'ACTIVE TODAY',value:'5',sub:'',color:'#2f6b4d'},{label:'AUDIT EVENTS',value:'1,204',sub:'this period',color:'#1c1b18'}],
+        grid:'1.2fr 130px 1fr 116px 130px', cols:['USER','ROLE','SCOPE','CASES OPEN','LAST ACTIVE'],
+        rows:[
+          [cell('Sneha Kulkarni',{sub:'sneha@firm.in'}), cell('Preparer'), cell('All GSTINs'), mono('88'), mono('now','#2f6b4d')],
+          [cell('Rahul Mehta',{sub:'rahul@firm.in'}), cell('Preparer'), cell('27, 24'), mono('64'), mono('2 h ago')],
+          [cell('Anita Rao',{sub:'anita@firm.in'}), cell('Approver'), cell('All GSTINs'), mono('9'), mono('yesterday')],
+          [cell('Client — finance',{sub:'ap@abcmfg.in'}), cell('Read only'), cell('27 only'), mono('0'), mono('3 d ago')]
+        ],
+        graphNote:'Read-only client users see cases and evidence but never the underlying graph console — the engine stays behind the workflow.',
+        related:[rel('Approvals','approvals','sign-off queue'), rel('GSTINs','gstins','scope'), rel('Assistants','agents','automation limits')]
+      }
+    };
+  }
+
+  renderVals(){
+    const cur = this.state.screen;
+    const bespoke = { home:1, register:1, case:1, agents:1, analytics:1, pipeline:1 };
+    const screens = this.screens();
+    const open = this.state.navOpen;
+    const item = (name, key, badge) => {
+      const on = cur === key;
+      return { name, label: open ? name : name.slice(0, 2), badge: open ? (badge || '') : '', go: this.go(key), bg: on ? '#f1efe9' : 'transparent', color: on ? '#1c1b18' : '#54504a', weight: on ? '600' : '400' };
+    };
+    const off = this.state.off;
+    const modeStyle = { AUTOMATIC:['#f3f8f4','#2f6b4d'], 'YOU APPROVE':['#eef0f8','#41508f'], 'SUGGEST ONLY':['#f4f2ee','#3d3a34'] };
+    const agent = (name, stage, desc, trigger, next, runs, tokens, accepted, mode, surface) => {
+      const paused = !!off[name];
+      const ms = modeStyle[mode] || modeStyle.AUTOMATIC;
+      return { name, stage, desc, surface, trigger: paused ? 'Paused' : trigger, next: paused ? 'no new triggers' : next,
+        runs, tokens, accepted, acceptColor: parseFloat(accepted) > 93 ? '#2f6b4d' : '#a86a2c',
+        mode: paused ? 'PAUSED' : mode, modeBg: paused ? '#fdf5f3' : ms[0], modeColor: paused ? '#a13f28' : ms[1],
+        rowBg: paused ? '#fdfaf9' : '#fff',
+        switchBg: paused ? '#eeebe4' : '#e8eefb', switchBorder: paused ? '#d8d4cb' : '#c8d3f0',
+        switchPos: paused ? 'flex-start' : 'flex-end', knob: paused ? '#a29d93' : '#5b6bb5',
+        onToggle: this.toggleAgent(name),
+        onRun: this.showOut(name), sel: this.state.runOut === name,
+        selBg: this.state.runOut === name ? '#f7f8fd' : (paused ? '#fdfaf9' : '#fff') };
+    };
+    const outputs = {
+      'Case explainer': { kind:'CASE PARAGRAPH', when:'2 minutes ago \u00b7 848 cases this run',
+        text:'The supplier declared \u20b937,500 IGST in GSTR-1 while your books record \u20b938,000 on the same taxable value. Every other identifier matches, so this is a tax-value discrepancy at the supplier\u2019s end, not a matching failure.',
+        dest:'Exception case \u00b7 INV-1025', screen:'case', mode:'AUTOMATIC',
+        cites:['books_aug.xlsx row 845 \u00b7 IGST \u20b938,000','GSTR-1 August \u00b7 IGST \u20b937,500','taxable value \u20b92,00,000 \u00b7 agrees in both','rule gst.tax-value-mismatch \u00b7 0.96'],
+        also:'One paragraph per case. You already read it as \u201cWhy this case exists\u201d on every exception.' },
+      'Reason classifier': { kind:'ROUTING TABLE', when:'2 minutes ago \u00b7 848 exceptions',
+        text:'848 exceptions routed into 6 queues \u2014 181 tax amount differs, 263 only in books, 125 only in 2B, 47 cross-period, 42 supplier not filed, 18 duplicate. 9 scored below the floor and were left unrouted for a human to place.',
+        dest:'Exceptions \u00b7 reason queues', screen:'exceptions', mode:'AUTOMATIC',
+        cites:['reason codes \u00b7 GST pack 1.4.2','9 unrouted cases listed with their scores'],
+        also:'This is what the reason column in the register shows. The 9 unrouted ones sit at the bottom of the queue, not hidden.' },
+      'Follow-up drafter': { kind:'EMAIL DRAFT', when:'11 minutes ago \u00b7 6 drafts waiting',
+        text:'We have recorded IGST of \u20b938,000 on INV-1025 dated 05 Aug 2026, while your GSTR-1 for August reports \u20b937,500 against the same taxable value of \u20b92,00,000. Please confirm the correct value and amend if required. Four further invoices show the same pattern.',
+        dest:'Waiting on you \u00b7 6 drafts', screen:'followups', mode:'YOU APPROVE',
+        cites:['5 invoices \u00b7 XYZ Pvt Ltd','GSTR-1 August \u00b7 declared values'],
+        also:'Nothing sends itself. The draft sits in Waiting on you until you approve or edit it.' },
+      'Bulk grouper': { kind:'GROUPING PROPOSAL', when:'after the last reconciliation run',
+        text:'96 amount mismatches are under \u20b91,000 and inside the \u20b910 tolerance you already apply. Proposed as one bulk accept worth \u20b90.6 L. 85 cases above \u20b91,000 were deliberately left out of the group.',
+        dest:'Review queue \u00b7 grouped', screen:'queue', mode:'YOU APPROVE',
+        cites:['96 cases \u00b7 delta under \u20b91,000','rule tolerance \u00b1 \u20b910 \u00b7 your setting'],
+        also:'A bulk decision only ever covers the cases listed in the group, so the count you approve is the count that changes.' },
+      'Supplier summariser': { kind:'BEHAVIOUR NOTE', when:'01:00 today',
+        text:'XYZ Pvt Ltd has filed late in 8 of the last 12 periods, averaging 18 days. Amount discrepancies appear on 7% of its invoices and it has issued 3 corrections. GSTIN quality is good.',
+        dest:'Supplier risk \u00b7 XYZ Pvt Ltd', screen:'risk', mode:'SUGGEST ONLY',
+        cites:['12 filing dates \u00b7 GraphOWL','3 corrected invoices \u00b7 amendment records'],
+        also:'You see this on the supplier page as the \u201cSupplier pattern\u201d panel.' },
+      'Period briefing': { kind:'BRIEFING', when:'07:00 today',
+        text:'August is two decisions away from close. 24 IMS records have no action and will be deemed accepted at 3B, six of them the disputed XYZ amounts. Separately, \u20b94.2 L sits with 11 suppliers who have never been contacted this cycle.',
+        dest:'Dashboard \u00b7 close-readiness', screen:'home', mode:'SUGGEST ONLY',
+        cites:['24 IMS records \u00b7 no action','11 suppliers \u00b7 no follow-up logged','\u20b94.2 L exposure \u00b7 42 invoices'],
+        also:'It is the first card on your dashboard every morning.' },
+      'Ask Reco': { kind:'ANSWER', when:'on demand',
+        text:'Three suppliers account for \u20b910.4 L of the \u20b912.4 L at risk: XYZ Pvt Ltd, ABC Suppliers and PQR Industries. XYZ and ABC have been contacted; PQR has not.',
+        dest:'Header \u00b7 Ask panel', screen:'atrisk', mode:'ON DEMAND',
+        cites:['42 open exceptions \u00b7 August','GSTR-1 filing dates','follow-up log \u00b7 12 threads'],
+        also:'Answers appear in the Ask panel and always list what they were read from.' }
+    };
+    const ok = outputs[this.state.runOut] ? this.state.runOut : 'Case explainer';
+    const outSel = Object.assign({ name: ok }, outputs[ok], { go: this.go(outputs[ok].screen) });
+    const pstep = (name, meta, done, now) => ({ name, meta,
+      color: now ? '#1c1b18' : (done ? '#3d3a34' : '#a29d93'),
+      dotBg: now ? '#5b6bb5' : (done ? '#2f6b4d' : '#f2efe9'),
+      dotColor: now || done ? '#fff' : '#a29d93',
+      dotBorder: now ? '#5b6bb5' : (done ? '#2f6b4d' : '#e3e0d9'),
+      glyph: done ? '\u2713' : (now ? '\u25cf' : ''),
+      lineColor: done ? '#cfe0d5' : '#eeebe4' });
+    const dsList = [
+      { key:'books', name:'Purchase register', meta:'purchase_register_aug2026.csv \u00b7 12,482' },
+      { key:'gstr2b', name:'GSTR-2B', meta:'gstr2b_aug2026.csv \u00b7 12,197' },
+      { key:'gstr2a', name:'GSTR-2A', meta:'gstr2a_aug2026.csv \u00b7 12,241' }
+    ];
+    const PR = this.state.rowSel;
+    const pf = (label, req, col, samples, conf, multi) => ({ label, req, multi,
+      reqMark: req ? '*' : '', multiMark: multi ? '(multi)' : '',
+      sample: col ? samples[PR - 1] : '\u2014', sampleColor: col ? '#1c1b18' : '#a29d93',
+      conf: col ? conf : 'unmapped', confColor: !col ? '#a86a2c' : (parseFloat(conf) >= 0.9 ? '#2f6b4d' : '#a86a2c'),
+      colLabel: col || 'Not mapped', colColor: col ? '#1c1b18' : '#a29d93',
+      onPick: this.act('Column picker for ' + label + ' \u2014 headers already used by another field are locked out.') });
+    const PDS = {
+      books: { name:'Purchase register', rows:'12,482 rows \u00b7 data starts at row 2',
+        head:['A: Bill No','B: Bill Date','C: Party GSTIN','D: Party Name','E: Assessable Value','F: IGST Amt','G: CGST Amt','H: SGST Amt'],
+        raw:[['INV-1025','05/08/2026','29XXXXX4321X1Z9','XYZ Pvt Ltd','200000.00','38000.00','0.00','0.00'],
+             ['INV-1026','07/08/2026','27XXXXX8899X1Z2','PQR Industries','656666.00','0.00','59100.00','59100.00'],
+             ['INV-1041','09/08/2026','24XXXXX1122X1Z7','Meridian Steel','535555.00','96400.00','0.00','0.00']],
+        unmapped:['I: Narration','J: Cost centre','K: Approved by'],
+        fields:[
+          pf('Invoice Number', true, 'A: Bill No', ['INV-1025','INV-1026','INV-1041'], '0.99'),
+          pf('Invoice Date', false, 'B: Bill Date', ['05/08/2026','07/08/2026','09/08/2026'], '0.98'),
+          pf('Supplier GSTIN', false, 'C: Party GSTIN', ['29XXXXX4321X1Z9','27XXXXX8899X1Z2','24XXXXX1122X1Z7'], '0.99'),
+          pf('Supplier Name', false, 'D: Party Name', ['XYZ Pvt Ltd','PQR Industries','Meridian Steel'], '0.87'),
+          pf('Taxable Amount', true, 'E: Assessable Value', ['\u20b92,00,000.00','\u20b96,56,666.00','\u20b95,35,555.00'], '0.96'),
+          pf('IGST', false, 'F: IGST Amt', ['\u20b938,000.00','\u20b90.00','\u20b996,400.00'], '0.97', true),
+          pf('CGST', false, 'G: CGST Amt', ['\u20b90.00','\u20b959,100.00','\u20b90.00'], '0.97', true),
+          pf('SGST', false, 'H: SGST Amt', ['\u20b90.00','\u20b959,100.00','\u20b90.00'], '0.97', true),
+          pf('Cess', false, '', ['\u2014','\u2014','\u2014'], '', true),
+          pf('Place of Supply', false, '', ['\u2014','\u2014','\u2014'], ''),
+          pf('HSN Code', false, '', ['\u2014','\u2014','\u2014'], '')
+        ] },
+      gstr2b: { name:'GSTR-2B', rows:'12,197 records \u00b7 B2B section',
+        head:['ctin','trdnm','inum','idt','txval','igst','cgst','sgst','irn_status'],
+        raw:[['29XXXXX4321X1Z9','XYZ PVT LTD','INV-1025','05-08-2026','200000','37500','0','0','Y'],
+             ['27XXXXX5566X1Z4','KALYAN POLYMERS','INV-0987','28-07-2026','416111','74900','0','0','Y'],
+             ['07XXXXX3344X1Z6','NORTHLINE LOGISTICS','INV-1127','12-08-2026','325555','58600','0','0','Y']],
+        unmapped:['rchrg','inv_typ','diffprcnt'],
+        fields:[
+          pf('Invoice Number', true, 'inum', ['INV-1025','INV-0987','INV-1127'], '0.99'),
+          pf('Invoice Date', false, 'idt', ['05-08-2026','28-07-2026','12-08-2026'], '0.99'),
+          pf('Supplier GSTIN', false, 'ctin', ['29XXXXX4321X1Z9','27XXXXX5566X1Z4','07XXXXX3344X1Z6'], '0.99'),
+          pf('Supplier Name', false, 'trdnm', ['XYZ PVT LTD','KALYAN POLYMERS','NORTHLINE LOGISTICS'], '0.92'),
+          pf('Taxable Amount', true, 'txval', ['\u20b92,00,000','\u20b94,16,111','\u20b93,25,555'], '0.99'),
+          pf('IGST', false, 'igst', ['\u20b937,500','\u20b974,900','\u20b958,600'], '0.99', true),
+          pf('CGST', false, 'cgst', ['\u20b90','\u20b90','\u20b90'], '0.99', true),
+          pf('SGST', false, 'sgst', ['\u20b90','\u20b90','\u20b90'], '0.99', true),
+          pf('IMS Status', false, 'irn_status', ['No action','Accepted','No action'], '0.81'),
+          pf('Reverse Charge', false, '', ['\u2014','\u2014','\u2014'], ''),
+          pf('Note Type', false, '', ['\u2014','\u2014','\u2014'], '')
+        ] },
+      gstr2a: { name:'GSTR-2A', rows:'12,241 records \u00b7 live, keeps updating',
+        head:['ctin','trdnm','inum','idt','txval','tax','cfs'],
+        raw:[['29XXXXX4321X1Z9','XYZ PVT LTD','INV-1025','05-08-2026','200000','37500','Y'],
+             ['27XXXXX8899X1Z2','PQR INDUSTRIES','INV-1026','07-08-2026','656666','118200','N'],
+             ['24XXXXX1122X1Z7','MERIDIAN STEEL','INV-1041','09-08-2026','535555','96400','N']],
+        unmapped:['chksum','sup_period'],
+        fields:[
+          pf('Invoice Number', true, 'inum', ['INV-1025','INV-1026','INV-1041'], '0.99'),
+          pf('Invoice Date', false, 'idt', ['05-08-2026','07-08-2026','09-08-2026'], '0.99'),
+          pf('Supplier GSTIN', false, 'ctin', ['29XXXXX4321X1Z9','27XXXXX8899X1Z2','24XXXXX1122X1Z7'], '0.99'),
+          pf('Supplier Name', false, 'trdnm', ['XYZ PVT LTD','PQR INDUSTRIES','MERIDIAN STEEL'], '0.92'),
+          pf('Taxable Amount', true, 'txval', ['\u20b92,00,000','\u20b96,56,666','\u20b95,35,555'], '0.99'),
+          pf('IGST', false, 'tax', ['\u20b937,500','\u20b91,18,200','\u20b996,400'], '0.88', true),
+          pf('Counterparty filed', false, 'cfs', ['Yes','No','No'], '0.94'),
+          pf('Cess', false, '', ['\u2014','\u2014','\u2014'], '', true)
+        ] }
+    };
+    const dsn = this.state.ds;
+    const dsCur = PDS[dsn] || PDS.books;
+    const pMapped = dsCur.fields.filter(f => f.colLabel !== 'Not mapped').length;
+    const pAllOk = dsList.every(d => this.state.okDs[d.key]);
+    const base = screens[cur] || screens.periods;
+    const sel = this.state.sel;
+    const acts = this.rowActs(cur);
+    const done = this.state.done;
+    const grows = (base.rows || []).map((cells, i) => {
+      const d = done[cur + ':' + cells[0].t];
+      return { cells, mark: d ? '\u2713' : (sel[i] ? '\u2611' : '\u2610'), markColor: d ? '#2f6b4d' : (sel[i] ? '#5b6bb5' : '#c3bdb2'),
+        bg: d ? '#f5f9f6' : (sel[i] ? '#f7f8fd' : 'transparent'),
+        onToggle: this.toggleRow(i), onOpen: this.openRow(cells),
+        openLabel: d ? d : 'Open',
+        openBg: d ? '#eaf2ec' : '#fff', openColor: d ? '#2f6b4d' : '#41508f', openBorder: d ? '#cfe0d5' : '#dfe3f2' };
+    });
+    const selKeys = (base.rows || []).filter((r, i) => sel[i]).map(r => r[0].t);
+    const doneN = Object.keys(done).filter(k => k.indexOf(cur + ':') === 0).length;
+    const selN = Object.keys(sel).filter(k => sel[k]).length;
+    const cop = this.copilot(cur);
+    const g = Object.assign({}, base, { rows: grows, gridSel: '28px ' + base.grid + ' 96px', viz: this.viz(cur),
+      copilot: cop.text, copilotAction: cop.action });
+    const drow = this.state.drawer;
+    const dr = drow ? {
+      title: drow[0].t, sub: drow[0].sub || base.title,
+      facts: base.cols.map((c, i) => ({ k: c, v: (drow[i] && drow[i].t) || '—', s: (drow[i] && drow[i].sub) || '' })),
+      actions: acts.map((a, i) => ({ label: a, go: this.act(a + ' — recorded on ' + drow[0].t + '.'),
+        bg: i === 0 ? '#1c1b18' : '#fff', color: i === 0 ? '#fff' : '#1c1b18', border: i === 0 ? '#1c1b18' : '#d8d4cb' })),
+      note: base.graphNote
+    } : null;
+    const rawInbox = [
+      { id:'i1', title:'Follow-up to XYZ Pvt Ltd', who:'Follow-up drafter \u00b7 assistant', detail:'\u20b94.1 L across 5 invoices. Cites the August GSTR-1 values.', tag:'EMAIL', screen:'followups' },
+      { id:'i2', title:'Bulk accept 96 rounding cases', who:'Bulk grouper \u00b7 assistant', detail:'All under \u20b91,000 and inside your \u20b910 tolerance.', tag:'BULK', screen:'queue' },
+      { id:'i3', title:'Write off \u20b93.17 L \u2014 ABC Suppliers', who:'Sneha \u00b7 preparer', detail:'Above your \u20b950,000 threshold. Waiting 3 days.', tag:'APPROVAL', screen:'approvals' },
+      { id:'i4', title:'Hold 6 IMS records as pending', who:'Case explainer \u00b7 assistant', detail:'Otherwise deemed accepted when 3B is filed.', tag:'IMS', screen:'ims' }
+    ];
+    const ap = this.state.approved;
+    const inboxItems = rawInbox.map(it => Object.assign({}, it, {
+      settled: !!ap[it.id], verdict: ap[it.id] || '',
+      bg: ap[it.id] ? '#f5f9f6' : '#fff',
+      onApprove: this.decide(it.id, 'Approved'), onReject: this.decide(it.id, 'Rejected'),
+      onOpen: this.go(it.screen)
+    }));
+    const pending = inboxItems.filter(i => !i.settled).length;
+    return {
+      isHome: cur === 'home', isRegister: cur === 'register', isCase: cur === 'case',
+      outSel: outSel,
+      onOutOpen: outSel.go,
+      isAgents: cur === 'agents', isPipeline: cur === 'pipeline',
+      pipeSteps: [
+        pstep('Upload', '3 files loaded', true, false),
+        pstep('Map', 'columns \u2192 GST fields', false, true),
+        pstep('Investigate', '848 exceptions', false, false),
+        pstep('Intelligence', 'reasons + ITC risk', false, false),
+        pstep('Act', 'follow-ups + exports', false, false)
+      ],
+      dsTabs: dsList.map(d => ({ name: d.name, meta: d.meta, go: this.pickDs(d.key),
+        color: dsn === d.key ? '#1c1b18' : '#6f6b62',
+        bg: dsn === d.key ? '#f1efe9' : 'transparent',
+        border: dsn === d.key ? '#5b6bb5' : 'transparent',
+        mark: this.state.okDs[d.key] ? '\u2713' : '' })),
+      dsName: dsCur.name, dsRows: dsCur.rows,
+      mapRows: dsCur.fields,
+      sampleRows: [1,2,3].map(i => ({ label: 'R' + i, go: this.pickSampleRow(i),
+        bg: this.state.rowSel === i ? '#f4f6fb' : '#fff',
+        color: this.state.rowSel === i ? '#41508f' : '#6f6b62',
+        border: this.state.rowSel === i ? '#dfe3f2' : '#e3e0d9' })),
+      showRaw: this.state.showRaw, onToggleRaw: this.toggleRaw(),
+      rawHead: dsCur.head, rawBody: dsCur.raw,
+      mapCount: pMapped + ' of ' + dsCur.fields.length + ' fields mapped \u00b7 required marked *',
+      dsConfirmLabel: this.state.okDs[dsn] ? 'Confirmed' : 'Confirm mapping',
+      onConfirmDs: this.confirmDs(dsn, dsCur.name),
+      reconLabel: pAllOk ? 'Reconcile' : 'Confirm all 3 files first',
+      reconBg: pAllOk ? '#1c1b18' : '#f2efe9', reconColor: pAllOk ? '#fff' : '#a29d93',
+      onRecon: pAllOk ? this.go('register') : this.act('Each file needs a confirmed mapping. A half-mapped load produces numbers nobody can trace back.'),
+      unmapped: dsCur.unmapped,
+      onAutoMap: this.act('Re-read the headers and re-proposed. Every proposal shows its confidence; none is applied until you confirm.'),
+      onUpload: this.act('Upload \u2014 purchase register, GSTR-2B, GSTR-2A or a goods-receipt export. Excel, CSV or the portal JSON.'), isAnalytics: cur === 'analytics', isGeneric: !bespoke[cur],
+      onAnExport: this.act('Analytics working exported \u2014 every figure carries the case ids behind it.'),
+      onAnReport: this.act('Client report drafted \u2014 five periods, the narrative above, and the supplier quadrant.'),
+      onAnCites: this.act('22 facts listed \u2014 filing dates, case reason codes and follow-up timestamps from GraphOWL.'),
+      anKpis: [
+        { label:'MATCH RATE', value:'94%', delta:'+6 pts', deltaColor:'#2f6b4d', sub:'vs April', spark:[{h:'62%',color:'#dcd7cc'},{h:'71%',color:'#dcd7cc'},{h:'79%',color:'#dcd7cc'},{h:'76%',color:'#dcd7cc'},{h:'100%',color:'#1c1b18'}] },
+        { label:'ITC AT RISK', value:'\u20b94.2 L', delta:'\u221249%', deltaColor:'#2f6b4d', sub:'from \u20b98.2 L in April', spark:[{h:'100%',color:'#e8c0b6'},{h:'66%',color:'#e8c0b6'},{h:'82%',color:'#e8c0b6'},{h:'60%',color:'#e8c0b6'},{h:'51%',color:'#a13f28'}] },
+        { label:'MEDIAN DAYS TO CHASE', value:'4 d', delta:'\u221215 d', deltaColor:'#2f6b4d', sub:'case opened \u2192 email sent', spark:[{h:'100%',color:'#dcd7cc'},{h:'74%',color:'#dcd7cc'},{h:'53%',color:'#dcd7cc'},{h:'32%',color:'#dcd7cc'},{h:'21%',color:'#1c1b18'}] },
+        { label:'AUTO-RESOLVED', value:'62%', delta:'+21 pts', deltaColor:'#2f6b4d', sub:'no human touched them', spark:[{h:'41%',color:'#c6cee9'},{h:'52%',color:'#c6cee9'},{h:'58%',color:'#c6cee9'},{h:'56%',color:'#c6cee9'},{h:'100%',color:'#41508f'}] }
+      ],
+      anMonths: ['Apr','May','Jun','Jul','Aug'],
+      heatScale: ['#f4f2ee','#f7e6dc','#eec5b0','#d99578','#a13f28'],
+      heat: [
+        heatRow('Supplier not filed', ['\u20b94.4','\u20b94.1','\u20b94.6','\u20b94.3','\u20b94.2'], [4,4,4,4,4], this.go('atrisk')),
+        heatRow('Tax amount differs', ['\u20b96.2','\u20b95.1','\u20b94.4','\u20b93.6','\u20b93.1'], [4,3,3,2,2], this.go('exceptions')),
+        heatRow('Only in books', ['\u20b93.8','\u20b92.9','\u20b92.4','\u20b92.0','\u20b91.8'], [3,3,2,2,1], this.go('exceptions')),
+        heatRow('Only in 2B', ['\u20b92.1','\u20b91.8','\u20b91.6','\u20b91.5','\u20b91.4'], [2,2,1,1,1], this.go('exceptions')),
+        heatRow('Cross-period', ['\u20b93.2','\u20b92.6','\u20b91.9','\u20b91.6','\u20b91.4'], [3,2,2,1,1], this.go('crossperiod')),
+        heatRow('Duplicate / typo', ['\u20b91.4','\u20b91.1','\u20b90.9','\u20b90.9','\u20b90.8'], [1,1,0,0,0], this.go('exceptions'))
+      ],
+      quadrant: [
+        { label:'XYZ Pvt Ltd', x:'82%', y:'22%', size:'34px', fill:'rgba(161,63,40,.18)', border:'#a13f28', go:this.go('risk') },
+        { label:'ABC Suppliers', x:'68%', y:'34%', size:'28px', fill:'rgba(161,63,40,.14)', border:'#a13f28', go:this.go('risk') },
+        { label:'PQR Industries', x:'56%', y:'46%', size:'24px', fill:'rgba(168,106,44,.16)', border:'#a86a2c', go:this.go('risk') },
+        { label:'Meridian Steel', x:'34%', y:'30%', size:'18px', fill:'rgba(168,106,44,.14)', border:'#a86a2c', go:this.go('risk') },
+        { label:'Trident Chemicals', x:'42%', y:'66%', size:'20px', fill:'rgba(91,107,181,.14)', border:'#5b6bb5', go:this.go('risk') },
+        { label:'Northline', x:'22%', y:'74%', size:'16px', fill:'rgba(91,107,181,.12)', border:'#5b6bb5', go:this.go('risk') },
+        { label:'Kalyan Polymers', x:'30%', y:'88%', size:'22px', fill:'rgba(47,107,77,.14)', border:'#2f6b4d', go:this.go('risk') }
+      ],
+      costTrend: [
+        { m:'Apr', v:'\u20b931', h:'100%', color:'#dcd7cc' }, { m:'May', v:'\u20b924', h:'77%', color:'#dcd7cc' },
+        { m:'Jun', v:'\u20b919', h:'61%', color:'#dcd7cc' }, { m:'Jul', v:'\u20b914', h:'45%', color:'#dcd7cc' },
+        { m:'Aug', v:'\u20b911.90', h:'38%', color:'#1c1b18' }
+      ],
+      contribution: [
+        { label:'Cases explained without a human', value:'848 of 848', pct:'100%', color:'#41508f' },
+        { label:'Follow-ups drafted, then approved', value:'388 of 412', pct:'94%', color:'#6b4fa8' },
+        { label:'Bulk groups accepted as proposed', value:'35 of 38', pct:'92%', color:'#5b6bb5' },
+        { label:'Estimated review time saved', value:'106 hours', pct:'71%', color:'#2f6b4d' }
+      ],
+      generic: g,
+      banner: this.state.banner, hasBanner: !!this.state.banner, dismiss: () => this.setState({ banner:null }),
+      drawer: dr, hasDrawer: !!dr, closeDrawer: () => this.setState({ drawer:null }),
+      selCount: selN, hasSel: selN > 0, selLabel: selN + ' selected', clearSel: () => this.setState({ sel:{} }),
+      bulkActions: acts.map(a => ({ label: a, go: this.finish(selKeys, a) })),
+      doneCount: doneN, hasDone: doneN > 0, doneLabel: doneN + ' decided this session', onUndo: this.undo(),
+      navOpen: open, navWidth: open ? '184px' : '58px', navToggle: this.toggleNav(),
+      navIcon: open ? '\u2039' : '\u203a', navHint: open ? 'COLLAPSE' : '',
+      client: this.state.client, clientOpen: this.state.clientOpen, onClient: this.toggleClient(),
+      clients: [
+        { name:'ABC Manufacturing Pvt Ltd', gstin:'27XXXXX1234X1Z5 \u00b7 Maharashtra', meta:'3 registrations \u00b7 38 open cases', go:this.pickClient('ABC Manufacturing Pvt Ltd','27XXXXX1234X1Z5') },
+        { name:'Kaveri Textiles LLP', gstin:'29XXXXX8877X1Z4 \u00b7 Karnataka', meta:'1 registration \u00b7 12 open cases', go:this.pickClient('Kaveri Textiles LLP','29XXXXX8877X1Z4') },
+        { name:'Sunrise Foods Ltd', gstin:'24XXXXX5566X1Z9 \u00b7 Gujarat', meta:'2 registrations \u00b7 closed for August', go:this.pickClient('Sunrise Foods Ltd','24XXXXX5566X1Z9') }
+      ],
+      inboxOpen: this.state.inbox, onInbox: this.toggleInbox(), inboxItems, pending,
+      pendingLabel: pending > 0 ? String(pending) : '', hasPending: pending > 0,
+      onPeriodPick: this.act('Period picker \u2014 April to August 2026 are closed or open; September opens when its 2B is generated.'),
+      onPrevCase: this.act('Previous case in this group \u2014 INV-1019, \u20b9820 difference.'),
+      onNextCase: this.act('Next case in this group \u2014 INV-1031, \u20b91,140 difference.'),
+      onPrimary: this.act(base.primary + ' \u2014 queued. This is a mockup, so nothing was filed.'),
+      onSecondary: this.act(base.secondary + ' — opened.'),
+      onCopilot: this.act(cop.action + ' — prepared for your review.'),
+      askOpen: this.state.ask, onAsk: this.toggleAsk(),
+      onUsage: this.act('Usage report — tokens, cost and acceptance rate per assistant, per period.'),
+      onRules: this.act('Automation rules — which triggers fire, and what needs a human before it leaves the system.'),
+      goAtRisk: this.go('atrisk'), goIms: this.go('ims'), goFollowups: this.go('followups'),
+      askCites: ['42 open exceptions · August 2026', 'GSTR-1 filing dates · GraphOWL', 'Supplier risk scores · 12 periods', 'Follow-up log · 12 threads'],
+      briefing: {
+        text: 'August is two decisions away from close. 24 IMS records have no action and will be deemed accepted at 3B, six of them the disputed XYZ amounts. Separately, ₹4.2 L sits with 11 suppliers who have never been contacted this cycle.',
+        cites: '18 facts cited · written 07:00 today',
+        a1: 'Hold the 6 disputed IMS records', a2: 'Draft the 11 follow-ups'
+      },
+      goRegister: this.go('register'), goCase: this.go('case'), goAgents: this.go('agents'),
+      goExceptions: this.go('exceptions'), goPeriods: this.go('periods'), goSuppliers: this.go('suppliers'),
+      nav: [
+        { label:'HOME', short: open ? 'HOME' : '·', items:[ item('Dashboard','home') ] },
+        { label:'RECONCILE', short: open ? 'RECONCILE' : '·', items:[ item('Upload & map','pipeline'), item('Periods','periods'), item('Register','register'), item('Exceptions','exceptions','848'), item('Case detail','case'), item('Cross-period','crossperiod','47') ] },
+        { label:'ITC', short: open ? 'ITC' : '·', items:[ item('ITC position','itc'), item('At risk','atrisk','₹12.4L'), item('Eligibility','eligibility','38') ] },
+        { label:'COMPLIANCE', short: open ? 'COMPLIANCE' : '·', items:[ item('Authority','authority'), item('Obligations','obligations','2') ] },
+        { label:'SUPPLIERS', short: open ? 'SUPPLIERS' : '·', items:[ item('Suppliers','suppliers'), item('Supplier risk','risk','28'), item('Follow-ups','followups','12') ] },
+        { label:'OPERATE', short: open ? 'OPERATE' : '·', items:[ item('Review queue','queue','327'), item('IMS','ims','24'), item('Approvals','approvals','9'), item('Assistants','agents') ] },
+        { label:'DELIVER', short: open ? 'DELIVER' : '·', items:[ item('Deliverables','deliverables','2'), item('Analytics','analytics') ] },
+        { label:'DATA', short: open ? 'DATA' : '·', items:[ item('Imports','imports'), item('Sources','datasources'), item('Mappings','mappings') ] },
+        { label:'SETTINGS', short: open ? 'SETTINGS' : '·', items:[ item('Rules','rules'), item('GSTINs','gstins'), item('Users','users'), item('New session','reset') ] }
+      ],
+      itcCards: [
+        { label:'RECONCILED · ELIGIBLE PER 2B', value:'₹2.84 Cr', sub:'9,842 invoices matched on all fields', color:'#2f6b4d', border:'#e3e0d9', pct:'88%' },
+        { label:'NEEDS REVIEW', value:'₹18.7 L', sub:'327 invoices across 6 reason codes', color:'#a86a2c', border:'#f0dcc2', pct:'42%' },
+        { label:'AT RISK', value:'₹12.4 L', sub:'146 invoices · 42 suppliers to chase', color:'#a13f28', border:'#eed7d1', pct:'28%' }
+      ],
+      actions: [
+        { title:'Supplier has not filed GSTR-1', sub:'42 invoices across 11 suppliers · oldest 38 days', amount:'₹4.2L', count:'42 inv', color:'#a13f28', go:this.go('atrisk') },
+        { title:'Tax amount differs from 2B', sub:'18 invoices · average delta ₹1,720', amount:'₹3.1L', count:'18 inv', color:'#c9803a', go:this.go('case') },
+        { title:'Present in 2B, missing in books', sub:'9 invoices · likely unrecorded purchases', amount:'₹1.8L', count:'9 inv', color:'#5b6bb5', go:this.go('register') },
+        { title:'Cross-period — supplier filed late', sub:'11 invoices dated July, appearing in August 2B', amount:'₹1.4L', count:'11 inv', color:'#6b4fa8', go:this.go('crossperiod') },
+        { title:'IMS decision pending', sub:'6 records will be deemed accepted at 3B filing', amount:'₹0.9L', count:'6 rec', color:'#2f6b4d', go:this.go('ims') }
+      ],
+      engine: [
+        { n:'47', label:'Cross-period matches', detail:'Invoice → supplier filing → period, resolved without a human.' },
+        { n:'96', label:'Supplier identities merged', detail:'Same vendor under two GSTINs or trade names.' },
+        { n:'9', label:'GSTIN typos caught', detail:'Transposition detected by blocking, fix suggested.' },
+        { n:'848', label:'Cases with evidence', detail:'Each carries its citations and rule reference.' }
+      ],
+      agentMini: [
+        { label:'Explanations generated', value:'848' },
+        { label:'Follow-ups drafted', value:'412' },
+        { label:'Sent after your review', value:'388' },
+        { label:'Token spend', value:'₹9,840' }
+      ],
+      periodState: [
+        { label:'Books import', value:'Imported 15 Aug', color:'#2f6b4d' },
+        { label:'GSTR-1', value:'Available', color:'#2f6b4d' },
+        { label:'GSTR-2B', value:'Generated 14 Aug', color:'#2f6b4d' },
+        { label:'IMS', value:'24 pending actions', color:'#a86a2c' },
+        { label:'Reconciliation', value:'Completed', color:'#2f6b4d' },
+        { label:'GSTR-3B', value:'Not filed', color:'#6f6b62' }
+      ],
+      trend: [
+        { m:'Apr', pct:'88%', h:'40px', color:'#dcd7cc' },
+        { m:'May', pct:'91%', h:'47px', color:'#dcd7cc' },
+        { m:'Jun', pct:'93%', h:'52px', color:'#dcd7cc' },
+        { m:'Jul', pct:'92%', h:'50px', color:'#dcd7cc' },
+        { m:'Aug', pct:'94%', h:'56px', color:'#1c1b18' }
+      ],
+      buckets: [
+        { label:'PERFECT', n:'11,201', color:'#2f6b4d', bg:'#fff' },
+        { label:'PROBABLE', n:'433', color:'#3d3a34', bg:'#fff' },
+        { label:'AMOUNT DIFF', n:'181', color:'#a86a2c', bg:'#fdfbf7' },
+        { label:'ONLY IN BOOKS', n:'263', color:'#a13f28', bg:'#fff' },
+        { label:'ONLY IN 2B', n:'125', color:'#41508f', bg:'#fff' },
+        { label:'CROSS PERIOD', n:'47', color:'#6b4fa8', bg:'#fff' },
+        { label:'DUPLICATE', n:'18', color:'#3d3a34', bg:'#fff' }
+      ],
+      regFilters: ['Status', 'Supplier', 'Reason', 'Document type', 'Workflow'],
+      rows: [
+        { inv:'INV-1025', supplier:'XYZ Pvt Ltd', gstin:'29XXXXX4321X1Z9', books:'₹38,000', twoB:'₹37,500', delta:'−₹500', deltaColor:'#a13f28', state:'AMOUNT DIFF', stateBg:'#fdf3e7', stateColor:'#a86a2c', workflow:'Waiting on vendor', bg:'#fdfbf7' },
+        { inv:'INV-1026', supplier:'PQR Industries Ltd', gstin:'27XXXXX8899X1Z2', books:'₹1,18,200', twoB:'—', delta:'−₹1.18L', deltaColor:'#a13f28', state:'ONLY IN BOOKS', stateBg:'#fdf5f3', stateColor:'#a13f28', workflow:'Follow-up sent', bg:'#fff' },
+        { inv:'INV-1041', supplier:'Meridian Steel Co', gstin:'24XXXXX1122X1Z7', books:'₹96,400', twoB:'—', delta:'−₹96.4K', deltaColor:'#a13f28', state:'SUPPLIER NOT FILED', stateBg:'#fdf5f3', stateColor:'#a13f28', workflow:'New', bg:'#fff' },
+        { inv:'INV-0987', supplier:'Kalyan Polymers', gstin:'27XXXXX5566X1Z4', books:'₹74,900', twoB:'₹74,900', delta:'0', deltaColor:'#6f6b62', state:'CROSS PERIOD', stateBg:'#f5f0ff', stateColor:'#6b4fa8', workflow:'Auto-resolved', bg:'#fff' },
+        { inv:'INV-1103', supplier:'Trident Chemicals', gstin:'33XXXXX7788X1Z1', books:'₹62,300', twoB:'₹61,050', delta:'−₹1,250', deltaColor:'#a13f28', state:'AMOUNT DIFF', stateBg:'#fdf3e7', stateColor:'#a86a2c', workflow:'Reviewed', bg:'#fff' },
+        { inv:'INV-1127', supplier:'Northline Logistics', gstin:'07XXXXX3344X1Z6', books:'—', twoB:'₹58,600', delta:'+₹58.6K', deltaColor:'#41508f', state:'ONLY IN 2B', stateBg:'#eef0f8', stateColor:'#41508f', workflow:'Needs booking', bg:'#fff' },
+        { inv:'INV-1148', supplier:'XYZ Pvt Ltd', gstin:'29XXXXX4321X1Z9', books:'₹47,800', twoB:'₹47,800', delta:'0', deltaColor:'#6f6b62', state:'IMS PENDING', stateBg:'#f3f8f4', stateColor:'#2f6b4d', workflow:'Decision due', bg:'#fff' },
+        { inv:'INV-1162', supplier:'Sarvottam Traders', gstin:'27XXXXX9911X1Z8', books:'₹41,200', twoB:'₹41,200', delta:'0', deltaColor:'#6f6b62', state:'DUPLICATE', stateBg:'#f4f2ee', stateColor:'#3d3a34', workflow:'Flagged', bg:'#fff' },
+        { inv:'INV-1170', supplier:'Anand Auto Components', gstin:'27XXXXX2233X1Z0', books:'₹38,900', twoB:'₹38,900', delta:'0', deltaColor:'#6f6b62', state:'GSTIN TYPO', stateBg:'#fdf3e7', stateColor:'#a86a2c', workflow:'Suggested fix', bg:'#fff' }
+      ],
+      compare: [
+        { field:'Invoice number', a:'INV-1025', b:'INV-1025', c:'INV-1025', aColor:'#3d3a34', bColor:'#3d3a34', cColor:'#3d3a34', bg:'#fff' },
+        { field:'Invoice date', a:'05 Aug 2026', b:'05 Aug 2026', c:'05 Aug 2026', aColor:'#3d3a34', bColor:'#3d3a34', cColor:'#3d3a34', bg:'#fff' },
+        { field:'GSTIN', a:'29XXXXX4321X1Z9', b:'29XXXXX4321X1Z9', c:'29XXXXX4321X1Z9', aColor:'#3d3a34', bColor:'#3d3a34', cColor:'#3d3a34', bg:'#fff' },
+        { field:'Taxable value', a:'₹2,00,000', b:'₹2,00,000', c:'₹2,00,000', aColor:'#3d3a34', bColor:'#3d3a34', cColor:'#3d3a34', bg:'#fff' },
+        { field:'IGST', a:'₹38,000', b:'₹37,500', c:'₹37,500', aColor:'#1c1b18', bColor:'#a13f28', cColor:'#a13f28', bg:'#fdfbf7' },
+        { field:'Filing period', a:'Aug 2026', b:'Aug 2026', c:'Aug 2026', aColor:'#3d3a34', bColor:'#3d3a34', cColor:'#3d3a34', bg:'#fff' },
+        { field:'Goods receipt', a:'18 Aug 2026', b:'—', c:'—', aColor:'#a86a2c', bColor:'#a29d93', cColor:'#a29d93', bg:'#fff' }
+      ],
+      checks: [
+        { mark:'✓', bg:'#e8f1eb', fg:'#2f6b4d', text:'GSTIN matched', detail:'exact' },
+        { mark:'✓', bg:'#e8f1eb', fg:'#2f6b4d', text:'Invoice number matched', detail:'exact' },
+        { mark:'✓', bg:'#e8f1eb', fg:'#2f6b4d', text:'Invoice date matched', detail:'exact' },
+        { mark:'✓', bg:'#e8f1eb', fg:'#2f6b4d', text:'Taxable value matched', detail:'₹2,00,000' },
+        { mark:'✕', bg:'#f8e5e0', fg:'#a13f28', text:'IGST differs', detail:'₹500 · 1.3%' },
+        { mark:'!', bg:'#fdf3e7', fg:'#a86a2c', text:'Goods received after invoice date', detail:'13 days later' }
+      ],
+      chain: [
+        { src:'BOOKS', value:'₹38,000', meta:'Purchase register, row 845', border:'#e3e0d9', bg:'#fff', valColor:'#1c1b18', arrow:'→' },
+        { src:'GSTR-1', value:'₹37,500', meta:'Supplier filing, 11 Aug', border:'#f0dcc2', bg:'#fdfbf7', valColor:'#a13f28', arrow:'→' },
+        { src:'GSTR-2B', value:'₹37,500', meta:'Generated 14 Aug 2026', border:'#e3e0d9', bg:'#fff', valColor:'#3d3a34', arrow:'→' },
+        { src:'IMS', value:'No action', meta:'Deemed accepted at 3B', border:'#e3e0d9', bg:'#fff', valColor:'#6b4fa8', arrow:'' }
+      ],
+      pattern: [
+        { label:'Late filing rate', value:'31% · high', color:'#a13f28' },
+        { label:'Average filing delay', value:'18 days', color:'#a86a2c' },
+        { label:'Amount discrepancies', value:'7% of invoices', color:'#a86a2c' },
+        { label:'GSTIN errors', value:'Low', color:'#2f6b4d' }
+      ],
+      usage: [
+        { label:'CASES EXPLAINED', value:'848', sub:'one per exception', color:'#1c1b18' },
+        { label:'DRAFTS WRITTEN', value:'412', sub:'388 sent after review', color:'#1c1b18' },
+        { label:'TOKENS', value:'6.4 M', sub:'in 5.1M / out 1.3M', color:'#1c1b18' },
+        { label:'COST', value:'₹9,840', sub:'₹11.90 per resolved case', color:'#1c1b18' },
+        { label:'GROUNDED', value:'98.2%', sub:'sentences with a fact id', color:'#41508f' }
+      ],
+      pipeline: [
+        { tag:'INPUT', name:'Exception raised', detail:'Matching rule fires on a period', border:'#e3e0d9', bg:'#faf9f6', tagColor:'#6f6b62', arrow:'→' },
+        { tag:'GRAPHOWL', name:'Evidence retrieved', detail:'Books, GSTR-1, 2B, IMS, goods receipt', border:'#dfe3f2', bg:'#f7f8fd', tagColor:'#41508f', arrow:'→' },
+        { tag:'GRAPHOWL', name:'Reason inferred', detail:'Rule + confidence + citations', border:'#dfe3f2', bg:'#f7f8fd', tagColor:'#41508f', arrow:'→' },
+        { tag:'RECO', name:'Case written', detail:'The sentence you read on the case', border:'#e6dcf7', bg:'#faf7ff', tagColor:'#6b4fa8', arrow:'→' },
+        { tag:'RECO', name:'Action drafted', detail:'Follow-up, IMS suggestion, bulk group', border:'#f0dcc2', bg:'#fdfbf7', tagColor:'#a86a2c', arrow:'→' },
+        { tag:'YOU', name:'Decision', detail:'Approve, edit, reject — always human', border:'#cfe0d5', bg:'#f3f8f4', tagColor:'#2f6b4d', arrow:'' }
+      ],
+      assistants: [
+        agent('Case explainer','', 'Turns retrieved facts into the case paragraph', 'On every exception', 'continuous · 848 today', '848', '2.1 M tok', '96%', 'AUTOMATIC', 'Exception case · Register'),
+        agent('Reason classifier','', 'Routes each exception into a reason queue', 'On every exception', 'continuous', '848', '0.3 M tok', '99%', 'AUTOMATIC', 'Exceptions · Review queue'),
+        agent('Follow-up drafter','', 'Writes the supplier email from cited invoices', 'Exposure over ₹10,000', '6 drafts waiting', '412', '0.9 M tok', '94%', 'YOU APPROVE', 'Follow-ups · At risk'),
+        agent('Bulk grouper','', 'Finds cases safe to decide together', 'After each reconciliation run', 'next run on import', '38', '0.2 M tok', '92%', 'YOU APPROVE', 'Review queue · Register'),
+        agent('Supplier summariser','', 'Explains filing behaviour in plain words', 'Nightly 01:00', 'next run in 4 h', '214', '0.6 M tok', '91%', 'SUGGEST ONLY', 'Suppliers · Supplier risk'),
+        agent('Period briefing','', 'Writes the close-readiness summary', 'Daily 07:00', 'next run in 11 h', '31', '0.1 M tok', '97%', 'SUGGEST ONLY', 'Dashboard · Periods'),
+        agent('Ask Reco','', 'Answers questions over your cases, with citations', 'On demand from the header', 'idle', '196', '0.4 M tok', '95%', 'SUGGEST ONLY', 'Header · every screen')
+      ],
+      aiMap: [
+        { surface:'Dashboard', use:'Close-readiness briefing naming the two real blockers', mode:'Suggest' },
+        { surface:'Register & Exceptions', use:'Reason classification and bulk-safe grouping', mode:'Automatic' },
+        { surface:'Exception case', use:'The “why this case exists” paragraph, with fact ids', mode:'Automatic' },
+        { surface:'Follow-ups', use:'Drafted supplier emails listing only evidenced invoices', mode:'You approve' },
+        { surface:'Suppliers & risk', use:'Behaviour written from filing dates in the graph', mode:'Suggest' },
+        { surface:'Mappings & imports', use:'Column mapping proposals and failed-row diagnosis', mode:'Suggest' },
+        { surface:'Rules', use:'Simulating a tolerance change before you save it', mode:'Suggest' },
+        { surface:'Header — Ask Reco', use:'Natural-language questions answered from cases and graph', mode:'On demand' }
+      ],
+      drafts: [
+        { supplier:'XYZ Pvt Ltd', reason:'IGST DIFFERENCE', amount:'₹4.1 L', cites:'cites 5 invoices · GSTR-1 Aug filing', body:'We have recorded IGST of ₹38,000 on INV-1025 dated 05 Aug 2026, while your GSTR-1 for August reports ₹37,500 against the same taxable value of ₹2,00,000. Please confirm the correct value and amend if required. Four further invoices show the same pattern.' },
+        { supplier:'ABC Suppliers', reason:'NOT IN 2B', amount:'₹3.17 L', cites:'cites 12 invoices · absent from Aug 2B', body:'Twelve invoices raised on us between 01 and 28 August do not appear in our GSTR-2B for the period. Please confirm whether these were included in your GSTR-1 filing for August.' },
+        { supplier:'Meridian Steel Co', reason:'NOT FILED', amount:'₹0.96 L', cites:'cites 4 invoices · no filing observed', body:'We have not observed a GSTR-1 filing from your GSTIN for August 2026. Four invoices totalling ₹5,35,000 remain unreported, blocking ITC of ₹96,400 at our end.' }
+      ],
+      tokenSplit: [
+        { label:'Case explanations', value:'2.1 M · 33%', pct:'33%', color:'#5b6bb5' },
+        { label:'Follow-up drafting', value:'0.9 M · 14%', pct:'14%', color:'#6b4fa8' },
+        { label:'Retrieval & embeddings', value:'2.8 M · 44%', pct:'44%', color:'#c9c3b8' },
+        { label:'Classification', value:'0.6 M · 9%', pct:'9%', color:'#a29d93' }
+      ],
+      limits: [
+        { text:'Decide whether ITC is claimable', meta:'It flags; you assess' },
+        { text:'Submit an IMS action', meta:'Accept / reject / pending stays manual' },
+        { text:'Send a supplier email unreviewed', meta:'388 of 412 sent after edit or approval' },
+        { text:'Write to the knowledge graph', meta:'Read-only access via MCP' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

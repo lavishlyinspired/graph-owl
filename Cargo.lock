@@ -1896,8 +1896,11 @@ name = "graph-owl-ui"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "http-body-util",
  "mime_guess",
  "rust-embed",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

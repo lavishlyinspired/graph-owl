@@ -15,3 +15,8 @@ workspace = true
 axum.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
+
+[dev-dependencies]
+tower.workspace = true
+tokio.workspace = true
+http-body-util = "0.1"
