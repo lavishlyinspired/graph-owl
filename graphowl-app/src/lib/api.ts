@@ -295,3 +295,85 @@ export function reviewContradiction(body: {
 }): Promise<void> {
   return apiPost<void>("/contradictions/reviews", { ...body, note: body.note?.trim() || null });
 }
+
+// ---- TRACE: Lineage, Paths, History, Evidence (Plan 122a A4) ----
+
+export interface LineageNode {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: AssetKind | null;
+  readonly fullyQualifiedName: string;
+  readonly deleted: boolean;
+}
+
+export interface LineageEdge {
+  readonly id: string;
+  readonly fromAssetId: string;
+  readonly toAssetId: string;
+  readonly relationship: string;
+  readonly source: "manual" | "connector" | "openlineage" | "agent";
+  readonly query?: string | null;
+  readonly description?: string | null;
+  readonly createdAt: string;
+  readonly createdBy: string;
+}
+
+export interface LineageGraph {
+  readonly rootId: string;
+  readonly nodes: readonly LineageNode[];
+  readonly edges: readonly LineageEdge[];
+  readonly truncated: boolean;
+}
+
+export function fetchLineage(
+  id: string,
+  options: { readonly upstream?: number; readonly downstream?: number } = {},
+): Promise<LineageGraph> {
+  const params = new URLSearchParams();
+  if (options.upstream !== undefined) params.set("upstream", String(options.upstream));
+  if (options.downstream !== undefined) params.set("downstream", String(options.downstream));
+  const qs = params.toString();
+  return apiFetch<LineageGraph>(`/lineage/asset/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`);
+}
+
+export interface FoundPath {
+  /** Raw subject identifiers along the route — `/graph/paths` resolves no
+   *  names, only identity, so the UI shows these as-is (monospace, linking
+   *  through to Explore/Entity for a readable name) rather than paying for
+   *  a resolution round trip per node on every path search. */
+  readonly nodes: readonly string[];
+  readonly length: number;
+}
+
+export interface PathSearchResult {
+  readonly paths: readonly FoundPath[];
+  readonly truncated: boolean;
+}
+
+export function findPaths(from: string, to: string): Promise<PathSearchResult> {
+  return apiPost<PathSearchResult>("/graph/paths", { from, to, maxPaths: 10 });
+}
+
+export interface FindingEvidence {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly value: string;
+  readonly var?: string | null;
+}
+
+export interface Finding {
+  readonly id: string;
+  readonly pack: string;
+  readonly label: string;
+  readonly subject: string;
+  readonly summary: string;
+  readonly governedBy: string;
+  readonly evidence: readonly FindingEvidence[];
+  readonly status: "pending" | "accepted" | "rejected";
+  readonly detectedAt: string;
+  readonly subjectLabel?: string | null;
+}
+
+export function fetchFindings(): Promise<readonly Finding[]> {
+  return apiFetch<readonly Finding[]>("/findings");
+}
