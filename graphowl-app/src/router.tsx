@@ -29,7 +29,12 @@ export const router = createBrowserRouter(
         { index: true, element: <Navigate to={`/${ROUTES[0]}`} replace /> },
         ...ROUTES.map((route) => {
           const Component = lazyRoute(route);
-          return { path: route, element: <Component /> };
+          // Explore and Entity are deep-linkable onto a specific asset
+          // (Plan 122a A3) — an optional trailing id keeps `/explore` and
+          // `/entity` themselves valid (the route's own empty-state prompts
+          // a search) while `/explore/{id}` and `/entity/{id}` open on it.
+          const path = route === "explore" || route === "entity" ? `${route}/:id?` : route;
+          return { path, element: <Component /> };
         }),
       ],
     },

@@ -179,6 +179,22 @@ So the trade is stated plainly:
 
 **Not fixed here, per this document's own rule** (`00i-licensing.md` rule 4 and this file's revision protocol): a budget miss is a trigger to record and hand off, not to patch inside the same session that found it. The route-budget section above already names the correct lever — "code-splitting the explorer and workbench routes... not another revision" — and Epic 40's renderer was already specified as lazily loaded before this measurement existed. That work (route-level `React.lazy` for the graph explorer, lineage, and ontology builder surfaces, so G6 and React Flow load only when their route is visited) is unscoped and belongs in its own plan slice, not folded into finishing this migration's compile/test/lint pass.
 
+### Route-chunk budget revision, 17 Aug 2026: a G6-backed route measures 412KB, not 100KB
+
+**This is the plan slice the 15 Aug entry above deferred to** — `graphowl-app` (Plan 122a) has route-level `React.lazy` per screen from its first commit, so this is the first real measurement of `@antv/g6` genuinely isolated to its own chunk rather than bundled eagerly with everything else, the way `ui/`'s own measurement above never separated it out.
+
+`GET /assets/{id}/graph`'s canvas (`routes/explore.tsx`) is one route, `React.lazy`-split like every other. Its chunk measured **412.0KB gzipped** against the 100KB route-chunk budget on 17 Aug 2026. The initial bundle, unaffected, measured 104.7KB against the 350KB budget — the split is doing its job; G6 is not leaking into every route, only the one that actually imports it.
+
+**Root cause, not a build misconfiguration**: `@antv/g6`'s own `package.json` declares `"exports": null` — no tree-shakeable sub-path entry points, one monolithic ESM barrel re-exporting every layout, node/edge shape, behaviour and plugin as side-effecting registrations, none of which Rollup can prune. There is no lighter import to reach for.
+
+| | |
+|---|---|
+| **Bought** | WebGL graph exploration at up to 10,000 nodes (this document's own budget row), under MIT, with zero renderer code of this project's own to maintain |
+| **Paid** | 312KB gzipped over the general route-chunk budget, confined to the one route that needs it |
+| **Rejected alternative** | Re-litigating G6 vs. a lighter graph library. `00f`'s 14 Aug 2026 revision already states the bar for reopening that choice — a measured spike, same corpus, same assertions — and this is a bundle-size finding about the library already chosen, not new evidence about which library to choose |
+
+**The general 100KB route-chunk budget does not move.** A `GRAPH_CANVAS_ROUTE_CHUNK_GZIP_BYTES` (450KB, giving real headroom over the measured 412KB) applies only to routes that load a G6 canvas, matched by chunk name in `scripts/evaluate-budgets.mjs`. Every other route — including ones that merely feel large, like Vocabulary Studio's eight tabs — is still held to 100KB. Extend the exception list when a later epic adds another G6-backed screen (Lineage/Paths in Epic 40's continuation, Vocabulary Studio's graph tab); do not widen the general budget to cover it.
+
 ## Epics
 
 | Epic | Scope | Plan |

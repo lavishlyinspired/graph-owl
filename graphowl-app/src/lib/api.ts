@@ -113,3 +113,185 @@ export interface OverviewResponse {
 export function fetchOverview(): Promise<OverviewResponse> {
   return apiFetch<OverviewResponse>("/overview");
 }
+
+// ---- Explore + Entity (Plan 122a A3) ----
+
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`${path} responded ${response.status}`);
+  }
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+export type AssetKind = "service" | "database" | "schema" | "table" | "column";
+
+export interface GraphNode {
+  readonly id: string;
+  readonly name: string;
+  /** `null` when the reader may not see the node, or the id resolves to
+   *  nothing this catalog knows — kept in the picture as a bare node rather
+   *  than dropped, since removing it would claim a smaller neighbourhood
+   *  than the graph actually has. */
+  readonly kind: AssetKind | null;
+  readonly fullyQualifiedName?: string;
+  readonly semanticType?: string | null;
+}
+
+export interface GraphEdge {
+  readonly from: string;
+  readonly to: string;
+  readonly relationship: string;
+  /** The reasoner concluded this edge; nobody asserted it. Absent reads as
+   *  asserted — understating rather than overstating what was inferred. */
+  readonly derived?: boolean;
+}
+
+export interface GraphView {
+  readonly nodes: readonly GraphNode[];
+  readonly edges: readonly GraphEdge[];
+  /** The walk hit its bound. Always surfaced — a partial picture presented
+   *  as complete is the failure mode of every graph tool. */
+  readonly truncated: boolean;
+}
+
+export function fetchAssetGraph(
+  id: string,
+  options: {
+    readonly direction?: "outgoing" | "incoming" | "both";
+    readonly hops?: number;
+    readonly relationshipTypes?: readonly string[];
+  } = {},
+): Promise<GraphView> {
+  const params = new URLSearchParams();
+  if (options.direction) params.set("direction", options.direction);
+  if (options.hops !== undefined) params.set("hops", String(options.hops));
+  if (options.relationshipTypes && options.relationshipTypes.length > 0) {
+    params.set("relationshipTypes", options.relationshipTypes.join(","));
+  }
+  const qs = params.toString();
+  return apiFetch<GraphView>(`/assets/${encodeURIComponent(id)}/graph${qs ? `?${qs}` : ""}`);
+}
+
+export interface EntityVersion {
+  readonly major: number;
+  readonly minor: number;
+}
+
+export interface ChangeDescription {
+  readonly summary: string;
+  readonly reason?: string | null;
+}
+
+export interface Asset {
+  readonly id: string;
+  readonly kind: AssetKind;
+  readonly name: string;
+  readonly fullyQualifiedName: string;
+  readonly parentId: string | null;
+  readonly description: string | null;
+  readonly properties?: Record<string, unknown> | null;
+  readonly owners?: readonly { readonly id: string; readonly kind: string }[];
+  readonly version: EntityVersion;
+  readonly updatedBy: string;
+  readonly changeDescription?: ChangeDescription | null;
+  readonly deleted: boolean;
+  readonly deletedAt?: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export function fetchAsset(id: string): Promise<Asset> {
+  return apiFetch<Asset>(`/assets/${encodeURIComponent(id)}`);
+}
+
+export interface AssetVersion {
+  readonly version: EntityVersion;
+  readonly snapshot: Asset;
+  readonly changeDescription?: ChangeDescription | null;
+  readonly updatedBy: string;
+  readonly updatedAt: string;
+}
+
+export function fetchAssetVersions(id: string): Promise<readonly AssetVersion[]> {
+  return apiFetch<readonly AssetVersion[]>(`/assets/${encodeURIComponent(id)}/versions`);
+}
+
+// ---- Memory & contradictions (Epic 31 / Epic 41) ----
+//
+// **Nothing here resolves anything.** The engine never picks a winner
+// between two disagreeing memories and never hides either side —
+// confirming a pair leaves it in the queue, flagged, because software that
+// adjudicates institutional disagreement ends the argument without
+// settling it. `reviewContradiction`'s `verdict` is `confirmed` (yes, these
+// disagree) or `dismissed` (no, they don't) — there is no "accept A" or
+// "accept B", because the domain model has no winner field to set one in.
+
+export type Authorship =
+  | { readonly kind: "human"; readonly userId: string }
+  | { readonly kind: "agent"; readonly agentId: string; readonly model: string };
+
+export type LinkRelation = "about" | "affects" | "evidence" | "follows" | "contradicts" | "mentions";
+
+export interface MemoryLink {
+  readonly relation: LinkRelation;
+  readonly target: string;
+}
+
+export interface Memory {
+  readonly id: string;
+  readonly kind: "rationale" | "incident" | "decision" | "caveat";
+  readonly content: string;
+  readonly summary: string | null;
+  readonly authorship: Authorship;
+  readonly confidence: number;
+  readonly links: readonly MemoryLink[];
+  readonly asOf: string;
+  readonly supersedes: string | null;
+  readonly supersededBy: string | null;
+  readonly retractedAt: string | null;
+  readonly retractionReason: string | null;
+}
+
+export interface RecalledMemory {
+  readonly memory: Memory;
+}
+
+export function recallMemories(subjectId: string): Promise<readonly RecalledMemory[]> {
+  return apiFetch<readonly RecalledMemory[]>(`/assets/${encodeURIComponent(subjectId)}/memories?q=`);
+}
+
+export function pinToInvestigation(assetId: string, content: string): Promise<Memory> {
+  return apiPost<Memory>("/memories", {
+    kind: "rationale",
+    content,
+    links: [{ relation: "about", target: assetId }],
+  });
+}
+
+export type ContradictionKind = "confirmed" | "declared" | "candidate";
+
+export interface Contradiction {
+  readonly a: string;
+  readonly b: string;
+  readonly subject: string | null;
+  readonly kind: ContradictionKind;
+}
+
+export function fetchContradictions(subjectId: string): Promise<readonly Contradiction[]> {
+  return apiFetch<readonly Contradiction[]>(`/assets/${encodeURIComponent(subjectId)}/contradictions`);
+}
+
+export function reviewContradiction(body: {
+  readonly a: string;
+  readonly b: string;
+  readonly verdict: "confirmed" | "dismissed";
+  readonly note?: string | null;
+}): Promise<void> {
+  return apiPost<void>("/contradictions/reviews", { ...body, note: body.note?.trim() || null });
+}

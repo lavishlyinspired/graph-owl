@@ -153,4 +153,10 @@ code,
   --color-gowl-ok-bg: var(--gowl-ok-bg);
   --color-gowl-bad: var(--gowl-bad);
   --color-gowl-bad-bg: var(--gowl-bad-bg);
+  --color-gowl-line-3: var(--gowl-line-3);
+  --color-gowl-t7: var(--gowl-t7);
+  --color-gowl-t8: var(--gowl-t8);
+  --color-gowl-amber-border: var(--gowl-amber-border);
+  --color-gowl-amber-deep: var(--gowl-amber-deep);
+  --color-gowl-ok-border: var(--gowl-ok-border);
 }

@@ -12,6 +12,9 @@
     "check:budgets": "node scripts/check-budgets.mjs"
   },
   "dependencies": {
+    "@antv/g-canvas": "^2.2.0",
+    "@antv/g-webgl": "^2.1.1",
+    "@antv/g6": "^5.1.1",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-popover": "^1.1.23",
     "@radix-ui/react-select": "^2.3.7",
@@ -20,6 +23,7 @@
     "@radix-ui/react-tabs": "^1.1.21",
     "@radix-ui/react-tooltip": "^1.2.16",
     "@tailwindcss/vite": "^4.3.3",
+    "bidi-js": "^1.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "react": "^19.0.0",
