@@ -270,20 +270,46 @@ set; ignore behaving as apply.
 what a column means. The mockup is explicit that everything downstream
 inherits it.
 
-**`A6.api`** — proposed column → ontology-property mapping with per-mapping
-confidence; persisted mapping template per source; the contract that
-unmapped columns are **retained with the source record and remain
-searchable**, not discarded.
+**Shipped, 2026-08-18**: Sources and Connectors, both against real data —
+no new backend needed. Sources has no dedicated entity in the API; it is a
+pure client-side rollup (`graphowl-app/src/lib/sources.ts`) over
+`GET /connectors/runs` history, grouped by `serviceName` (objects =
+`created - deleted` summed across every run for that service, health
+derived from the most recent run's `failed` count and a 7-day staleness
+window — the mockup's own stated definition, not an invented number).
+Connectors lists the one real registered type (`postgres` — the only
+connector wired to `/connectors/{connector}/schema` and `/test`; the
+"100 connectors, one crate" convention this stays honest to), with a form
+that calls `POST /connectors/postgres/test` and `POST /connectors/postgres/runs`
+directly. Live-verified end to end against a real Postgres connection.
 
-**AC** — five-step progress, per-dataset tabs, sample row, raw-row toggle,
-mapping table with confidence, unmapped-columns list, per-dataset confirm.
-One unconfirmed dataset blocks the build. Re-uploading uses the saved
-template.
+**`A6.api` — NOT shipped, needs its own plan** (same treatment as A8/A9).
+Checked against the real backend before starting the frontend and found
+three real gaps, not just missing UI:
+1. **No predicate listing.** `POST /predicates` defines one; there is no
+   `GET /predicates` or equivalent anywhere in `graph-owl-api`. A mapping
+   proposal needs something to propose *against* — this does not exist.
+2. **No mapping-template persistence.** No storage table, no facade method,
+   no route for a per-source saved column→property template.
+3. **No `Source` entity.** Only raw `ConnectorRun` history exists; a
+   five-step wizard's "per-dataset confirm" and "one unconfirmed dataset
+   blocks the build" need a persisted draft state that outlives a single
+   run, which nothing today models.
 
-**RED** — an unmapped column is still retrievable after ingest (the whole
-point, and the assertion nobody writes). One unconfirmed dataset blocks;
-all confirmed unblocks. *Mutators*: the block condition inverted — needs
-both the positive and negative case.
+A confidence-scoring approach also needs to be designed and justified
+per `00i` rule 4 (every number needs a stated reason) before any of this
+is implemented — Resolution's `Evidence` enum (`graph-owl-core/src/resolution.rs`)
+is the nearest real precedent for "named reasons, not a bare score" and is
+worth reusing the shape of, not the numbers.
+
+**Original AC/RED, preserved for when the sub-plan is written**:
+five-step progress, per-dataset tabs, sample row, raw-row toggle, mapping
+table with confidence, unmapped-columns list, per-dataset confirm. One
+unconfirmed dataset blocks the build. Re-uploading uses the saved
+template. RED: an unmapped column is still retrievable after ingest (the
+whole point, and the assertion nobody writes). One unconfirmed dataset
+blocks; all confirmed unblocks. *Mutators*: the block condition inverted —
+needs both the positive and negative case.
 
 ---
 

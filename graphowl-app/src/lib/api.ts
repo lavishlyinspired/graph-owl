@@ -665,3 +665,58 @@ export async function countAssets(
 export function fetchRecertificationQueue(): Promise<readonly unknown[]> {
   return apiFetch<readonly unknown[]>("/recertification-queue");
 }
+
+// ---- INGEST — Sources, Connectors (Plan 122a A6) ----
+
+export interface ConnectorRun {
+  readonly id: string;
+  readonly connector: string;
+  readonly serviceName: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+  readonly created: number;
+  readonly skipped: number;
+  readonly failed: number;
+  readonly deleted: number;
+  readonly refusal: string | null;
+  readonly triggeredBy: string;
+}
+
+export function fetchConnectorRuns(
+  filters: { readonly serviceName?: string; readonly limit?: number } = {},
+): Promise<readonly ConnectorRun[]> {
+  const params = new URLSearchParams();
+  if (filters.serviceName) params.set("serviceName", filters.serviceName);
+  params.set("limit", String(filters.limit ?? 200));
+  return apiFetch<readonly ConnectorRun[]>(`/connectors/runs?${params.toString()}`);
+}
+
+export interface ConnectorConfigSchema {
+  readonly properties: Readonly<Record<string, { readonly type: string; readonly title: string; readonly writeOnly?: boolean }>>;
+  readonly required: readonly string[];
+}
+
+export function fetchConnectorSchema(connector: string): Promise<ConnectorConfigSchema> {
+  return apiFetch<ConnectorConfigSchema>(`/connectors/${encodeURIComponent(connector)}/schema`);
+}
+
+export interface ConnectionTestResult {
+  readonly ok: boolean;
+  readonly detail?: string;
+}
+
+export function testConnector(
+  connector: string,
+  settings: Record<string, unknown>,
+  secret?: string,
+): Promise<ConnectionTestResult> {
+  return apiPost<ConnectionTestResult>(`/connectors/${encodeURIComponent(connector)}/test`, { settings, secret });
+}
+
+export function runPostgresConnector(body: {
+  readonly connectionString: string;
+  readonly serviceName: string;
+  readonly includeSchemas?: readonly string[];
+}): Promise<ConnectorRun> {
+  return apiPost<ConnectorRun>("/connectors/postgres/runs", body);
+}
