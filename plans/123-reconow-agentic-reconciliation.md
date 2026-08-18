@@ -421,6 +421,79 @@ grounded in cross-period findings would be confidently wrong.
 
 Sequencing therefore inserts **C0 · period-scoped evaluation** ahead of C.
 
+### C0 — shipped 19 August 2026
+
+`in_run_scope` sits between authorization and the fact budget in
+`scope_facts`. The two questions stay separate on purpose: authorization
+answers *may this principal see this fact*, a run scope answers *should this
+evaluation be looking at it*. Collapsing them would mean widening a policy to
+narrow a run.
+
+Three decisions worth stating, because each has a failure mode:
+
+- **A fact belonging to no named graph is always in scope.** Schema,
+  projection and vocabulary facts are not import-sourced and belong to no run.
+  Excluding them would leave a scoped run holding data it cannot interpret.
+- **The caller names a graph by the source it imported under**
+  (`reco-abc-books`); the stored id carries graph-owl's own `graph:import:`
+  prefix. Matching the id *or* its trailing segment means the caller does not
+  have to know a convention that is graph-owl's rather than theirs. A looser
+  prefix match was rejected and has a test against it — `reco-abc` naming
+  `reco-abc-books` would silently widen every run.
+- **The scope applies to the requirement probes too**, not only the rule
+  queries. A requirement satisfied by another period's data is the same bug one
+  layer down, and it produces the more dangerous answer: the rule runs and
+  reports.
+
+Verified against two real periods of one client — March unchanged (₹72,900
+confirmed, ₹89,800 blocked, both `gst:GoodsReceiptTiming` and
+`gst:ITCNotAvailable` FAILED), April correctly NOT EVALUATED for both, having
+uploaded neither a GRN column nor an ITC flag. Narrowing cost the working case
+nothing, which is the check that matters: a scope that breaks the case it was
+not aimed at has not been verified, only observed.
+
+**Known gap, deliberately not closed here.** Findings are stored per pack with
+no run tag, so two periods holding the *same* invoice numbers would still share
+findings. Real filing periods do not repeat invoice numbers, and the durable
+fix — a run-tagged finding — belongs with the findings model, not with the
+scope predicate. `findings_for_period` filters by invoice identity as an
+interim measure, and derives that identity from the finding's own evidence
+bindings rather than a top-level field, because a raw finding has no
+`invoice_no` key at all. That mistake shipped once in this slice and was caught
+only by a period reading zero blocked ITC while its own rule said FAILED.
+
+**A process failure this slice exposed, recorded because it is the more useful
+finding.** `cargo test -p graph-owl-api --lib` had not compiled since the C0
+commit — `scope_facts` gained a parameter, `FindingRuleDef` had gained
+`requires` one commit earlier, and 18 test call sites were never updated. 736
+passing tests sat invisible behind a compile error, and the slice was verified
+end to end instead. `in_run_scope` itself had **no unit test at all**, for a
+predicate whose permissive failure mode is a rule reporting on data the run was
+never given. Closed with 9 tests, negative cases included, and mutation-tested:
+3 mutants, 3 caught, 0 missed, 0 unviable. The lesson is not "run the tests" —
+it is that an epic-end fast loop must include `cargo test -p <crate> --lib` for
+every crate whose *signatures* changed, not only the crate whose behaviour did.
+
+### C0, continued — the rule panel says what it checked
+
+Two gaps named directly in a live session, both about a screen that reports
+correctly and communicates nothing.
+
+`RuleOutcome` gained `summary`, carried end to end: `graph-owl-api` → the
+reconcile response → migration `0007` → `repo.py` → the React panel. The packs
+already wrote good one-line summaries and nothing consumed them. A label alone
+is not an explanation — `gst:PaymentOverdue` means something only to whoever
+wrote it. A rule that supplies no summary stores `NULL` and the panel renders
+nothing rather than inventing text, which is the same three-state discipline
+this plan applies to rule outcomes themselves.
+
+A flagged rule's "N findings" became a control rather than a fact: clicking it
+filters the invoice table to the invoices carrying that label. `visibleRows`
+was extracted as a pure function so the two independent narrowings — bucket and
+rule label — are testable apart from the component. Stryker is not configured
+for this frontend; its mutants were reasoned through by hand and that is stated
+here rather than reported as a run.
+
 ---
 
 ## 12. Risks

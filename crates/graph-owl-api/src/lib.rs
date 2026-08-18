@@ -3471,7 +3471,14 @@ impl Catalog {
             // clean" on a period whose data was never uploaded — another
             // period had supplied it.
             let outcome = self
-                .sparql_scoped(principal, &probe, None, None, SparqlBudget::default(), graphs)
+                .sparql_scoped(
+                    principal,
+                    &probe,
+                    None,
+                    None,
+                    SparqlBudget::default(),
+                    graphs,
+                )
                 .await?;
             if outcome.rows.is_empty() {
                 unmet.push(class.clone());
@@ -3530,13 +3537,24 @@ impl Catalog {
             }
 
             let outcome = self
-                .sparql_scoped(principal, &rule.query, None, None, SparqlBudget::default(), graphs)
+                .sparql_scoped(
+                    principal,
+                    &rule.query,
+                    None,
+                    None,
+                    SparqlBudget::default(),
+                    graphs,
+                )
                 .await?;
             let produced = findings_from_rows(rule, &outcome.rows)?;
             outcomes.push(RuleOutcome {
                 label: rule.label.clone(),
                 governed_by: rule.governed_by.clone(),
-                status: if produced.is_empty() { RuleStatus::Passed } else { RuleStatus::Flagged },
+                status: if produced.is_empty() {
+                    RuleStatus::Passed
+                } else {
+                    RuleStatus::Flagged
+                },
                 found: produced.len(),
                 unmet: Vec::new(),
             });
@@ -3625,14 +3643,25 @@ impl Catalog {
         }
 
         let outcome = self
-            .sparql_scoped(principal, &rule.query, None, None, SparqlBudget::default(), graphs)
+            .sparql_scoped(
+                principal,
+                &rule.query,
+                None,
+                None,
+                SparqlBudget::default(),
+                graphs,
+            )
             .await?;
         let findings = findings_from_rows(rule, &outcome.rows)?;
         let found = findings.len();
         let outcomes = vec![RuleOutcome {
             label: rule.label.clone(),
             governed_by: rule.governed_by.clone(),
-            status: if found == 0 { RuleStatus::Passed } else { RuleStatus::Flagged },
+            status: if found == 0 {
+                RuleStatus::Passed
+            } else {
+                RuleStatus::Flagged
+            },
             found,
             unmet: Vec::new(),
         }];
@@ -6331,8 +6360,13 @@ impl Catalog {
             all.retain(|flake| entity_is_valid(&flake.s, &windows, window.at));
         }
 
-        let (facts, truncated) =
-            scope_facts(&all, &visible, &named_graph_predicate, budget.max_facts, run_graphs);
+        let (facts, truncated) = scope_facts(
+            &all,
+            &visible,
+            &named_graph_predicate,
+            budget.max_facts,
+            run_graphs,
+        );
         let fact_count = facts.len();
         let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
@@ -22331,6 +22365,124 @@ mod scope_facts_tests {
         ]
     }
 
+    /// A run scope is the boundary between one accounting period's
+    /// reconciliation and another's. Getting it wrong in the permissive
+    /// direction is the dangerous one: a rule then reports a conclusion about
+    /// facts the run was never given, and reads as "checked, clean".
+    mod run_scope {
+        use super::*;
+        use crate::in_run_scope;
+
+        fn graphs(names: &[&str]) -> std::collections::HashSet<String> {
+            names.iter().map(|n| (*n).to_string()).collect()
+        }
+
+        fn in_graph(name: &str) -> Flake {
+            Flake {
+                cx: Some(Sid::dsc(name)),
+                ..about("a", "name", FlakeValue::String("v".into()))
+            }
+        }
+
+        #[test]
+        fn an_unscoped_run_reads_everything_the_principal_may_see() {
+            assert!(in_run_scope(
+                Some(&Sid::dsc("graph:import:other-period")),
+                None
+            ));
+        }
+
+        #[test]
+        fn a_fact_from_a_named_graph_is_kept() {
+            let allowed = graphs(&["reco-abc-books"]);
+
+            assert!(in_run_scope(
+                Some(&Sid::dsc("graph:import:reco-abc-books")),
+                Some(&allowed)
+            ));
+        }
+
+        #[test]
+        fn a_fact_from_a_graph_the_run_did_not_name_is_dropped() {
+            let allowed = graphs(&["reco-abc-books"]);
+
+            assert!(!in_run_scope(
+                Some(&Sid::dsc("graph:import:reco-xyz-books")),
+                Some(&allowed)
+            ));
+        }
+
+        #[test]
+        fn a_fact_belonging_to_no_graph_is_always_in_scope() {
+            // Schema, projection and vocabulary facts are not import-sourced
+            // and belong to no run — excluding them would leave a scoped run
+            // unable to interpret the data it was given.
+            assert!(in_run_scope(None, Some(&graphs(&["reco-abc-books"]))));
+        }
+
+        #[test]
+        fn a_caller_may_name_a_graph_without_the_engines_prefix() {
+            // `reco-abc-books` is what the caller imported under; the stored id
+            // carries graph-owl's own `graph:import:` prefix. The caller should
+            // not have to know that convention.
+            assert!(in_run_scope(
+                Some(&Sid::dsc("graph:import:reco-abc-books")),
+                Some(&graphs(&["reco-abc-books"]))
+            ));
+        }
+
+        #[test]
+        fn a_prefix_match_is_not_enough_on_its_own() {
+            // `reco-abc` is a prefix of `reco-abc-books` but names no graph.
+            // Matching loosely here would silently widen every run's scope.
+            assert!(!in_run_scope(
+                Some(&Sid::dsc("graph:import:reco-abc-books")),
+                Some(&graphs(&["reco-abc"]))
+            ));
+        }
+
+        #[test]
+        fn an_empty_scope_admits_only_facts_belonging_to_no_graph() {
+            let none_allowed = graphs(&[]);
+
+            assert!(!in_run_scope(
+                Some(&Sid::dsc("graph:import:reco-abc-books")),
+                Some(&none_allowed)
+            ));
+            assert!(in_run_scope(None, Some(&none_allowed)));
+        }
+
+        #[test]
+        fn scope_facts_drops_a_visible_fact_from_an_unnamed_graph() {
+            // The whole point, through the real entry point: authorization says
+            // yes and the run scope still says no.
+            let allowed = graphs(&["reco-abc-books"]);
+
+            let (kept, _) = scope_facts(
+                &[in_graph("graph:import:reco-xyz-books")],
+                &visible(&["a"]),
+                &AccessPredicate::All,
+                100,
+                Some(&allowed),
+            );
+
+            assert!(kept.is_empty(), "{kept:?}");
+        }
+
+        #[test]
+        fn scope_facts_keeps_the_same_fact_when_its_graph_is_named() {
+            let (kept, _) = scope_facts(
+                &[in_graph("graph:import:reco-abc-books")],
+                &visible(&["a"]),
+                &AccessPredicate::All,
+                100,
+                Some(&graphs(&["reco-abc-books"])),
+            );
+
+            assert_eq!(kept.len(), 1, "{kept:?}");
+        }
+    }
+
     #[test]
     fn a_fact_about_a_visible_asset_is_kept() {
         let (kept, truncated) = scope_facts(
@@ -22338,6 +22490,7 @@ mod scope_facts_tests {
             &visible(&["a"]),
             &AccessPredicate::All,
             100,
+            None,
         );
         assert_eq!(kept.len(), 1);
         assert!(!truncated);
@@ -22350,6 +22503,7 @@ mod scope_facts_tests {
             &visible(&["a"]),
             &AccessPredicate::All,
             100,
+            None,
         );
         assert!(kept.is_empty());
     }
@@ -22363,7 +22517,7 @@ mod scope_facts_tests {
         let mut flakes = edge("r1", "a", "secret");
         flakes.push(about("a", "name", FlakeValue::String("visible".into())));
 
-        let (kept, _) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 100, None);
 
         assert_eq!(kept.len(), 1, "only the visible asset's own fact: {kept:?}");
         assert!(
@@ -22380,6 +22534,7 @@ mod scope_facts_tests {
             &visible(&["a", "b"]),
             &AccessPredicate::All,
             100,
+            None,
         );
         assert_eq!(kept.len(), 3, "every flake of the edge: {kept:?}");
     }
@@ -22394,6 +22549,7 @@ mod scope_facts_tests {
             &visible(&["b"]),
             &AccessPredicate::All,
             100,
+            None,
         );
         assert!(kept.is_empty(), "{kept:?}");
     }
@@ -22404,7 +22560,13 @@ mod scope_facts_tests {
     #[test]
     fn an_edge_with_no_endpoints_is_not_assumed_visible() {
         let orphan = vec![about("r1", "relType", FlakeValue::String("feeds".into()))];
-        let (kept, _) = scope_facts(&orphan, &visible(&["a", "b"]), &AccessPredicate::All, 100);
+        let (kept, _) = scope_facts(
+            &orphan,
+            &visible(&["a", "b"]),
+            &AccessPredicate::All,
+            100,
+            None,
+        );
         assert!(kept.is_empty());
     }
 
@@ -22424,7 +22586,7 @@ mod scope_facts_tests {
             FlakeValue::Ref(Sid::new(namespace::SNOMED_CT, "1")),
             1,
         );
-        let (kept, _) = scope_facts(&[direct], &visible(&[]), &AccessPredicate::All, 100);
+        let (kept, _) = scope_facts(&[direct], &visible(&[]), &AccessPredicate::All, 100, None);
         assert_eq!(kept.len(), 1, "{kept:?}");
     }
 
@@ -22447,7 +22609,7 @@ mod scope_facts_tests {
             ),
             about("align:1", "confidence", FlakeValue::Float(1.0)),
         ];
-        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100, None);
         assert_eq!(kept.len(), 3, "every flake of the alignment: {kept:?}");
     }
 
@@ -22471,7 +22633,7 @@ mod scope_facts_tests {
                 FlakeValue::Ref(Sid::dsc("secret")),
             ),
         ];
-        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100, None);
         assert!(kept.is_empty(), "{kept:?}");
     }
 
@@ -22480,7 +22642,8 @@ mod scope_facts_tests {
         let flakes: Vec<Flake> = (0..10)
             .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
             .collect();
-        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4);
+        let (kept, truncated) =
+            scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4, None);
         assert_eq!(kept.len(), 4);
         assert!(truncated, "a truncated answer must never look complete");
     }
@@ -22492,7 +22655,8 @@ mod scope_facts_tests {
         let flakes: Vec<Flake> = (0..4)
             .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
             .collect();
-        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4);
+        let (kept, truncated) =
+            scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4, None);
         assert_eq!(kept.len(), 4);
         assert!(!truncated);
     }
@@ -43266,6 +43430,7 @@ mod finding_rule_declaration_tests {
             similarity: None,
             span: None,
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -43440,6 +43605,7 @@ mod findings_from_rows_tests {
             similarity: None,
             span: None,
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -43783,6 +43949,7 @@ mod obligations_from_rows_tests {
                 "whenMissing": "elapsed", "asOf": "2026-08-01"
             })),
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -46217,6 +46384,7 @@ mod run_rule_tests {
             similarity: None,
             span: None,
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -46311,7 +46479,7 @@ mod run_rule_tests {
             .expect("seed");
 
         let outcome = catalog
-            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch", None)
             .await
             .expect("ok");
 
@@ -46350,7 +46518,7 @@ mod run_rule_tests {
         );
 
         let result = catalog
-            .run_rule(&Principal::system(), "gst", "gst:NoSuchRule")
+            .run_rule(&Principal::system(), "gst", "gst:NoSuchRule", None)
             .await;
 
         assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
@@ -46377,7 +46545,7 @@ mod run_rule_tests {
         );
 
         let result = catalog
-            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch", None)
             .await;
 
         assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
@@ -46397,7 +46565,7 @@ mod run_rule_tests {
         );
 
         let outcome = catalog
-            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch", None)
             .await
             .expect("ok");
 
@@ -46581,6 +46749,7 @@ mod calculate_risk_tests {
                 "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
             })),
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -46820,6 +46989,7 @@ mod near_miss_node_tests {
             similarity: Some(similarity),
             span: None,
             priority: None,
+            requires: Vec::new(),
         }
     }
 
@@ -47052,6 +47222,7 @@ mod near_miss_node_tests {
                 similarity: None,
                 span: None,
                 priority: None,
+                requires: Vec::new(),
             })
             .await
             .expect("declare");

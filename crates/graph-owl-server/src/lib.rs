@@ -9088,7 +9088,9 @@ async fn reconcile_pack(
         .into_iter()
         .collect();
     let graphs = if scope.is_empty() { None } else { Some(&scope) };
-    Ok(Json(catalog.reconcile_pack(&principal, &pack, graphs).await?))
+    Ok(Json(
+        catalog.reconcile_pack(&principal, &pack, graphs).await?,
+    ))
 }
 
 /// A pack's open obligations, due date first — Epic 105 P8's first real

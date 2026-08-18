@@ -565,6 +565,9 @@ export type RuleStatus = "passed" | "flagged" | "notEvaluated";
 export interface RuleOutcome {
   readonly label: string;
   readonly governed_by: string | null;
+  /** The rule's own one-line statement of what it looks for. A label alone
+   *  tells a reviewer nothing. */
+  readonly summary: string | null;
   readonly status: RuleStatus;
   readonly found: number;
   /** Classes or predicates the rule needed and did not find. Non-empty only

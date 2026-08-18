@@ -8,6 +8,7 @@ import {
   type RuleOutcome,
 } from "../lib/api";
 import { formatRupees } from "../lib/format";
+import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
 
 /** The reconciliation result — what a reviewer looks at first.
@@ -32,6 +33,9 @@ export default function ReconcileRoute() {
   const [data, setData] = useState<Reconciliation | null>(null);
   const [failed, setFailed] = useState(false);
   const [filter, setFilter] = useState<Bucket | null>(null);
+  // Filtering the invoice table by rule is how "2 findings" stops being a
+  // dead number: a reviewer clicks it and sees which two.
+  const [ruleFilter, setRuleFilter] = useState<string | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -47,8 +51,8 @@ export default function ReconcileRoute() {
   }, [clientId, periodId]);
 
   const visible = useMemo(
-    () => (data ? (filter ? data.rows.filter((r) => r.bucket === filter) : data.rows) : []),
-    [data, filter],
+    () => (data ? visibleRows(data.rows, filter, ruleFilter) : []),
+    [data, filter, ruleFilter],
   );
 
   if (!clientId || !periodId) {
@@ -113,7 +117,15 @@ export default function ReconcileRoute() {
         })}
       </div>
 
-      <RulePanel outcomes={data.rule_outcomes} unsupported={data.checks_disabled} />
+      <RulePanel
+        outcomes={data.rule_outcomes}
+        unsupported={data.checks_disabled}
+        active={ruleFilter}
+        onPick={(label) => {
+          setRuleFilter((current) => (current === label ? null : label));
+          setFilter(null);
+        }}
+      />
 
       <ItcPositionPanel itc={data.itc} />
 
@@ -122,15 +134,18 @@ export default function ReconcileRoute() {
       <div className="mt-3.5 overflow-hidden rounded-[10px] border border-reco-line bg-white">
         <div className="flex items-center justify-between border-b border-reco-line px-[18px] py-2.5">
           <span className="text-[13px] font-semibold text-reco-t1">
-            {filter ? BUCKET_META[filter].label : "All invoices"}
+            {ruleFilter ?? (filter ? BUCKET_META[filter].label : "All invoices")}
             <span className="ml-2 font-mono text-[11px] font-normal text-reco-t5">
               {visible.length}
             </span>
           </span>
-          {filter && (
+          {(filter || ruleFilter) && (
             <button
               type="button"
-              onClick={() => setFilter(null)}
+              onClick={() => {
+                setFilter(null);
+                setRuleFilter(null);
+              }}
               className="text-[12px] text-reco-accent"
             >
               Show all
@@ -338,9 +353,13 @@ function ItcPositionPanel({ itc }: { readonly itc: Reconciliation["itc"] }) {
 function RulePanel({
   outcomes,
   unsupported,
+  active,
+  onPick,
 }: {
   readonly outcomes: readonly RuleOutcome[];
   readonly unsupported: Record<string, string>;
+  readonly active: string | null;
+  readonly onPick: (label: string) => void;
 }) {
   // Before any reconciliation has run there are no outcomes, but a reviewer
   // still needs to know which checks the uploaded files can support.
@@ -391,6 +410,8 @@ function RulePanel({
       {notEvaluated.length > 0 && (
         <StateBlock
           tone="amber"
+          active={active}
+          onPick={onPick}
           heading="⚠ NOT EVALUATED"
           note="These were not checked. That is not the same as passing."
           outcomes={notEvaluated}
@@ -399,6 +420,8 @@ function RulePanel({
       {flagged.length > 0 && (
         <StateBlock
           tone="red"
+          active={active}
+          onPick={onPick}
           heading="✕ FAILED"
           note="Ran, and found something to answer for."
           outcomes={flagged}
@@ -407,6 +430,8 @@ function RulePanel({
       {passed.length > 0 && (
         <StateBlock
           tone="green"
+          active={active}
+          onPick={onPick}
           heading="✓ PASSED"
           note="Ran against this period's data and found nothing."
           outcomes={passed}
@@ -447,11 +472,15 @@ function StateBlock({
   heading,
   note,
   outcomes,
+  active,
+  onPick,
 }: {
   readonly tone: keyof typeof TONE;
   readonly heading: string;
   readonly note: string;
   readonly outcomes: readonly RuleOutcome[];
+  readonly active: string | null;
+  readonly onPick: (label: string) => void;
 }) {
   const t = TONE[tone];
   return (
@@ -476,7 +505,13 @@ function StateBlock({
       </div>
       <div className="px-4 py-1.5">
         {outcomes.map((o) => (
-          <RuleLine key={o.label} outcome={o} colour={t.text} />
+          <RuleLine
+            key={o.label}
+            outcome={o}
+            colour={t.text}
+            active={active === o.label}
+            onPick={onPick}
+          />
         ))}
       </div>
     </div>
@@ -486,24 +521,56 @@ function StateBlock({
 function RuleLine({
   outcome,
   colour,
+  active,
+  onPick,
 }: {
   readonly outcome: RuleOutcome;
   readonly colour: string;
+  readonly active: boolean;
+  readonly onPick: (label: string) => void;
 }) {
   const missing = outcome.unmet.map((u) => u.split("#").pop()).join(", ");
+  const clickable = outcome.status === "flagged";
+
+  const right =
+    outcome.status === "flagged"
+      ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
+      : outcome.status === "passed"
+        ? "checked, clean"
+        : missing
+          ? `no ${missing} in this period`
+          : "could not run";
+
   return (
-    <div className="grid grid-cols-[1.3fr_0.9fr_1fr] items-baseline gap-3 py-[3px]">
-      <span className="font-mono text-[11.5px] text-reco-t1">{outcome.label}</span>
+    <div
+      className={`grid grid-cols-[1.25fr_150px_110px] items-baseline gap-3 rounded py-[4px] ${
+        active ? "bg-white/70" : ""
+      }`}
+    >
+      <div>
+        <span className="font-mono text-[11.5px] text-reco-t1">{outcome.label}</span>
+        {/* The rule's own words. A label alone tells a reviewer nothing about
+            what was or was not checked. */}
+        {outcome.summary && (
+          <div className="mt-[1px] text-[11px] leading-snug text-reco-t4">{outcome.summary}</div>
+        )}
+      </div>
       <span className="font-mono text-[10.5px] text-reco-t5">{outcome.governed_by ?? ""}</span>
-      <span className="text-[11px]" style={{ color: colour }}>
-        {outcome.status === "flagged"
-          ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
-          : outcome.status === "passed"
-            ? "checked, clean"
-            : missing
-              ? `no ${missing} in this period`
-              : "could not run"}
-      </span>
+      {clickable ? (
+        <button
+          type="button"
+          onClick={() => onPick(outcome.label)}
+          className="text-left text-[11px] underline decoration-dotted underline-offset-2"
+          style={{ color: colour }}
+          title={active ? "Show all invoices" : "Show the invoices behind this"}
+        >
+          {right} {active ? "▾" : "›"}
+        </button>
+      ) : (
+        <span className="text-[11px]" style={{ color: colour }}>
+          {right}
+        </span>
+      )}
     </div>
   );
 }

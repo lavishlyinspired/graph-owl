@@ -391,11 +391,12 @@ async def replace_rule_outcomes(
     )
     for outcome in outcomes:
         await conn.execute(
-            "INSERT INTO rule_outcome (client_id, period_id, label, governed_by, status, found, unmet) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+            "INSERT INTO rule_outcome (client_id, period_id, label, governed_by, summary, status, found, unmet) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
             client_id, period_id,
             outcome.get("label"),
             outcome.get("governedBy"),
+            outcome.get("summary"),
             outcome.get("status", "unknown"),
             int(outcome.get("found") or 0),
             json.dumps(outcome.get("unmet") or []),
@@ -406,7 +407,7 @@ async def list_rule_outcomes(
     conn: asyncpg.Connection, *, client_id: str, period_id: str
 ) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        "SELECT label, governed_by, status, found, unmet, recorded_at FROM rule_outcome "
+        "SELECT label, governed_by, summary, status, found, unmet, recorded_at FROM rule_outcome "
         "WHERE client_id = $1 AND period_id = $2 ORDER BY status, label",
         client_id, period_id,
     )
@@ -414,6 +415,7 @@ async def list_rule_outcomes(
         {
             "label": r["label"],
             "governed_by": r["governed_by"],
+            "summary": r["summary"],
             "status": r["status"],
             "found": r["found"],
             "unmet": json.loads(r["unmet"]),
