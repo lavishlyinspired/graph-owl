@@ -62,6 +62,12 @@ NAMESPACE = "https://graph-owl.dev/packs/gst#"
 #: [gst:Gstr1Invoice] already carries."
 CLASS_BY_KIND = {
     "books": "gst:PurchaseInvoice",
+    # Event kinds. Optional uploads: a firm that cannot export a payment
+    # ledger still gets every other check, and `checks_disabled` names the
+    # rules the absence switches off rather than reporting a clean result the
+    # data never earned.
+    "payments": "gst:PaymentEvent",
+    "grn": "gst:GoodsReceipt",
     "portal": "gst:Gstr2bInvoice",
     "gstr2b": "gst:Gstr2bInvoice",
     "gstr1": "gst:Gstr1Invoice",
@@ -72,6 +78,8 @@ CLASS_BY_KIND = {
 #: when their own uploads land, never in the same call.
 LINK_PREDICATE_BY_KIND = {
     "books": "gst:recordedIn",
+    "payments": "gst:recordedIn",
+    "grn": "gst:recordedIn",
     "portal": "gst:reflectedIn",
     "gstr2b": "gst:reflectedIn",
     "gstr1": "gst:appearsIn",
@@ -94,6 +102,13 @@ KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b", "portal"}
 #: `missing-in-gstr2b.sparql` reads it off the books side,
 #: `missing-in-books.sparql` off the gstr1 side. Never gstr2b.
 KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1"}
+
+#: An event kind is not a document: it has no taxable value or tax heads, only
+#: a time and the invoice it happened to. `gst:onInvoice` points at the *books*
+#: invoice subject, which is what `payment-overdue.sparql` and
+#: `goods-receipt-timing.sparql` join on — not at the canonical subject.
+EVENT_KINDS = {"payments", "grn"}
+EVENT_DATE_FIELD = {"payments": "payment_date", "grn": "receipt_date"}
 
 #: Row field (main.py's FIELD_LABELS keys) -> `gst:` predicate local
 #: name. Matches `packs/gst/pack.toml`'s `[[predicates]]` and
@@ -269,9 +284,16 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     # otherwise three rate lines land on one subject and every finding query
     # compares an invoice total against a single line. See
     # `net_credit_notes` / `aggregate_invoice_lines`.
-    rows = net_credit_notes(aggregate_invoice_lines(rows))
+    # An event kind carries no money, so aggregating and netting it would be
+    # meaningless — and summing two payments on one invoice would destroy the
+    # very thing the 180-day test reads, which is *when* each happened.
+    if kind not in EVENT_KINDS:
+        rows = net_credit_notes(aggregate_invoice_lines(rows))
 
     lines = [f"@prefix gst: <{NAMESPACE}> .", ""]
+
+    if kind in EVENT_KINDS:
+        return _events_to_turtle(rows, kind, lines)
     seen_filings: set[str] = set()
     for row in rows:
         subject = _subject_iri(kind, row)
@@ -331,8 +353,39 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
             triples.append(f"gst:{predicate} {_turtle_string(value)}")
         if kind in KINDS_NEEDING_TAX_AMOUNT:
             triples.append(f"gst:taxAmount {_turtle_string(_combined_tax_amount(row))}")
+
+        # The 2B's own ITC-eligibility flag. `itc-not-available.sparql` filters
+        # `?itcAvailable != "Y"`; with the predicate absent the rule matches
+        # nothing and every credit the portal has blocked reads as claimable.
+        if kind in ("gstr2b", "portal") and _is_present(row.get("itc_available")):
+            triples.append(f"gst:itcAvailable {_turtle_string(row.get('itc_available'))}")
+
+        # The statement this 2B line belongs to. `goods-receipt-timing.sparql`
+        # reaches the period through `?filed gst:reflectedIn ?statement`, so
+        # without it the receipt date has nothing to be compared against.
+        if kind in ("gstr2b", "portal") and _is_present(row.get("period")):
+            statement = f"{NAMESPACE}gstr2b-statement-{quote(str(row.get('period')).strip(), safe='')}"
+            if statement not in seen_filings:
+                seen_filings.add(statement)
+                lines.append(
+                    f"<{statement}>\n    a gst:Gstr2bStatement ;\n"
+                    f"    gst:period {_turtle_string(row.get('period'))} .\n"
+                )
+            triples.append(f"gst:reflectedIn <{statement}>")
+
         body = " ;\n    ".join(triples)
         lines.append(f"<{subject}>\n    {body} .\n")
+
+        # A purchase event anchors `payment-overdue.sparql`: the rule joins on
+        # `gst:PurchaseEvent` and, without one, matches nothing however many
+        # payments are loaded. The invoice date is when the purchase happened.
+        if kind == "books" and _is_present(row.get("invoice_date")):
+            event = f"{NAMESPACE}purchase-event-{subject.rsplit('#', 1)[-1]}"
+            lines.append(
+                f"<{event}>\n    a gst:PurchaseEvent ;\n"
+                f"    gst:onInvoice <{subject}> ;\n"
+                f"    gst:atTime {_turtle_string(_normalize_date(row.get('invoice_date')))} .\n"
+            )
     return "\n".join(lines)
 
 
@@ -609,3 +662,32 @@ def net_credit_notes(rows: list[dict]) -> list[dict]:
         absorbed.add(id(row))
 
     return [r for r in rows if id(r) not in absorbed]
+
+
+def _events_to_turtle(rows: list[dict], kind: str, lines: list[str]) -> str:
+    """One `gst:PaymentEvent` / `gst:GoodsReceipt` per row.
+
+    An event is a time and the invoice it happened to. It points at the
+    **books** invoice subject via `gst:onInvoice`, because that is what
+    `payment-overdue.sparql` and `goods-receipt-timing.sparql` join on —
+    pointing at the canonical subject instead would match nothing, silently.
+
+    A row with no date is skipped rather than emitted dateless: an event with
+    no time cannot answer "how many days apart", and a rule reading one would
+    treat an invoice that *was* paid as never paid — a reversal the client
+    does not owe.
+    """
+    date_field = EVENT_DATE_FIELD[kind]
+    for index, row in enumerate(rows):
+        when = row.get(date_field)
+        if not _is_present(when):
+            continue
+        invoice = _subject_iri("books", row)
+        subject = f"{NAMESPACE}{kind}-{index}-{_subject_iri(kind, row).rsplit('#', 1)[-1]}"
+        triples = [
+            f"a {CLASS_BY_KIND[kind]}",
+            f"gst:onInvoice <{invoice}>",
+            f"gst:atTime {_turtle_string(_normalize_date(when))}",
+        ]
+        lines.append(f"<{subject}>\n    " + " ;\n    ".join(triples) + " .\n")
+    return "\n".join(lines) if len(lines) > 2 else ""

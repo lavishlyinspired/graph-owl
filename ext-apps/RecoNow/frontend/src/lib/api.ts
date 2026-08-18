@@ -545,6 +545,9 @@ export interface ItcPositionBreakdown {
 }
 
 export interface Reconciliation {
+  /** Rule label -> why it matters, for every check the uploaded files cannot
+   *  support. Silence about an unrun check reads like a check that passed. */
+  readonly checks_disabled: Record<string, string>;
   readonly total: number;
   readonly match_rate: number;
   readonly counts: Record<Bucket, number>;

@@ -11,10 +11,14 @@ import {
 } from "../lib/api";
 import type { WorkspaceState } from "../lib/workspace";
 
+/** `optional: true` means the reconciliation runs without it — but some
+ *  statutory checks cannot, and the Reconcile screen names which. */
 const DATASET_KINDS = [
-  { kind: "books", label: "Purchase register" },
-  { kind: "gstr2b", label: "GSTR-2B" },
-  { kind: "gstr1", label: "GSTR-2A / GSTR-1" },
+  { kind: "books", label: "Purchase register", optional: false, enables: "" },
+  { kind: "gstr2b", label: "GSTR-2B", optional: false, enables: "" },
+  { kind: "gstr1", label: "GSTR-2A / GSTR-1", optional: true, enables: "supplier-declaration checks" },
+  { kind: "payments", label: "Payment ledger", optional: true, enables: "Rule 37 — 180-day reversal" },
+  { kind: "grn", label: "Goods receipt (GRN)", optional: true, enables: "s.16(2)(b) — goods received" },
 ] as const;
 
 export default function PipelineRoute() {
@@ -110,8 +114,8 @@ export default function PipelineRoute() {
         <div>
           <h1 className="mb-1 text-[20px] font-bold text-reco-t1">Upload &amp; map</h1>
           <p className="text-[12.5px] text-reco-t4">
-            Three files in, one reconciliation out. Mapping is the only place you tell the system what a column
-            means.
+            Two files in is a reconciliation; the optional three add the statutory checks that need them.
+            Mapping is the only place you tell the system what a column means.
           </p>
         </div>
         <button
@@ -133,7 +137,7 @@ export default function PipelineRoute() {
       <div className="grid grid-cols-[236px_1fr] gap-3.5">
         <div className="rounded-lg border border-reco-line bg-reco-panel py-3">
           <div className="px-4 pb-2 font-mono text-[9px] tracking-[0.14em] text-reco-t5">FILES IN THIS PERIOD</div>
-          {DATASET_KINDS.map(({ kind, label }) => {
+          {DATASET_KINDS.map(({ kind, label, optional, enables }) => {
             const summary = datasets.find((d) => d.kind === kind);
             return (
               <div key={kind} className={`mx-2 mb-0.5 rounded-md px-2.5 py-2 ${activeKind === kind ? "bg-reco-row" : ""}`}>
@@ -142,8 +146,13 @@ export default function PipelineRoute() {
                   {summary?.confirmed && <span className="ml-auto text-[10px] text-reco-ok">✓</span>}
                 </button>
                 <div className="mt-0.5 font-mono text-[9px] text-reco-t5">
-                  {summary ? `${summary.total_rows} rows` : "not uploaded"}
+                  {summary ? `${summary.total_rows} rows` : optional ? "optional" : "not uploaded"}
                 </div>
+                {!summary && enables && (
+                  <div className="mt-0.5 text-[9.5px] leading-snug text-reco-t5">
+                    enables {enables}
+                  </div>
+                )}
                 <label className="mt-1.5 block cursor-pointer text-[11px] text-reco-accent">
                   {summary ? "Replace file" : "Upload file"}
                   <input

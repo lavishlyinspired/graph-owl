@@ -78,12 +78,64 @@ FIELD_LABELS = {
     "cess": "Cess",
     "filed_date": "Filing Date",
     "period": "Return Period",
+    # Optional-kind fields. Present in FIELD_LABELS so the mapping screen can
+    # bind them; absent from REQUIRED_FIELDS so a file without them still
+    # uploads.
+    "payment_date": "Payment Date",
+    "receipt_date": "Goods Receipt Date",
+    "itc_available": "ITC Available",
 }
+
+#: Which finding rules each optional dataset switches on. A firm that cannot
+#: export a payment ledger still gets every other check — but the product must
+#: say what is *not* being checked rather than reporting a clean result the
+#: data never earned. Silence about an unrun check reads exactly like a check
+#: that found nothing.
+CHECKS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "payments": ("gst:PaymentOverdue",),
+    "grn": ("gst:GoodsReceiptTiming",),
+    "gstr1": ("gst:MissingInBooks", "gst:Gstr1NotIn2b", "gst:BooksGstr1Mismatch"),
+}
+
+#: Why a reviewer should care that each is off, in their own terms.
+CHECK_REASONS: dict[str, str] = {
+    "gst:PaymentOverdue": "Rule 37 — credit must be reversed on invoices unpaid for 180 days",
+    "gst:GoodsReceiptTiming": "s.16(2)(b) — no credit before the goods are received",
+    "gst:MissingInBooks": "invoices the supplier declared that the books do not carry",
+    "gst:Gstr1NotIn2b": "declared in GSTR-1 but not yet reached GSTR-2B",
+    "gst:BooksGstr1Mismatch": "the books and the supplier's GSTR-1 disagree",
+}
+
+
+def checks_disabled(uploaded_kinds: set[str]) -> dict[str, str]:
+    """Rule label -> why it matters, for every check the uploaded files cannot
+    support. Empty when nothing is missing."""
+    disabled: dict[str, str] = {}
+    for kind, labels in CHECKS_BY_KIND.items():
+        if kind in uploaded_kinds:
+            continue
+        for label in labels:
+            disabled[label] = CHECK_REASONS.get(label, "")
+    return disabled
 
 REQUIRED_FIELDS = {"invoice_no", "taxable"}
 
 # keyword -> field, ordered so specific terms win
 _FIELD_KEYWORDS = [
+    # Optional-kind fields first: "payment date" and "goods receipt date" both
+    # contain "date", and the generic date keywords below would otherwise claim
+    # the column before the specific rule ever runs. Specific wins, which is
+    # the ordering this whole table depends on.
+    ("payment date", "payment_date"),
+    ("paid on", "payment_date"),
+    ("paid date", "payment_date"),
+    ("goods receipt date", "receipt_date"),
+    ("grn date", "receipt_date"),
+    ("receipt date", "receipt_date"),
+    ("received on", "receipt_date"),
+    ("itc available", "itc_available"),
+    ("itc availability", "itc_available"),
+    ("itc eligible", "itc_available"),
     ("original invoice", "original_invoice_no"),
     ("orig invoice", "original_invoice_no"),
     ("invoice date", "invoice_date"),
@@ -644,7 +696,55 @@ async def list_datasets_route(client_id: str, period_id: str) -> list[dict]:
     ]
 
 
-def _ingest_scoped_to_graphowl(client_id: str, period_id: str, kind: str, dataset: dict, mapping: dict) -> dict:
+#: Month name -> its number. `goods-receipt-timing.sparql` compares
+#: `SUBSTR(?receivedAt, 1, 7)` — an ISO `YYYY-MM` — against the statement's
+#: period, so the period must be in exactly that shape.
+_MONTH_NUMBER = {
+    m: i
+    for i, m in enumerate(
+        ["January", "February", "March", "April", "May", "June",
+         "July", "August", "September", "October", "November", "December"],
+        start=1,
+    )
+}
+
+
+def period_label_to_yyyy_mm(month: str | None, year: int | None) -> str | None:
+    """`("March", 2026)` -> `"2026-03"`, or None when the month is not one.
+
+    None rather than a guess: a wrong period silently mis-dates every
+    goods-receipt comparison, where no period leaves the rule unfired, which
+    a reviewer can see.
+    """
+    number = _MONTH_NUMBER.get(str(month or "").strip().title())
+    if number is None or year is None:
+        return None
+    return f"{int(year):04d}-{number:02d}"
+
+
+def apply_period_fallback(rows: list[dict], period: str | None) -> list[dict]:
+    """Give rows the workspace's period where the file did not state one.
+
+    Real GSTR-2B exports frequently carry no "Return Period" column, and
+    requiring one would leave s.16(2)(b) permanently dark. A period *in* the
+    file is a statement of fact about that file and always wins.
+    """
+    if not period:
+        return rows
+    return [
+        row if _is_present_value(row.get("period")) else {**row, "period": period}
+        for row in rows
+    ]
+
+
+def _is_present_value(value: object) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def _ingest_scoped_to_graphowl(
+    client_id: str, period_id: str, kind: str, dataset: dict, mapping: dict,
+    period_label: str | None = None,
+) -> dict:
     """`_ingest_to_graphowl`'s reasoning (stable source, deleted before
     every re-import) still holds — the source name itself now carries
     client_id and period_id, not just kind. The pre-B0 app served exactly
@@ -660,6 +760,11 @@ def _ingest_scoped_to_graphowl(client_id: str, period_id: str, kind: str, datase
     fully isolating the reconcile step itself needs a graph-owl-side
     scoping mechanism this Python backend cannot add on its own."""
     normalized = _normalize(dataset, mapping)
+    # The 2B statement's period, taken from the workspace when the file does
+    # not carry a "Return Period" column — which real exports usually do not.
+    # Without it there is no statement subject and s.16(2)(b) cannot fire.
+    if kind in ("gstr2b", "portal"):
+        normalized = apply_period_fallback(normalized, period_label)
     turtle = graphowl_client.rows_to_turtle(normalized, kind)
     # Source name must be 1-64 chars of [a-zA-Z0-9_-].  Two UUIDs + prefix
     # blow the limit, so we take the first 12 hex chars of a SHA-256 of the
@@ -705,10 +810,24 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
             status_code=409, detail=f"unconfirmed datasets block reconciliation: {', '.join(unconfirmed)}"
         )
 
+    # The period this workspace is, as `YYYY-MM`, so a 2B file with no
+    # "Return Period" column still gets a statement subject to compare goods
+    # receipts against.
+    async with pool.acquire() as conn:
+        periods = await repo.list_periods(conn, client_id=client_id)
+    this_period = next((p for p in periods if str(p["id"]) == period_id), None)
+    workspace_period = (
+        None if this_period is None
+        else period_label_to_yyyy_mm(this_period["month"], this_period["year"])
+    )
+
     ingested = {}
     for kind, entry in datasets.items():
         try:
-            ingested[kind] = _ingest_scoped_to_graphowl(client_id, period_id, kind, entry["dataset"], entry["mapping"])
+            ingested[kind] = _ingest_scoped_to_graphowl(
+                client_id, period_id, kind, entry["dataset"], entry["mapping"],
+                period_label=workspace_period,
+            )
         except graphowl_client.IngestError as exc:
             ingested[kind] = {"error": str(exc)}
 
@@ -1141,6 +1260,10 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
     position = compute_itc_position(result)
 
     return {
+        # What this reconciliation could *not* check, named beside what it
+        # did. Silence about an unrun check reads exactly like a check that
+        # found nothing, and the difference is a client's money.
+        "checks_disabled": checks_disabled(set(by_kind)),
         "total": result.total,
         "match_rate": result.match_rate,
         "counts": result.counts,

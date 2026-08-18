@@ -107,6 +107,8 @@ export default function ReconcileRoute() {
         })}
       </div>
 
+      <DisabledChecks checks={data.checks_disabled} />
+
       <ItcPositionPanel itc={data.itc} />
 
       <Ladder rows={visible} />
@@ -301,6 +303,33 @@ function ItcPositionPanel({ itc }: { readonly itc: Reconciliation["itc"] }) {
               {formatRupees(itc[c.key])}
             </div>
             <div className="mt-0.5 text-[10.5px] leading-snug text-reco-t5">{c.hint}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+/** What this reconciliation could not check, beside what it did.
+ *
+ *  A check that never ran and a check that found nothing look identical on a
+ *  screen that shows only results. For a statutory test — Rule 37, s.16(2)(b)
+ *  — that difference is a client's money, so the absent ones are named. */
+function DisabledChecks({ checks }: { readonly checks: Record<string, string> }) {
+  const entries = Object.entries(checks);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mb-3.5 rounded-[10px] border border-reco-amber-border bg-reco-amber-bg px-4 py-3.5">
+      <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-amber">
+        NOT CHECKED — {entries.length} RULE{entries.length === 1 ? "" : "S"} NEED FILES THAT ARE NOT UPLOADED
+      </div>
+      <div className="flex flex-col gap-1">
+        {entries.map(([label, reason]) => (
+          <div key={label} className="flex gap-2 text-[11.5px] leading-snug">
+            <span className="font-mono text-reco-t4">{label}</span>
+            <span className="text-reco-t2">{reason}</span>
           </div>
         ))}
       </div>
