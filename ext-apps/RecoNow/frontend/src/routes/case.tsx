@@ -110,6 +110,34 @@ export default function CaseRoute() {
             <p className="text-[12.5px] leading-relaxed text-reco-t2">
               {detail.summary ?? "No summary recorded for this case."}
             </p>
+            {/* The facts themselves, not just how many there are. A case
+                that cites "4 facts" without showing them asks to be trusted;
+                these are what a reviewer defends the number with. */}
+            {detail.evidence.length > 0 && (
+              <div className="mt-3 border-t border-reco-line-2 pt-3">
+                <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">
+                  FACTS CITED
+                </div>
+                <div className="overflow-hidden rounded-md border border-reco-line-2">
+                  {detail.evidence.map((f, i) => (
+                    <div
+                      key={`${f.predicate}-${f.var}-${i}`}
+                      className="grid grid-cols-[150px_90px_1fr] gap-2 border-b border-reco-row px-2.5 py-1.5 last:border-b-0"
+                    >
+                      <span className="font-mono text-[10.5px] text-reco-t4">{f.predicate ?? "—"}</span>
+                      <span className="font-mono text-[10.5px] text-reco-accent">{f.var ?? ""}</span>
+                      <span className="font-mono text-[11px] text-reco-t1">{f.value ?? "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {detail.evidence.length === 0 && detail.evidence_count != null && !detail.graph_reachable && (
+              <div className="mt-3 border-t border-reco-line-2 pt-3 text-[11.5px] text-reco-bad">
+                {detail.evidence_count} fact(s) were cited when this case was
+                raised, but GraphOWL is not reachable, so they cannot be shown.
+              </div>
+            )}
             <div className="mt-3 flex items-center gap-3 border-t border-reco-line-2 pt-3">
               <span className="font-mono text-[10.5px] text-reco-t4">
                 {detail.governed_by ?? "no rule reference recorded"}

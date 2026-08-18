@@ -226,11 +226,24 @@ export function fetchExceptions(clientId: string, periodId: string): Promise<rea
   );
 }
 
+export interface EvidenceFact {
+  readonly predicate: string | null;
+  readonly value: string | null;
+  /** The variable the rule bound this fact to — `claimed` vs `filed` is what
+   *  makes two identical predicates readable as two sides of a comparison. */
+  readonly var: string | null;
+}
+
 export interface CaseDetail extends RegisterRow {
   readonly subject: string | null;
   readonly summary: string | null;
   readonly governed_by: string | null;
   readonly evidence_count: number | null;
+  /** The facts behind this case, read live from graph-owl. Empty when
+   *  graph-owl is unreachable — `graph_reachable` distinguishes that from a
+   *  finding that genuinely cites nothing. */
+  readonly evidence: readonly EvidenceFact[];
+  readonly graph_reachable: boolean;
   readonly group_reason_code: string | null;
   readonly graphowl_url: string;
   readonly prev_id: string | null;

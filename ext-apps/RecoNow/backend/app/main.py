@@ -783,6 +783,34 @@ def _to_float(value: object) -> float | None:
         return None
 
 
+def evidence_for_subject(findings: list, subject: str, reason_code: str | None) -> list[dict]:
+    """The facts one finding rests on, as graph-owl recorded them.
+
+    A case stored only `evidence_count`, so the console could say "4 fact(s)
+    cited" and show none of them. The facts are what make a case defensible —
+    including `gst:citation`, the provision whose cap Rule 36(4) read from the
+    graph — so a reviewer can see the number's basis rather than trust it.
+
+    `reason_code` matters: one subject can carry two findings (INV-MAR-011 is
+    both an AmountMismatch and a TaxHeadMismatch) and returning the wrong
+    one's facts would explain a case with another case's evidence.
+    """
+    for finding in findings:
+        if finding.get("subject") != subject:
+            continue
+        if reason_code is not None and finding.get("label") != reason_code:
+            continue
+        return [
+            {
+                "predicate": e.get("predicate"),
+                "value": e.get("value"),
+                "var": e.get("var"),
+            }
+            for e in finding.get("evidence") or []
+        ]
+    return []
+
+
 def _supplier_names(datasets: dict) -> dict[str, str]:
     """GSTIN → trading name, read from whatever the user uploaded.
 
@@ -1012,6 +1040,16 @@ async def case_detail_route(client_id: str, period_id: str, case_id: str) -> dic
     prev_id = str(group[index - 1]["id"]) if index > 0 else None
     next_id = str(group[index + 1]["id"]) if index < len(group) - 1 else None
 
+    evidence: list[dict] = []
+    graph_reachable = False
+    if case["subject"]:
+        try:
+            findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+            graph_reachable = True
+            evidence = evidence_for_subject(findings, case["subject"], case["reason_code"])
+        except graphowl_client.IngestError:
+            graph_reachable = False
+
     row = _case_row(case)
     row.update(
         {
@@ -1019,6 +1057,14 @@ async def case_detail_route(client_id: str, period_id: str, case_id: str) -> dic
             "summary": case["summary"],
             "governed_by": case["governed_by"],
             "evidence_count": case["evidence_count"],
+            # The facts themselves, read live from graph-owl. Stored counts
+            # let the console say "4 fact(s) cited" and show none of them; a
+            # case that cannot show its evidence is an assertion. Read live
+            # rather than copied at reconcile time so it reflects the graph as
+            # it stands, and degrades to an empty list — with `evidence_count`
+            # still present — when graph-owl is unreachable.
+            "evidence": evidence,
+            "graph_reachable": graph_reachable,
             "group_reason_code": case["reason_code"],
             "graphowl_url": GRAPH_OWL_SERVER,
             "prev_id": prev_id,
