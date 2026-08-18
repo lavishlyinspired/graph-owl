@@ -1,6 +1,16 @@
+import { useEffect, useState } from "react";
 import { ClientSwitcher } from "./ClientSwitcher";
 import { PeriodPicker } from "./PeriodPicker";
 import { strings } from "../lib/strings";
+import { fetchDashboard, fetchGraphOwlStatus, type GraphOwlStatus } from "../lib/api";
+
+/** ₹12,34,567 → "₹12.35L". Indian lakh/crore grouping, because that is how
+ *  the figure is read by the people who read it. */
+function formatCompactRupees(amount: number): string {
+  if (amount >= 10_000_000) return `₹${(amount / 10_000_000).toFixed(2)}Cr`;
+  if (amount >= 100_000) return `₹${(amount / 100_000).toFixed(2)}L`;
+  return `₹${Math.round(amount).toLocaleString("en-IN")}`;
+}
 
 interface TopBarProps {
   readonly clientId: string | null;
@@ -21,6 +31,36 @@ export function TopBar({
   onOpenInbox,
   pendingCount,
 }: TopBarProps) {
+  // Both of these were literals in the mockup — a pack version that was
+  // reported whether or not a pack was installed, and an ITC-at-risk figure
+  // that never changed. A header that states a number is claiming to know it.
+  const [status, setStatus] = useState<GraphOwlStatus | null>(null);
+  const [atRisk, setAtRisk] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchGraphOwlStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+
+  useEffect(() => {
+    if (!clientId || !periodId) {
+      setAtRisk(null);
+      return;
+    }
+    let cancelled = false;
+    fetchDashboard(clientId, periodId)
+      .then((d) => {
+        if (!cancelled) setAtRisk(d.total_exposure);
+      })
+      .catch(() => {
+        if (!cancelled) setAtRisk(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId, periodId]);
+
   return (
     <header className="flex h-14 flex-none items-center gap-4.5 border-b border-reco-line bg-reco-panel px-5">
       <div className="flex items-center gap-2.5">
@@ -48,20 +88,45 @@ export function TopBar({
       </button>
 
       <div className="ml-auto flex items-center gap-3">
-        <div className="flex items-center gap-[7px] rounded-[6px] border border-[#dfe3f2] bg-[#f4f6fb] px-2.5 py-[5px]">
-          <span className="h-[7px] w-[7px] rounded-[2px] bg-reco-accent" />
-          <span className="font-mono text-[10px] tracking-[.04em] text-[#41508f]">
-            GRAPHOWL · GST PACK 1.4.2
+        <div
+          className={`flex items-center gap-[7px] rounded-[6px] border px-2.5 py-[5px] ${
+            status?.reachable
+              ? "border-[#dfe3f2] bg-[#f4f6fb]"
+              : "border-reco-bad-border bg-reco-bad-bg"
+          }`}
+          title={status ? `graph-owl at ${status.server}` : undefined}
+        >
+          <span
+            className={`h-[7px] w-[7px] rounded-[2px] ${
+              status?.reachable ? "bg-reco-accent" : "bg-reco-bad"
+            }`}
+          />
+          <span
+            className={`font-mono text-[10px] tracking-[.04em] ${
+              status?.reachable ? "text-[#41508f]" : "text-reco-bad"
+            }`}
+          >
+            {status === null
+              ? "GRAPHOWL · CHECKING"
+              : !status.reachable
+                ? "GRAPHOWL · UNREACHABLE"
+                : status.pack
+                  ? `GRAPHOWL · ${status.pack.id.toUpperCase()} PACK ${status.pack.version}`
+                  : "GRAPHOWL · NO PACK"}
           </span>
         </div>
-        <div className="flex items-center gap-[7px] rounded-[6px] border border-[#f0dcc2] bg-[#fdf3e7] px-[11px] py-[5px]">
-          <span className="font-mono text-[10px] tracking-[.05em] text-[#a86a2c]">
-            ITC AT RISK
-          </span>
-          <span className="font-mono text-[12.5px] font-medium text-[#a13f28]">
-            ₹12.4L
-          </span>
-        </div>
+        {/* Omitted rather than zeroed when there is no period: "₹0 at risk"
+            is a finding, and nothing has been reconciled to support it. */}
+        {atRisk !== null && (
+          <div className="flex items-center gap-[7px] rounded-[6px] border border-[#f0dcc2] bg-[#fdf3e7] px-[11px] py-[5px]">
+            <span className="font-mono text-[10px] tracking-[.05em] text-[#a86a2c]">
+              {strings.itcAtRiskLabel}
+            </span>
+            <span className="font-mono text-[12.5px] font-medium text-[#a13f28]">
+              {formatCompactRupees(atRisk)}
+            </span>
+          </div>
+        )}
         <button
           type="button"
           onClick={onOpenInbox}

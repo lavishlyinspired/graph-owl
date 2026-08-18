@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import GenericScreen from "../components/GenericScreen";
 import { screenConfig } from "../lib/screenConfigs";
-import type { RowData } from "../lib/screenConfigs";
+import type { RowData, KpiItem } from "../lib/screenConfigs";
+import { formatRupees } from "../lib/format";
 import { fetchFollowUps, type FollowUp } from "../lib/api";
 
 export default function FollowupsRoute() {
@@ -30,5 +31,17 @@ export default function FollowupsRoute() {
     ],
   }));
 
-  return <GenericScreen config={screenConfig("followups")} liveRows={tableRows} loading={loading} />;
+
+  // Totals derived from the same rows rendered below, so a KPI cannot
+  // disagree with its own table.
+  const rows_ = rows;
+  const kpis: readonly KpiItem[] = rows_.length
+    ? [
+        { label: "FOLLOW-UPS", value: String(rows_.length), sub: "cases needing contact", color: "#1c1b18" },
+        { label: "SUPPLIERS", value: String(new Set(rows_.map((r) => r.supplier_name ?? "?")).size), sub: "to contact", color: "#41508f" },
+        { label: "EXPOSURE", value: formatRupees(rows_.reduce((s, r) => s + r.exposure, 0)), sub: "recoverable if resolved", color: "#a13f28" },
+      ]
+    : [];
+
+  return <GenericScreen config={screenConfig("followups")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

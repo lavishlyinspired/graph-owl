@@ -162,11 +162,26 @@ export interface DashboardCase {
   readonly status: string;
 }
 
+export interface DashboardDataset {
+  readonly kind: string;
+  readonly name: string;
+  readonly total_rows: number;
+  readonly confirmed: boolean;
+}
+
 export interface Dashboard {
+  readonly period_label: string | null;
   readonly case_count: number;
   readonly total_exposure: number;
   readonly needs_decision: readonly DashboardCase[];
   readonly pending_approvals: number;
+  readonly supplier_count: number;
+  readonly invoice_count: number;
+  /** null when no books file has been uploaded — distinct from 0. */
+  readonly books_total: number | null;
+  readonly clean_total: number | null;
+  readonly datasets: readonly DashboardDataset[];
+  readonly reconciled: boolean;
 }
 
 export function fetchDashboard(clientId: string, periodId: string): Promise<Dashboard> {
@@ -456,4 +471,15 @@ export function fetchEligibility(clientId: string, periodId: string): Promise<re
   return apiFetch<EligibilityRow[]>(
     `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/eligibility`,
   );
+}
+
+export interface GraphOwlStatus {
+  readonly ok: boolean;
+  readonly server: string;
+  readonly reachable: boolean;
+  readonly pack: { readonly id: string; readonly version: string; readonly terms: number } | null;
+}
+
+export function fetchGraphOwlStatus(): Promise<GraphOwlStatus> {
+  return apiFetch<GraphOwlStatus>("/api/graphowl/status");
 }

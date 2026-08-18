@@ -874,6 +874,67 @@ def _case_exposure(case: dict) -> float:
     return abs(books - float(case["portal_amount"]))
 
 
+def _dataset_total(entry: dict | None, field: str, only: set[str] | None = None) -> float | None:
+    """Sum one mapped field across an uploaded file's rows.
+
+    `only` restricts to a set of invoice numbers, which is how the dashboard
+    separates the book value carrying a case from the rest. Returns None when
+    the file or the mapping is absent — "no books uploaded" is a different
+    statement from "₹0 of books", and a dashboard that renders them the same
+    way is lying about one of them.
+    """
+    if entry is None:
+        return None
+    mapping, headers = entry["mapping"], entry["headers"]
+    column = mapping.get(field)
+    if column is None or not (0 <= column < len(headers)):
+        return None
+    invoice_col = mapping.get("invoice_no")
+    invoice_header = (
+        headers[invoice_col] if invoice_col is not None and 0 <= invoice_col < len(headers) else None
+    )
+    header = headers[column]
+    total = 0.0
+    for row in entry["rows"]:
+        if only is not None:
+            if invoice_header is None:
+                return None
+            if str(row.get(invoice_header, "")).strip() not in only:
+                continue
+        try:
+            total += float(row.get(header) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def group_by_exposure(cases: list[dict], field: str, absent: str | None = None) -> list[dict]:
+    """Group cases by one field, totalling with the shared exposure rule.
+
+    Every "cases grouped by X, with a money column" screen goes through here.
+    They were separate SQL aggregations, each free to define exposure its own
+    way, and they did: `COALESCE(portal_amount, books_amount)` turned a case
+    with no portal side into ABS(x - x) = 0, so the screens disagreed with the
+    register about the same cases.
+    """
+    groups: dict[str, list[dict]] = {}
+    for case in cases:
+        value = case.get(field)
+        if value is None:
+            if absent is None:
+                continue
+            value = absent
+        groups.setdefault(value, []).append(case)
+    return sorted(
+        (
+            {"key": key, "case_count": len(members), "exposure": period_exposure(members)}
+            for key, members in groups.items()
+        ),
+        key=lambda r: r["exposure"],
+        reverse=True,
+    )
+
+
 def period_exposure(cases: list[dict]) -> float:
     """Money at risk across a set of cases, counting each invoice once.
 
@@ -929,20 +990,9 @@ async def exceptions_route(client_id: str, period_id: str) -> list[dict]:
     pool = _require_db_pool()
     async with pool.acquire() as conn:
         cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
-    groups: dict[str, list[dict]] = {}
-    for c in cases:
-        key = c["reason_code"] or "unclassified"
-        groups.setdefault(key, []).append(c)
     return [
-        {
-            "reason_code": reason,
-            "count": len(members),
-            # Within one reason code an invoice appears once, but the same
-            # helper is used so a group total can never be computed a
-            # different way from the period total.
-            "total_exposure": period_exposure(members),
-        }
-        for reason, members in sorted(groups.items(), key=lambda kv: period_exposure(kv[1]), reverse=True)
+        {"reason_code": g["key"], "count": g["case_count"], "total_exposure": g["exposure"]}
+        for g in group_by_exposure(cases, "reason_code", absent="unclassified")
     ]
 
 
@@ -1013,6 +1063,10 @@ async def dashboard_route(client_id: str, period_id: str) -> dict:
     async with pool.acquire() as conn:
         cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
         approvals = await repo.list_approvals(conn, client_id=client_id, period_id=period_id, status="pending")
+        datasets = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
+        periods = await repo.list_periods(conn, client_id=client_id)
+
+    period = next((p for p in periods if str(p["id"]) == period_id), None)
 
     scored = sorted(
         (
@@ -1029,13 +1083,42 @@ async def dashboard_route(client_id: str, period_id: str) -> dict:
         reverse=True,
     )
 
+    # Book value of everything uploaded, and how much of it the reconciliation
+    # left unflagged. Both are derived from the same files the reconciliation
+    # read, so "reconciled" here means "in books and not carrying a case" —
+    # stated that way in the response rather than implied by a label.
+    books = next((d for d in datasets if d["kind"] == "books"), None)
+    books_total = _dataset_total(books, "taxable") if books else None
+    flagged_invoices = {c["invoice_no"] for c in cases}
+    books_flagged = _dataset_total(books, "taxable", only=flagged_invoices) if books else None
+    clean_total = (
+        None if books_total is None or books_flagged is None else books_total - books_flagged
+    )
+
     return {
+        "period_label": None if period is None else f"{period['month']} {period['year']}",
         "case_count": len(cases),
         # Must equal the register's total to the rupee — same helper, so they
         # cannot drift apart.
         "total_exposure": period_exposure(cases),
         "needs_decision": scored,
         "pending_approvals": len(approvals),
+        "supplier_count": len({c["supplier_gstin"] for c in cases if c["supplier_gstin"]}),
+        "invoice_count": len(flagged_invoices),
+        # None rather than 0 where no file has been uploaded: "₹0 of books"
+        # and "no books uploaded" are different statements.
+        "books_total": books_total,
+        "clean_total": clean_total,
+        "datasets": [
+            {
+                "kind": d["kind"],
+                "name": d["name"],
+                "total_rows": d["total_rows"],
+                "confirmed": d["confirmed"],
+            }
+            for d in datasets
+        ],
+        "reconciled": len(cases) > 0 or bool(datasets),
     }
 
 
@@ -1181,8 +1264,32 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
 def graphowl_status() -> dict:
     """What Slice 1's background ingestion did for the current upload —
     not part of `overview()`, so existing consumers of that response are
-    unaffected by this integration existing at all."""
-    return {"ok": True, "server": GRAPH_OWL_SERVER, "datasets": SESSION.get("graphowl", {})}
+    unaffected by this integration existing at all.
+
+    Also reports the installed pack and whether graph-owl is reachable at
+    all. The console's header displayed "GST PACK 1.4.2" as a literal, so it
+    claimed a pack version regardless of what was installed — and claimed one
+    even when graph-owl was unreachable, which is precisely when a user needs
+    to know it is not.
+    """
+    pack: dict | None = None
+    reachable = False
+    try:
+        installed = graphowl_client.list_packs(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        reachable = True
+        gst = next((p for p in installed if p.get("packId") == graphowl_client.PACK_ID), None)
+        if gst is not None:
+            pack = {"id": gst.get("packId"), "version": gst.get("version"), "terms": gst.get("termCount")}
+    except graphowl_client.IngestError:
+        reachable = False
+
+    return {
+        "ok": True,
+        "server": GRAPH_OWL_SERVER,
+        "reachable": reachable,
+        "pack": pack,
+        "datasets": SESSION.get("graphowl", {}),
+    }
 
 
 @app.post("/api/mapping")
@@ -1465,27 +1572,36 @@ def _template_report(stats: dict, classifications: list[dict], period: dict) -> 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/suppliers")
 async def list_suppliers(client_id: str, period_id: str):
+    # Grouped in Python over `period_exposure` rather than in SQL. The SQL
+    # here read `COALESCE(portal_amount, books_amount)`, so a case with no
+    # portal side became ABS(x - x) = 0 — and a supplier who filed nothing at
+    # all was reported as the one costing nothing, which is exactly backwards.
+    # Sharing the helper is what stops two screens defining "exposure"
+    # differently; see `period_exposure`.
     pool = _require_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT 
-                supplier_gstin,
-                supplier_name,
-                COUNT(*) as case_count,
-                COALESCE(SUM(
-                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
-                ), 0) as total_exposure,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count
-            FROM case_record
-            WHERE client_id = $1 AND period_id = $2
-              AND supplier_gstin IS NOT NULL
-            GROUP BY supplier_gstin, supplier_name
-            ORDER BY total_exposure DESC
-            """,
-            client_id,
-            period_id,
-        )
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+
+    groups: dict[tuple[str, str | None], list[dict]] = {}
+    for case in cases:
+        if case["supplier_gstin"] is None:
+            continue
+        groups.setdefault((case["supplier_gstin"], case["supplier_name"]), []).append(case)
+
+    rows = sorted(
+        (
+            {
+                "supplier_gstin": gstin,
+                "supplier_name": name,
+                "case_count": len(members),
+                "total_exposure": period_exposure(members),
+                "pending_count": sum(1 for m in members if m["status"] == "pending"),
+            }
+            for (gstin, name), members in groups.items()
+        ),
+        key=lambda r: r["total_exposure"],
+        reverse=True,
+    )
     return [
         {
             "gstin": r["supplier_gstin"],
@@ -1600,32 +1716,14 @@ async def list_followups(client_id: str, period_id: str):
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/authority")
 async def authority(client_id: str, period_id: str):
+    """Cases grouped by the provision that governs them — `gst:Rule36-4`,
+    `gst:Section16-2-aa` — as graph-owl's own rules report it."""
     pool = _require_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT 
-                governed_by,
-                COUNT(*) as count,
-                COALESCE(SUM(
-                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
-                ), 0) as exposure
-            FROM case_record
-            WHERE client_id = $1 AND period_id = $2
-              AND governed_by IS NOT NULL
-            GROUP BY governed_by
-            ORDER BY exposure DESC
-            """,
-            client_id,
-            period_id,
-        )
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
     return [
-        {
-            "authority": r["governed_by"],
-            "case_count": r["count"],
-            "exposure": float(r["exposure"]),
-        }
-        for r in rows
+        {"authority": g["key"], "case_count": g["case_count"], "exposure": g["exposure"]}
+        for g in group_by_exposure(cases, "governed_by")
     ]
 
 
@@ -1633,29 +1731,10 @@ async def authority(client_id: str, period_id: str):
 async def obligations(client_id: str, period_id: str):
     pool = _require_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT 
-                reason_code,
-                COUNT(*) as count,
-                COALESCE(SUM(
-                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
-                ), 0) as exposure
-            FROM case_record
-            WHERE client_id = $1 AND period_id = $2
-            GROUP BY reason_code
-            ORDER BY count DESC
-            """,
-            client_id,
-            period_id,
-        )
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
     return [
-        {
-            "obligation": r["reason_code"] or "Unspecified",
-            "case_count": r["count"],
-            "exposure": float(r["exposure"]),
-        }
-        for r in rows
+        {"obligation": g["key"], "case_count": g["case_count"], "exposure": g["exposure"]}
+        for g in group_by_exposure(cases, "reason_code", absent="Unspecified")
     ]
 
 

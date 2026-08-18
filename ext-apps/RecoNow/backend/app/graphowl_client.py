@@ -425,7 +425,37 @@ def list_findings(server: str, token: str | None = None) -> list:
         raise IngestError(f"GET {url} timed out") from timeout
 
 
+def list_packs(server: str, token: str | None = None) -> list:
+    """`GET /ontology-packs` — which packs graph-owl actually has installed.
+
+    The console header used to state a pack version as a literal string, so
+    it reported one whether or not a pack was installed and whether or not
+    graph-owl was reachable. Reading it lets the header say what is true,
+    including "not reachable".
+
+    # Raises
+
+    `IngestError` if the server refuses or is unreachable.
+    """
+    base = server.rstrip("/")
+    url = f"{base}/ontology-packs"
+    request = urllib.request.Request(url, method="GET")
+    if token:
+        request.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else []
+    except urllib.error.HTTPError as refused:
+        detail = refused.read().decode("utf-8", errors="replace")
+        raise IngestError(f"GET {url} failed: HTTP {refused.code} {detail}") from refused
+    except urllib.error.URLError as unreachable:
+        raise IngestError(f"GET {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError as timeout:
+        raise IngestError(f"GET {url} timed out") from timeout
+
+
 __all__ = [
     "IngestError", "PACK_ID", "PREDICATES", "delete_document", "import_document",
-    "list_findings", "rows_to_turtle",
+    "list_findings", "list_packs", "rows_to_turtle",
 ]
