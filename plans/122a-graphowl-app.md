@@ -319,7 +319,51 @@ needs both the positive and negative case.
 also the clearest instance of `00h`'s claim that separate Glossary,
 Classification and Domain applications are one tree-plus-detail pattern.
 
-**`A7.api`** — the SKOS completion, in this order:
+**Shipped, 2026-08-18**: 5 of 8 tabs, fully real, against the substantial
+glossary/term backend that already existed (glossary + term CRUD, SKOS
+relations broader/narrower/related/exactMatch/closeMatch with real
+add/delete, the real `TermStatus` workflow draft→inReview→approved→
+deprecated via `/glossary-terms/{id}/transitions`, reviewers, usage, and
+`/sparql`) — none of it needed the SKOS-completion backend below.
+- **Build**: tree + detail, `vocabularyTree.ts` and its 10-test suite
+  ported verbatim from `ui/src/features/vocabulary/` (poly-hierarchy,
+  cycle-guarded); relations fetched per-term (no bulk endpoint exists) to
+  populate it. Add/remove relation, create/delete term, all real.
+- **Glossary**: "candidates → promote" maps onto the real term lifecycle,
+  not a new concept — draft/inReview terms with a "submit for review" /
+  "promote to approved" action. Found live: approval genuinely requires an
+  assigned reviewer first (`set_term_reviewers` is a real precondition,
+  not a bug) — added a reviewer-assignment control and real error surfacing
+  after hitting the 400 in manual verification.
+- **Business view**: approved terms only, name + definition, nothing else.
+- **Graph**: real bubble layout (`vocabularyGraph.ts`, 8 tests) — a plain
+  SVG radial layout, not a new graph library (G6 is already the one
+  bundle-budget exception; a second heavy dependency for a term-relation
+  view isn't justified). "Connect two concepts" calls the real add-relation
+  endpoint.
+- **SPARQL**: query box + results table against the real `/sparql`
+  endpoint. NL-to-SPARQL generation is out of scope per the AC itself
+  (deferred to A7b).
+
+All live-verified against a real Postgres-backed server: created a
+glossary and two terms, built a real poly-hierarchy relation, watched the
+tree nest correctly, ran the full submit-for-review → assign-reviewer →
+promote cycle, saw the bubble graph render the real edge, and ran a real
+SPARQL query.
+
+**`A7.api` — NOT shipped, needs its own plan** (same treatment as A6/A8/A9).
+Three tabs stay honestly-labeled placeholders because the SKOS completion
+they depend on doesn't exist: **Proposals** (candidate staging — a
+system-suggested altLabel/concept with a match score, a different concept
+from the real term-status workflow Glossary already uses), **Validate**
+(qSKOS checks — no check set seeded, no `skos-shapes.ttl`), **Export**
+(RDF serialization — Turtle/JSON-LD/RDF-XML/N-Triples). Items 1, 2 and 6
+below (`hiddenLabel`, `ConceptScheme`, SKOS-XL) are smaller, additive gaps
+on the term model that block no tab — worth doing whenever the sub-plan is
+written, not gating anything shipped today.
+
+**`A7.api` original scope, preserved for the sub-plan — the SKOS
+completion, in this order:**
 1. `hiddenLabel` + per-label language tags on glossary terms.
 2. `skos:ConceptScheme` with Dublin Core scheme metadata.
 3. Vocabulary-scoped export (Turtle / JSON-LD / RDF-XML / N-Triples) with

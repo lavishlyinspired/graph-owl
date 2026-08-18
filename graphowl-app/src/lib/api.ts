@@ -136,6 +136,30 @@ async function apiDelete(path: string): Promise<void> {
   }
 }
 
+async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`${path} responded ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`${path} responded ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
 export type AssetKind = "service" | "database" | "schema" | "table" | "column";
 
 export interface GraphNode {
@@ -719,4 +743,131 @@ export function runPostgresConnector(body: {
   readonly includeSchemas?: readonly string[];
 }): Promise<ConnectorRun> {
   return apiPost<ConnectorRun>("/connectors/postgres/runs", body);
+}
+
+// ---- Vocabulary Studio (Plan 122a A7) ----
+
+export interface Glossary {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly fullyQualifiedName: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export function fetchGlossaries(): Promise<readonly Glossary[]> {
+  return apiFetch<readonly Glossary[]>("/glossaries");
+}
+
+export function createGlossary(name: string, description?: string): Promise<Glossary> {
+  return apiPost<Glossary>("/glossaries", { name, description });
+}
+
+export function deleteGlossary(id: string, recursive = false): Promise<void> {
+  return apiDelete(`/glossaries/${encodeURIComponent(id)}${recursive ? "?recursive=true" : ""}`);
+}
+
+export type TermStatus = "draft" | "inReview" | "approved" | "deprecated";
+
+export interface GlossaryTerm {
+  readonly id: string;
+  readonly glossaryId: string;
+  readonly name: string;
+  readonly fullyQualifiedName: string;
+  readonly definition: string;
+  readonly status: TermStatus;
+  readonly synonyms: readonly string[];
+  readonly abbreviations: readonly string[];
+  readonly version: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export function fetchGlossaryTerms(glossaryId: string): Promise<readonly GlossaryTerm[]> {
+  return apiFetch<readonly GlossaryTerm[]>(`/glossaries/${encodeURIComponent(glossaryId)}/terms`);
+}
+
+export function fetchGlossaryTerm(id: string): Promise<GlossaryTerm> {
+  return apiFetch<GlossaryTerm>(`/glossary-terms/${encodeURIComponent(id)}`);
+}
+
+export function createGlossaryTerm(
+  glossaryId: string,
+  body: { readonly name: string; readonly definition?: string; readonly synonyms?: readonly string[]; readonly abbreviations?: readonly string[] },
+): Promise<GlossaryTerm> {
+  return apiPost<GlossaryTerm>(`/glossaries/${encodeURIComponent(glossaryId)}/terms`, body);
+}
+
+export function updateGlossaryTerm(
+  id: string,
+  body: { readonly definition?: string; readonly synonyms?: readonly string[]; readonly abbreviations?: readonly string[] },
+): Promise<GlossaryTerm> {
+  return apiPatch<GlossaryTerm>(`/glossary-terms/${encodeURIComponent(id)}`, body);
+}
+
+export function deleteGlossaryTerm(id: string): Promise<void> {
+  return apiDelete(`/glossary-terms/${encodeURIComponent(id)}`);
+}
+
+export function searchGlossaryTerms(q: string): Promise<readonly GlossaryTerm[]> {
+  return apiFetch<readonly GlossaryTerm[]>(`/glossary-terms/search?q=${encodeURIComponent(q)}`);
+}
+
+export type SkosRelationKind = "broader" | "narrower" | "related" | "exactMatch" | "closeMatch";
+
+export interface SkosRelation {
+  readonly kind: SkosRelationKind;
+  readonly target: string;
+}
+
+export function fetchTermRelations(id: string): Promise<readonly SkosRelation[]> {
+  return apiFetch<readonly SkosRelation[]>(`/glossary-terms/${encodeURIComponent(id)}/relations`);
+}
+
+export function addTermRelation(id: string, kind: SkosRelationKind, target: string): Promise<SkosRelation> {
+  return apiPost<SkosRelation>(`/glossary-terms/${encodeURIComponent(id)}/relations`, { kind, target });
+}
+
+export function deleteTermRelation(id: string, kind: SkosRelationKind, target: string): Promise<void> {
+  const params = new URLSearchParams({ kind, target });
+  return apiDelete(`/glossary-terms/${encodeURIComponent(id)}/relations?${params.toString()}`);
+}
+
+export function transitionTerm(
+  id: string,
+  to: TermStatus,
+  reason?: string,
+  successorTermId?: string,
+): Promise<GlossaryTerm> {
+  return apiPost<GlossaryTerm>(`/glossary-terms/${encodeURIComponent(id)}/transitions`, {
+    to,
+    reason,
+    successorTermId,
+  });
+}
+
+export function fetchTermUsage(id: string): Promise<{ readonly data: readonly string[]; readonly paging: { readonly after: string | null } }> {
+  return apiFetch(`/glossary-terms/${encodeURIComponent(id)}/usage`);
+}
+
+export function fetchTermReviewers(id: string): Promise<{ readonly reviewers: readonly string[] }> {
+  return apiFetch(`/glossary-terms/${encodeURIComponent(id)}/reviewers`);
+}
+
+export function setTermReviewers(id: string, reviewers: readonly string[]): Promise<{ readonly reviewers: readonly string[] }> {
+  return apiPut(`/glossary-terms/${encodeURIComponent(id)}/reviewers`, { reviewers });
+}
+
+export interface SparqlResult {
+  readonly rows: readonly Record<string, string>[];
+  readonly factsScanned: number;
+  readonly truncated: boolean;
+  readonly asOf: number | null;
+  readonly plan: readonly unknown[];
+  readonly variables: readonly string[];
+}
+
+export function runSparql(query: string, asOf?: string): Promise<SparqlResult> {
+  return apiPost<SparqlResult>("/sparql", { query, asOf });
 }
