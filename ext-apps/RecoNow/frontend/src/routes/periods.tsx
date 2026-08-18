@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function PeriodsRoute() {
-  return <NotYetBuilt title="Periods" slice="B4" />;
+  return <GenericScreen config={screenConfig("periods")} />;
 }

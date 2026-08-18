@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function QueueRoute() {
-  return <NotYetBuilt title="Review queue" slice="B7" />;
+  return <GenericScreen config={screenConfig("queue")} />;
 }

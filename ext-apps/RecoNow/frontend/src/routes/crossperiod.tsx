@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
-export default function CrossperiodRoute() {
-  return <NotYetBuilt title="Cross-period" slice="B4" />;
+export default function CrossPeriodRoute() {
+  return <GenericScreen config={screenConfig("crossperiod")} />;
 }

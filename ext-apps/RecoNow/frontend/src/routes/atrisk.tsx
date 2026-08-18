@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
-export default function AtriskRoute() {
-  return <NotYetBuilt title="ITC at risk" slice="B5" />;
+export default function AtRiskRoute() {
+  return <GenericScreen config={screenConfig("atrisk")} />;
 }

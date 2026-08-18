@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function DeliverablesRoute() {
-  return <NotYetBuilt title="Deliverables" slice="B9" />;
+  return <GenericScreen config={screenConfig("deliverables")} />;
 }

@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function RiskRoute() {
-  return <NotYetBuilt title="Supplier risk" slice="B6" />;
+  return <GenericScreen config={screenConfig("risk")} />;
 }

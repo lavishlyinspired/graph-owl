@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function ItcRoute() {
-  return <NotYetBuilt title="ITC position" slice="B5" />;
+  return <GenericScreen config={screenConfig("itc")} />;
 }

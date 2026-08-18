@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function ObligationsRoute() {
-  return <NotYetBuilt title="Obligations" slice="B6" />;
+  return <GenericScreen config={screenConfig("obligations")} />;
 }

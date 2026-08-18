@@ -47,11 +47,25 @@ export function TopBar({
         </span>
       </button>
 
-      <div className="ml-auto flex items-center gap-3.5">
+      <div className="ml-auto flex items-center gap-3">
+        <div className="flex items-center gap-[7px] rounded-[6px] border border-[#dfe3f2] bg-[#f4f6fb] px-2.5 py-[5px]">
+          <span className="h-[7px] w-[7px] rounded-[2px] bg-reco-accent" />
+          <span className="font-mono text-[10px] tracking-[.04em] text-[#41508f]">
+            GRAPHOWL · GST PACK 1.4.2
+          </span>
+        </div>
+        <div className="flex items-center gap-[7px] rounded-[6px] border border-[#f0dcc2] bg-[#fdf3e7] px-[11px] py-[5px]">
+          <span className="font-mono text-[10px] tracking-[.05em] text-[#a86a2c]">
+            ITC AT RISK
+          </span>
+          <span className="font-mono text-[12.5px] font-medium text-[#a13f28]">
+            ₹12.4L
+          </span>
+        </div>
         <button
           type="button"
           onClick={onOpenInbox}
-          className="relative flex items-center gap-1.5 rounded-md border border-reco-line px-2.5 py-1.5 hover:border-reco-line-3"
+          className="relative flex items-center gap-[7px] rounded-[6px] border border-reco-line px-2.5 py-[5px] hover:border-reco-line-3"
         >
           <span className="text-[12px] text-reco-t4">⚑</span>
           <span className="text-[11.5px] text-reco-t2">{strings.inboxTitle}</span>

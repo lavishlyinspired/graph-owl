@@ -1,5 +1,6 @@
-import { NotYetBuilt } from "./NotYetBuilt";
+import GenericScreen from "../components/GenericScreen";
+import { screenConfig } from "../lib/screenConfigs";
 
 export default function MappingsRoute() {
-  return <NotYetBuilt title="Mappings" slice="B10" />;
+  return <GenericScreen config={screenConfig("mappings")} />;
 }

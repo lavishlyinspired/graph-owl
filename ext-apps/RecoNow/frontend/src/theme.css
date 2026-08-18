@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 
 /* Tokens lifted directly from the delivered mockup's own inline styles
@@ -7,8 +8,6 @@
  * different design languages" — this is not graphowl-app's tokens
  * reused, it is Reco's own, read straight off the mockup's own hex
  * values rather than approximated. */
-
-@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
 :root {
   --reco-bg: #f4f2ee;
