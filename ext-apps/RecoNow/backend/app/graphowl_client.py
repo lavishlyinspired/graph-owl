@@ -263,6 +263,14 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     if not rows:
         return ""
 
+    # A GST return is line-structured; a reconciliation is invoice-level.
+    # Credit and debit notes are applied first (a netted invoice is what the
+    # portal actually reports), then a document's rate lines are summed —
+    # otherwise three rate lines land on one subject and every finding query
+    # compares an invoice total against a single line. See
+    # `net_credit_notes` / `aggregate_invoice_lines`.
+    rows = net_credit_notes(aggregate_invoice_lines(rows))
+
     lines = [f"@prefix gst: <{NAMESPACE}> .", ""]
     seen_filings: set[str] = set()
     for row in rows:
@@ -459,3 +467,139 @@ __all__ = [
     "IngestError", "PACK_ID", "PREDICATES", "delete_document", "import_document",
     "list_findings", "list_packs", "rows_to_turtle",
 ]
+
+
+# --- Invoice-level aggregation -------------------------------------------
+#
+# A real GST return is line-structured: GSTR-2B carries one row per rate slab
+# per invoice, so a 5%/12%/18% invoice arrives as three rows. Reconciliation
+# is invoice-level — the books total is compared against the *invoice*, not
+# against one of its rate lines — so the lines are summed before they become
+# graph subjects.
+#
+# Doing it here rather than in SPARQL is deliberate: no rule in packs/gst uses
+# SUM or GROUP BY, and adding aggregation to thirteen queries would put the
+# same arithmetic in thirteen places. One invoice subject carrying the summed
+# value keeps every rule reading what it already reads.
+
+#: Fields summed across the lines of one document. Everything else is carried
+#: from the first line, because a rate line does not change who issued the
+#: invoice or when.
+_SUMMED_FIELDS = ("taxable", "igst", "cgst", "sgst", "cess")
+
+#: How a portal or an ERP spells a credit note. Compared case-insensitively
+#: against the stripped value, so "Credit Note" and "CR" both land.
+_CREDIT_NOTE_MARKERS = ("C", "CR", "CN", "CREDIT", "CREDITNOTE", "CREDIT NOTE")
+_DEBIT_NOTE_MARKERS = ("D", "DR", "DN", "DEBIT", "DEBITNOTE", "DEBIT NOTE")
+
+
+def _amount(value: object) -> Decimal:
+    """A blank cell, a None, or unparseable text all mean "nothing here",
+    which sums as zero. A wrong number would be worse than an absent one."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return Decimal(0)
+    if isinstance(value, float) and math.isnan(value):
+        return Decimal(0)
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal(0)
+
+
+def _document_key(row: dict) -> tuple[str, str]:
+    """Two rows are the same document by supplier **and** normalised invoice
+    number. Supplier is part of the key because two suppliers reuse an invoice
+    number constantly, and merging them would claim one supplier's credit
+    against the other's invoice."""
+    return (
+        str(row.get("supplier_gstin") or "").strip().upper(),
+        normalize_invoice_no(row.get("invoice_no")),
+    )
+
+
+def aggregate_invoice_lines(rows: list[dict]) -> list[dict]:
+    """Collapse a document's rate lines into one row, summing the tax heads.
+
+    Order is preserved on first appearance, so a reviewer reading the file and
+    the screen side by side sees the same sequence.
+    """
+    grouped: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = _document_key(row)
+        existing = grouped.get(key)
+        if existing is None:
+            merged = dict(row)
+            for field in _SUMMED_FIELDS:
+                merged[field] = _amount(row.get(field))
+            grouped[key] = merged
+            continue
+        for field in _SUMMED_FIELDS:
+            existing[field] = _amount(existing.get(field)) + _amount(row.get(field))
+        # A later line may carry a value the first one left blank.
+        for field, value in row.items():
+            if field in _SUMMED_FIELDS:
+                continue
+            if not _is_present(existing.get(field)) and _is_present(value):
+                existing[field] = value
+    return list(grouped.values())
+
+
+def _note_kind(row: dict) -> str | None:
+    """`"credit"`, `"debit"`, or None for an ordinary invoice."""
+    raw = str(row.get("note_type") or "").strip().upper()
+    if not raw:
+        return None
+    if raw in _CREDIT_NOTE_MARKERS:
+        return "credit"
+    if raw in _DEBIT_NOTE_MARKERS:
+        return "debit"
+    return None
+
+
+def net_credit_notes(rows: list[dict]) -> list[dict]:
+    """Apply credit and debit notes to the invoices they amend (s.34).
+
+    A supplier who issues a Rs 10,000 credit note against a Rs 1,00,000
+    invoice reports Rs 90,000 on the portal. Comparing the original against
+    that raises a Rs 10,000 mismatch that is not one.
+
+    **Expects one row per document** — run `aggregate_invoice_lines` first.
+    An earlier version of this keyed a dict over its own input to find note
+    targets, which silently kept only the *last* of a multi-rate invoice's
+    lines and discarded the rest before they could ever be summed. The bug was
+    invisible in the output shape: one subject, one value, plausibly wrong.
+
+    Two cases are deliberately *not* netted, and are returned as their own rows
+    for a human instead of being silently absorbed:
+
+    - a note naming an invoice absent from this file — the original is
+      probably in another period, and dropping the note would hide a real
+      document from the cross-period rules;
+    - a note larger than the invoice it names — either the data is wrong or
+      the original is elsewhere, and clamping at zero would state a position
+      nobody computed.
+    """
+    targets: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if _note_kind(row) is None:
+            targets.setdefault(_document_key(row), row)
+
+    absorbed: set[int] = set()
+    for row in rows:
+        kind = _note_kind(row)
+        if kind is None:
+            continue
+        target = targets.get((
+            str(row.get("supplier_gstin") or "").strip().upper(),
+            normalize_invoice_no(row.get("original_invoice_no")),
+        ))
+        if target is None:
+            continue
+        if kind == "credit" and _amount(row.get("taxable")) > _amount(target.get("taxable")):
+            continue  # over-large: surfaced for a human, not applied
+        sign = Decimal(-1) if kind == "credit" else Decimal(1)
+        for field in _SUMMED_FIELDS:
+            target[field] = _amount(target.get(field)) + sign * _amount(row.get(field))
+        absorbed.add(id(row))
+
+    return [r for r in rows if id(r) not in absorbed]
