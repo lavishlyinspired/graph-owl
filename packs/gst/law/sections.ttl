@@ -31,3 +31,38 @@ gst:Section17-5 rdf:type gst:Section ;
 gst:MatchingPolicy rdf:type gst:Policy ;
     gst:label "Identity matching policy — near-identical GSTIN" ;
     gst:comment "Where two records agree on invoice number and period but their GSTINs differ by what looks like a transposition, the pair is surfaced for a human decision and never merged automatically. An erroneous merge silently attributes one supplier's invoice to another; a missed one only leaves work on the queue." .
+
+# --- Plan 123 Slice H ---------------------------------------------------
+#
+# Each of these is cited by a rule added in Slice H. The comment states what
+# the provision requires in the terms a reviewer reading a finding needs,
+# not a paraphrase of the bare text — a citation nobody can act on is
+# decoration.
+
+gst:Section16-4 rdf:type gst:Section ;
+    gst:label "Section 16(4) — the time limit for taking credit" ;
+    gst:comment "Credit for an invoice may not be taken after the earlier of 30 November following the end of the financial year to which the invoice relates, or the date the annual return for that year is furnished. The deadline is therefore not a fixed date: it moves earlier the moment the annual return is filed. A rule that hardcodes 30 November is wrong for every taxpayer who files GSTR-9 before it, and the direction of that error is the dangerous one — it reports a window still open when it has closed." .
+
+gst:Section34 rdf:type gst:Section ;
+    gst:label "Section 34 — credit and debit notes" ;
+    gst:comment "Where the taxable value or tax charged is found to exceed what was payable, the supplier issues a credit note; where it falls short, a debit note. The recipient must reduce their credit correspondingly. A credit note that the books apply and the portal does not — or the reverse — leaves the two sides disagreeing about an invoice both of them carry, which no plain invoice-to-invoice comparison can explain." .
+
+gst:Rule37 rdf:type gst:Section ;
+    gst:label "Rule 37 — reversal where the supplier is unpaid 180 days" ;
+    gst:comment "The mechanism by which Section 16(2)(d)'s condition is given effect: the credit is added back to output tax liability, and may be reclaimed once payment is made. Reclaimable, not lost — which is why a working paper must not present it beside a Section 17(5) blockage as though the two had the same consequence." .
+
+gst:Rule42 rdf:type gst:Section ;
+    gst:label "Rule 42 — proportionate reversal on inputs and input services" ;
+    gst:comment "Where inputs are used partly for taxable and partly for exempt or non-business purposes, credit is available only in the taxable proportion. The reversal is computed on the period's turnover, so it is a period-level figure rather than a per-invoice one — and a product that reports only per-invoice findings cannot see it at all." .
+
+gst:Rule43 rdf:type gst:Section ;
+    gst:label "Rule 43 — proportionate reversal on capital goods" ;
+    gst:comment "The same principle as Rule 42, applied to capital goods and spread across the useful life prescribed by the rule rather than taken in one period." .
+
+gst:ImsPolicy rdf:type gst:Policy ;
+    gst:label "Invoice Management System — deemed acceptance" ;
+    gst:comment "A record the recipient neither accepts nor rejects before the cut-off is treated as accepted, and its credit flows into GSTR-2B on that basis. Silence is therefore a decision, and it is the one nobody makes deliberately: an unactioned record is the only state in the system whose consequence arrives by default." .
+
+gst:DuplicatePolicy rdf:type gst:Policy ;
+    gst:label "Duplicate claim policy" ;
+    gst:comment "One invoice claimed twice is credit taken twice. It arises without anyone intending it — the same purchase entered under two voucher numbers, or a document re-imported after a correction — and no statutory rule names it, because the statute assumes each supply is claimed once. It is surfaced here as a policy rather than a section for exactly that reason." .

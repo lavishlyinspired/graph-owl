@@ -1,0 +1,40 @@
+# **The same invoice claimed twice** — Plan 123 Slice H.
+#
+# One invoice, two register rows, credit taken on both. No statutory section
+# names this, because the statute assumes each supply is claimed once; it is a
+# policy finding for that reason.
+#
+# It arises without anyone intending it — the same purchase entered under two
+# voucher numbers, a document re-imported after a correction, a branch and
+# head office both booking a shared invoice. That is exactly what makes it
+# worth a rule: nobody is looking for it.
+#
+# **Keyed on (supplier, invoice number), not on the subject IRI.** Two rows
+# that produced the *same* subject are one fact asserted twice and are
+# invisible here by construction — which is correct, because the graph has
+# already merged them. What this finds is two *distinct* subjects claiming one
+# invoice, which is the case a store keyed by subject can never surface.
+#
+# `?a != ?b` alone would report each pair twice, once in each order. `STR(?a) <
+# STR(?b)` picks one ordering and reports the pair once — the same reason
+# every self-join in this pack that could double-count carries one.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?duplicateOf
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
+
+    ?duplicateOf a gst:PurchaseInvoice ;
+                 gst:issuedBy      ?supplier ;
+                 gst:invoiceNumber ?number .
+  }
+
+  FILTER (STR(?invoice) < STR(?duplicateOf))
+}
+ORDER BY ?number

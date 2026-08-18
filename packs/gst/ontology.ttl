@@ -162,6 +162,17 @@ gst:itcReversed4B2   rdf:type gst:Property ; gst:label "Table 4B(2) — reclaima
 gst:itcNet4C         rdf:type gst:Property ; gst:label "Table 4C — net ITC to the credit ledger (4A minus 4B)" .
 gst:itcReclaimed4D1  rdf:type gst:Property ; gst:label "Table 4D(1) — ITC reclaimed that an earlier period reversed" .
 gst:itcUnavailable4D2 rdf:type gst:Property ; gst:label "Table 4D(2) — ITC unavailable by law (s.16(4), place of supply)" .
+
+# Plan 123 Slice H. `claimDeadline` lives on the FilingPeriod rather than in a
+# query because s.16(4)'s date is not fixed: it is the *earlier* of 30 November
+# following the year and the date GSTR-9 was actually furnished, so it moves
+# per taxpayer and per year. A hardcoded date is wrong in the dangerous
+# direction — it reports an open window that has already closed.
+gst:claimDeadline   rdf:type gst:Property ; gst:label "last date credit for this period may be taken (s.16(4))" .
+# Rule 42/43 inputs. Period-level, because the proportion is computed on the
+# period's own turnover and not on any one invoice.
+gst:exemptTurnover  rdf:type gst:Property ; gst:label "exempt and non-business turnover for the period (Rules 42/43)" .
+gst:totalTurnover   rdf:type gst:Property ; gst:label "total turnover for the period (Rules 42/43)" .
 gst:reverseCharge rdf:type gst:Property ; gst:label "reverse-charge flag (as reported in GSTR-2B)" .
 gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .
 

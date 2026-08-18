@@ -1,0 +1,44 @@
+# **A credit note the books applied and the portal does not carry** — s.34,
+# Plan 123 Slice H.
+#
+# The recipient has reduced their credit for a note the supplier has not
+# declared. The direction matters and is the *safe* one to be in — the books
+# claim less than the portal supports — but it still needs surfacing, because
+# it usually means the supplier issued the note outside the return, or issued
+# it against a different invoice, and the two sides will keep disagreeing
+# about the same invoice until someone reconciles the note itself.
+#
+# **The opposite direction is a separate rule and deliberately not merged
+# here.** A note the *portal* carries and the books have not applied means
+# credit already taken that must be given back — a liability, not a
+# discrepancy. Reporting both under one label would put an exposure and a
+# housekeeping item in the same bucket.
+#
+# `noteType` is the register's own field. Absent means an ordinary invoice, so
+# the pattern binds it rather than treating absence as a note.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?noteType ?originalInvoice
+WHERE {
+  GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount ;
+             gst:noteType      ?noteType .
+    ?supplier gst:supplierGstin ?gstin .
+    OPTIONAL { ?invoice gst:originalInvoiceNumber ?originalInvoice . }
+  }
+
+  OPTIONAL {
+    GRAPH ?authority {
+      ?canonical gst:reflectedIn ?filed .
+      ?filed gst:noteType ?portalNote .
+    }
+  }
+
+  FILTER (!BOUND(?portalNote))
+}
+ORDER BY ?number

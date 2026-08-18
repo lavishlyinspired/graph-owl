@@ -169,6 +169,16 @@ name = "itcReclaimed4D1"
 [[predicates]]
 name = "itcUnavailable4D2"
 
+# Plan 123 Slice H.
+[[predicates]]
+name = "claimDeadline"
+
+[[predicates]]
+name = "exemptTurnover"
+
+[[predicates]]
+name = "totalTurnover"
+
 [[predicates]]
 name = "supplierName"
 
@@ -751,6 +761,110 @@ meaning = "Booked against one GSTIN and filed under another registration sharing
 next_action = "Decide which registration the supply actually came from. It changes the place of supply, and therefore which heads the tax belongs under."
 tone = "warning"
 
+# --- Plan 123 Slice H: the checks nothing else in this pack performs -----
+
+[[findings]]
+label = "gst:DuplicateClaim"
+summary = "The same invoice is claimed twice in the purchase register"
+governed_by = "gst:DuplicatePolicy"
+query = "duplicate-claim"
+# The most urgent kind of finding here: credit taken twice is an excess claim,
+# and unlike a mismatch it is entirely the taxpayer's own doing.
+priority = 0
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+]
+
+[[findings]]
+label = "gst:CreditNoteNotInPortal"
+summary = "The books applied a credit note that no GSTR-2B this pack holds carries"
+governed_by = "gst:Section34"
+query = "credit-note-not-in-portal"
+priority = 2
+# Without a note in the register there is nothing to check. Silence would
+# otherwise read as "every note agrees with the portal".
+requires = ["https://graph-owl.dev/packs/gst#noteType"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:noteType", var = "noteType" },
+  { predicate = "gst:originalInvoiceNumber", var = "originalInvoice" },
+]
+
+[[findings]]
+label = "gst:ImsNotActioned"
+summary = "An IMS record left unactioned will be deemed accepted at the cut-off"
+governed_by = "gst:ImsPolicy"
+query = "ims-not-actioned"
+priority = 1
+# A deployment that never ingested IMS data would otherwise report every
+# invoice as about to be deemed accepted — a screen of urgent findings
+# manufactured out of missing data.
+requires = ["https://graph-owl.dev/packs/gst#imsStatus"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:imsStatus", var = "imsStatus" },
+]
+
+[[findings]]
+label = "gst:ReverseChargeContradiction"
+summary = "A reverse-charge invoice the supplier has also declared in GSTR-2B"
+governed_by = "gst:Section16-2-aa"
+query = "reverse-charge-claimed-as-forward"
+priority = 1
+requires = ["https://graph-owl.dev/packs/gst#reverseCharge"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:reverseCharge", var = "reverseCharge" },
+]
+
+[[findings]]
+label = "gst:ItcTimeBarApproaching"
+summary = "Credit for this invoice is still unclaimed and the s.16(4) window is set"
+governed_by = "gst:Section16-4"
+query = "itc-time-bar-approaching"
+priority = 0
+# The deadline is read from the FilingPeriod, never computed here — s.16(4)'s
+# date moves with the annual return's filing date, so a period with no
+# declared deadline cannot be judged rather than assumed to be open.
+requires = ["https://graph-owl.dev/packs/gst#claimDeadline"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:period", var = "period" },
+  { predicate = "gst:claimDeadline", var = "deadline" },
+]
+
+[[findings]]
+label = "gst:ProportionateReversalDue"
+summary = "The period declares exempt turnover, so a Rule 42/43 reversal is due"
+governed_by = "gst:Rule42"
+query = "proportionate-reversal-due"
+priority = 1
+requires = ["https://graph-owl.dev/packs/gst#exemptTurnover"]
+# The only rule in this pack whose subject is a period rather than an invoice.
+# The reversal is computed on the period's turnover split, so there is no one
+# invoice to point at.
+subject = "filingPeriod"
+evidence = [
+  { predicate = "gst:period", var = "period" },
+  { predicate = "gst:exemptTurnover", var = "exemptTurnover" },
+  { predicate = "gst:totalTurnover", var = "totalTurnover" },
+]
+
 # --- GSTR-2A: what the portal has said since the 2B froze — Plan 123 Slice C
 
 [[findings]]
@@ -842,6 +956,36 @@ label = "Claimed but never filed (Section 16(2)(aa))"
 name = "amount-mismatch"
 path = "queries/amount-mismatch.sparql"
 label = "Values differ by more than the cap then in force (Rule 36(4))"
+
+[[queries]]
+name = "duplicate-claim"
+path = "queries/duplicate-claim.sparql"
+label = "One invoice claimed twice (duplicate policy)"
+
+[[queries]]
+name = "credit-note-not-in-portal"
+path = "queries/credit-note-not-in-portal.sparql"
+label = "A credit note the books applied and the portal does not carry (s.34)"
+
+[[queries]]
+name = "ims-not-actioned"
+path = "queries/ims-not-actioned.sparql"
+label = "An IMS record nobody accepted or rejected — deemed accepted at cut-off"
+
+[[queries]]
+name = "reverse-charge-claimed-as-forward"
+path = "queries/reverse-charge-claimed-as-forward.sparql"
+label = "Reverse-charge invoice also declared by the supplier (contradiction)"
+
+[[queries]]
+name = "itc-time-bar-approaching"
+path = "queries/itc-time-bar-approaching.sparql"
+label = "Credit still unclaimed as the s.16(4) window closes"
+
+[[queries]]
+name = "proportionate-reversal-due"
+path = "queries/proportionate-reversal-due.sparql"
+label = "The period declares exempt turnover — Rules 42/43 reversal is due"
 
 [[queries]]
 name = "filed-late-in-gstr2a"
@@ -1058,6 +1202,12 @@ labels = [
   "gst:SupplierNotFiled",
   "gst:Gstr1NotIn2b",
   "gst:FiledLateInGstr2a",
+  "gst:DuplicateClaim",
+  "gst:CreditNoteNotInPortal",
+  "gst:ImsNotActioned",
+  "gst:ReverseChargeContradiction",
+  "gst:ItcTimeBarApproaching",
+  "gst:ProportionateReversalDue",
   "gst:AmendedAfterClaim",
   "gst:MissingInBooks",
   "gst:BooksGstr1Mismatch",

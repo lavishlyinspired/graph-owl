@@ -1,0 +1,41 @@
+# **A reverse-charge invoice claimed as though the supplier had filed it** —
+# Plan 123 Slice H.
+#
+# Under reverse charge the *recipient* pays the tax and takes the credit; the
+# supplier declares no outward tax, so nothing arrives in GSTR-2B and nothing
+# ever will. An RCM invoice sitting in the register with no self-assessment
+# behind it is credit claimed on a liability nobody discharged.
+#
+# **This is the inverse of every "not filed" rule in this pack, and that is
+# the point.** Those rules all *exclude* reverse charge — correctly, because
+# an absent supplier line is expected there. The exclusion means the RCM case
+# falls through every one of them and is checked by none. This rule exists to
+# catch what the exclusions let past.
+#
+# The test is deliberately narrow: an RCM invoice that also appears in a 2B
+# is the contradiction worth reporting, because the supplier has declared
+# forward tax on a supply the recipient is self-assessing. One of the two
+# treatments is wrong and both parties have acted on their own.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?reverseCharge
+WHERE {
+  GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount ;
+             gst:reverseCharge ?reverseCharge .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?authority {
+    ?canonical gst:reflectedIn ?filed .
+    ?filed a gst:Gstr2bInvoice .
+  }
+
+  FILTER (?reverseCharge = "Y")
+}
+ORDER BY ?number

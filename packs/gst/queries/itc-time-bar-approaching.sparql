@@ -1,0 +1,51 @@
+# **Credit still unclaimed as Section 16(4)'s window closes** — Plan 123
+# Slice H.
+#
+# Credit may not be taken after the earlier of 30 November following the
+# financial year, or the date the annual return for that year is furnished.
+#
+# **The deadline is not a fixed date, and this is the trap.** It moves earlier
+# the moment GSTR-9 is filed. A rule that hardcodes 30 November is wrong for
+# every taxpayer who files early, and wrong in the dangerous direction: it
+# reports a window still open when it has already closed, so a preparer
+# leaves credit for later that is already gone.
+#
+# The rule therefore reads the deadline **from the graph** — the same
+# discipline `amount-mismatch.sparql` uses for Rule 36(4)'s cap, and for the
+# same reason: a statutory number that lives in a query is a number nobody can
+# amend without a release.
+#
+# What it reports is an invoice in the register that reached **no** GSTR-2B
+# and whose period's deadline is set. Whether that deadline is near is a
+# judgement the consumer makes with the date in hand; encoding "near" here
+# would bake a threshold into the pack that no provision states.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?period ?deadline
+WHERE {
+  GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount ;
+             gst:belongsToPeriod ?filingPeriod .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?periods {
+    ?filingPeriod a gst:FilingPeriod ;
+                  gst:period      ?period ;
+                  gst:claimDeadline ?deadline .
+  }
+
+  OPTIONAL {
+    GRAPH ?authority {
+      ?canonical gst:reflectedIn ?filed .
+    }
+  }
+
+  FILTER (!BOUND(?filed))
+}
+ORDER BY ?deadline ?number

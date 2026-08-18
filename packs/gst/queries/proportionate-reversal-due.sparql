@@ -1,0 +1,39 @@
+# **Rule 42/43 proportionate reversal, where the period declares exempt
+# turnover** — Plan 123 Slice H.
+#
+# Where inputs serve both taxable and exempt or non-business use, credit is
+# available only in the taxable proportion.
+#
+# **This is a period-level figure, not a per-invoice one**, and that is why a
+# product built entirely from invoice-to-invoice rules cannot see it at all.
+# The reversal is computed on the period's own turnover split, so the rule
+# reports the *period* as its subject — the first rule in this pack to do so.
+#
+# What it does **not** do is compute the reversal. The formula needs exempt
+# turnover, total turnover, common credit and a capital-goods life, and a rule
+# that guessed any of them would put a number into a filed return that nobody
+# derived. It reports that a reversal is **due** and names the figures the
+# period declared; the amount is the preparer's, computed where the inputs are
+# visible.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?filingPeriod ?period ?exemptTurnover ?totalTurnover
+WHERE {
+  GRAPH ?periods {
+    ?filingPeriod a gst:FilingPeriod ;
+                  gst:period          ?period ;
+                  gst:exemptTurnover  ?exemptTurnover ;
+                  gst:totalTurnover   ?totalTurnover .
+  }
+
+  # `xsd:decimal(...)` rather than `> 0`: the register writes these as plain
+  # string literals (`rows_to_turtle` writes every value as a string), and a
+  # string comparison against 0 is either an error or lexicographic — either
+  # way it does not mean "there was exempt turnover". Casting says what is
+  # meant, and a value that will not cast simply does not match rather than
+  # failing the whole query.
+  FILTER (xsd:decimal(?exemptTurnover) > 0)
+}
+ORDER BY ?period

@@ -1,0 +1,31 @@
+# **An IMS record nobody accepted or rejected** — Plan 123 Slice H.
+#
+# Under the Invoice Management System a record the recipient leaves alone
+# before the cut-off is **deemed accepted**, and its credit flows into GSTR-2B
+# on that basis. Silence is therefore a decision, and it is the only one in
+# the system whose consequence arrives by default — nobody makes it
+# deliberately, which is precisely why it needs a rule.
+#
+# **`imsStatus` absent is not the same as pending, and this rule reports
+# only the explicit pending state.** A deployment that never ingested IMS
+# data at all would otherwise have every invoice reported as about to be
+# deemed accepted — a screen full of urgent findings manufactured out of
+# missing data. `requires` handles the absent case at the outcome level, where
+# it belongs: not evaluated, rather than clean or alarming.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?imsStatus
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount ;
+             gst:imsStatus     ?imsStatus .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  FILTER (?imsStatus = "Pending" || ?imsStatus = "pending" || ?imsStatus = "No Action")
+}
+ORDER BY ?number
