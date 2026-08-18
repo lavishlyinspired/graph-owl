@@ -81,6 +81,7 @@ export default function StudioRoute() {
           <select
             value={selectedGlossaryId ?? ""}
             onChange={(e) => setSelectedGlossaryId(e.target.value || null)}
+            aria-label={strings.studioGlossaryPicker}
             className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[12.5px] text-gowl-t1"
           >
             {glossaries.map((g) => (

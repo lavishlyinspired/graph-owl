@@ -138,3 +138,14 @@ debug = false
 [profile.dev-debug]
 inherits = "dev"
 debug = true
+
+[profile.release]
+# Plan 122a A11 / `00f-ui-architecture.md`: the shipped binary is CI-budgeted
+# at 50MB with one console embedded. Cargo's default release profile leaves
+# the symbol table in (`strip = "none"`), which a panic does not need — Rust
+# location info (`file:line`) comes from `#[track_caller]`, baked into the
+# panic message itself, not from symbols. Stripping is the standard,
+# behaviour-preserving lever for a production binary; a debugger session
+# that needs symbols builds `--profile dev-debug` instead, same as the
+# existing debug-info split above.
+strip = true

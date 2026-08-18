@@ -152,12 +152,12 @@ echo "  ${TABLES} tables and views across 5 schemas"
 
 # ---------------------------------------------------------------- frontend
 say "Building the console"
-if [ ! -d "${ROOT}/ui/node_modules" ]; then
+if [ ! -d "${ROOT}/graphowl-app/node_modules" ]; then
   echo "  installing dependencies (first run only)"
-  (cd "${ROOT}/ui" && npm install --silent)
+  (cd "${ROOT}/graphowl-app" && npm install --silent)
 fi
-(cd "${ROOT}/ui" && npm run build >/dev/null)
-echo "  $(du -h "${ROOT}/ui/dist/static/"*.js | awk '{print $1}' | head -1) bundle"
+(cd "${ROOT}/graphowl-app" && npm run build >/dev/null)
+echo "  $(du -h "${ROOT}/graphowl-app/dist/static/"*.js | awk '{print $1}' | head -1) bundle"
 
 # ---------------------------------------------------------------- backend
 say "Building the server"

@@ -44,6 +44,10 @@ BRACED = re.compile(r"\{([^{}]*)\}", re.S)
 FIELD = re.compile(r"^\s*(?:pub )?(\w+_\w+)\s*:", re.M)
 # A per-field rename immediately above it is the sanctioned fix.
 RENAMED = re.compile(r'#\[serde\(rename\s*=\s*"[^"]+"\)\]\s*\n\s*(?:pub )?(\w+_\w+)\s*:')
+# An actual `#[derive(... ToSchema ...)]` attribute — not just the word
+# "ToSchema" anywhere in the preceding text, which a doc comment explaining
+# why the type does *not* derive it (see `RdfEditDryRun`) would also match.
+DERIVES_TO_SCHEMA = re.compile(r"#\[derive\([^)]*\bToSchema\b[^)]*\)\]")
 
 
 def offenders(path: Path) -> list[tuple[str, list[str]]]:
@@ -53,6 +57,11 @@ def offenders(path: Path) -> list[tuple[str, list[str]]]:
         # Only tagged enums: an untagged or externally-tagged one nests its
         # fields under the variant name, where `rename_all` does reach them.
         if "tag =" not in attrs:
+            continue
+        # Only a camelCase wire can have a snake_case/camelCase mismatch at
+        # all — a `rename_all = "snake_case"` enum (pack-config deserializing
+        # types, for instance) has no camelCase wire to disagree with.
+        if "camelCase" not in attrs:
             continue
         renamed = set(RENAMED.findall(body))
         exposed = sorted(
@@ -65,9 +74,9 @@ def offenders(path: Path) -> list[tuple[str, list[str]]]:
         )
         # `rename_all_fields` fixes serde but not utoipa, so it only counts as a
         # fix for a type that does not derive `ToSchema`.
-        if exposed and not (
-            "rename_all_fields" in attrs and "ToSchema" not in source[: source.index(f"pub enum {name}")][-400:]
-        ):
+        preceding = source[: source.index(f"pub enum {name}")]
+        derives_to_schema = bool(DERIVES_TO_SCHEMA.search(preceding[-800:]))
+        if exposed and not ("rename_all_fields" in attrs and not derives_to_schema):
             found.append((name, exposed))
     return found
 

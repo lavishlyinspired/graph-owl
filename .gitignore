@@ -42,6 +42,16 @@
 /ui/test-results/
 /ui/playwright-report/
 
+# `ui/` archived to `_archived/ui/` (Plan 122a A11) — the block above is
+# anchored to `/ui/...` and does not reach the new path, so the same build
+# artifacts need the same ignores repeated here rather than left to surface
+# as untracked noise every time someone runs anything in the archived tree.
+/_archived/ui/node_modules/
+/_archived/ui/dist/
+/_archived/ui/.stryker-tmp/
+/_archived/ui/test-results/
+/_archived/ui/playwright-report/
+
 # graphowl-app/ (Plan 122a): the console rebuild that replaces `ui/`, same
 # reasoning as the `/ui/...` block above. A nested `graphowl-app/.gitignore`
 # was tried first and does not work — this file's own bare `.gitignore`

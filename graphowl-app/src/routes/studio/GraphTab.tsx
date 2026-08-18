@@ -93,6 +93,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           <select
             value={from}
             onChange={(e) => setFrom(e.target.value)}
+            aria-label={strings.graphConnectFrom}
             className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
           >
             <option value="" />
@@ -108,6 +109,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as SkosRelationKind)}
+            aria-label={strings.graphConnectKind}
             className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
           >
             {RELATION_KINDS.map((k) => (
@@ -122,6 +124,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           <select
             value={to}
             onChange={(e) => setTo(e.target.value)}
+            aria-label={strings.graphConnectTo}
             className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
           >
             <option value="" />

@@ -4,13 +4,12 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // Plan 122a A0: during the migration this app is embedded under `/next/`
-  // *alongside* `ui/` at `/` (`crates/graph-owl-ui`'s `router_next()`), so
-  // its own asset references must be prefixed accordingly — otherwise the
-  // browser requests `/static/*.js` at the root and the *old* console's SPA
-  // fallback answers instead. `VITE_BASE` is unset (so `base` defaults to
-  // `/`) for local dev; the embed build sets `VITE_BASE=/next/`. A11 removes
-  // this — the cutover build always uses the default `/`.
+  // Plan 122a A0 embedded this app under `/next/` *alongside* `ui/` at `/`
+  // during the migration, so `VITE_BASE=/next/` prefixed its own asset
+  // references. A11 promoted it to serve `/` directly and archived `ui/`
+  // — `base` is always the default `/` now; `VITE_BASE` is kept as a no-op
+  // override rather than removed outright, in case a future embed prefix
+  // is ever needed again.
   base: process.env.VITE_BASE ?? "/",
   // NOT "assets": /assets/{id} is an API resource namespace, and a bundle at
   // /assets/index-*.js is claimed by that route before the SPA fallback sees

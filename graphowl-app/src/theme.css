@@ -34,8 +34,15 @@
   --gowl-t3: #c2c9d2;
   --gowl-t4: #9aa3ae;
   --gowl-t5: #8b939f;
-  --gowl-t6: #6d7684;
-  --gowl-t7: #5a6472;
+  /* t6/t7 are lightened off the mockup's literal #6d7684/#5a6472 — those
+   * fall to 3.96:1 / 3.03:1 against --gowl-panel-2, below the WCAG AA 4.5:1
+   * floor `00f-ui-architecture.md` states as non-negotiable ("zero axe
+   * violations" — it does not move). Values are the minimum hue-preserving
+   * lightening that clears 4.5:1, found by bisecting HSL lightness against
+   * the WCAG contrast formula; caught by graphowl-app/tests/first-run.spec.ts
+   * (Plan 122a A11) the first time an axe check ran against the real shell. */
+  --gowl-t6: #76808e;
+  --gowl-t7: #738091;
   --gowl-t8: #4d5663;
 
   --gowl-accent: #5cc7d8;
@@ -85,8 +92,10 @@
   --gowl-t3: #3d3a34;
   --gowl-t4: #56524a;
   --gowl-t5: #6b665d;
-  --gowl-t6: #837d73;
-  --gowl-t7: #9a9488;
+  /* Same fix as the dark theme's t6/t7, mirrored: the mockup's literal
+   * #837d73/#9a9488 fall to 4.08:1 / 3.01:1 against white. */
+  --gowl-t6: #7c766c;
+  --gowl-t7: #7c766a;
   --gowl-t8: #a8a196;
 
   --gowl-accent: #0f7f92;

@@ -192,6 +192,7 @@ export default function GovernanceRoute() {
                 <select
                   value={rule.effect}
                   onChange={(e) => updateRule(index, { effect: e.target.value as PolicyEffect })}
+                  aria-label={strings.governanceEffect}
                   className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
                 >
                   {EFFECTS.map((effect) => (
@@ -203,6 +204,7 @@ export default function GovernanceRoute() {
                 <select
                   value={rule.resourceType}
                   onChange={(e) => updateRule(index, { resourceType: e.target.value as ResourceMatcher["type"] })}
+                  aria-label={strings.governanceResourceType}
                   className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
                 >
                   {RESOURCE_TYPES.map((type) => (

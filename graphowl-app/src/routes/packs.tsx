@@ -205,6 +205,7 @@ export default function PacksRoute() {
               <select
                 value={overrideKind}
                 onChange={(e) => setOverrideKind(e.target.value as PackOverrideKind)}
+                aria-label={strings.packsOverrideKind}
                 className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[11px] text-gowl-t1"
               >
                 {OVERRIDE_KINDS.map((kind) => (

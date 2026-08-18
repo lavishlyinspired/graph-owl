@@ -21,7 +21,7 @@ echo "==> regenerating the contract from the code"
 cargo run -q -p graph-owl-server --bin openapi > openapi.json
 
 echo "==> generating a TypeScript client from the contract"
-(cd ui && npx --yes openapi-typescript ../openapi.json -o src/generated/api.d.ts)
+(cd graphowl-app && npx --yes openapi-typescript ../openapi.json -o src/generated/api.d.ts)
 
 echo "==> starting Postgres"
 docker rm -f graph-owl-client-check >/dev/null 2>&1 || true
@@ -43,6 +43,6 @@ SERVER_PID=$!
 until curl -sf http://127.0.0.1:8098/health >/dev/null 2>&1; do sleep 1; done
 
 echo "==> round-tripping through the generated client"
-(cd ui && GRAPH_OWL_BASE_URL=http://127.0.0.1:8098 npx vitest run src/generated/roundtrip.test.ts)
+(cd graphowl-app && GRAPH_OWL_BASE_URL=http://127.0.0.1:8098 npx vitest run src/generated/roundtrip.test.ts)
 
 echo "==> ok: the generated client round-trips against a live service"

@@ -6,12 +6,10 @@
 //! That failure is invisible: the server starts, returns 200, and serves a
 //! stale bundle.
 //!
-//! Plan 122a A0: watches `graphowl-app/dist` too, for the temporary `/next/`
-//! embed. Both entries are removed at A11 (`ui/`) leaving only
-//! `graphowl-app/dist` once the rebuild replaces `ui/` as the sole console.
+//! Plan 122a A11: `graphowl-app/dist` is now the only embed — `ui/dist` was
+//! watched here through A0–A10's dual-embed migration and removed once
+//! `ui/` moved to `_archived/ui/`.
 fn main() {
-    println!("cargo:rerun-if-changed=../../ui/dist");
-    println!("cargo:rerun-if-changed=../../ui/dist/index.html");
     println!("cargo:rerun-if-changed=../../graphowl-app/dist");
     println!("cargo:rerun-if-changed=../../graphowl-app/dist/index.html");
 }

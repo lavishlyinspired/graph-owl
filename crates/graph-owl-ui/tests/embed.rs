@@ -1,30 +1,15 @@
-//! Plan 122a A0: the dual embed (`ui/dist` at `/`, `graphowl-app/dist` under
-//! `/next`) is new behaviour with no prior test coverage in this crate —
-//! written before it shipped, not after, per the project's TDD rule.
+//! Plan 122a A11: the single-embed console. `graphowl-app/dist` serves `/`
+//! directly — the A0–A10 dual embed (`ui/dist` at `/`, `graphowl-app/dist`
+//! under `/next`) is gone; see `_archived/README.md`'s `ui/` entry.
 //!
 //! What matters here is not the literal bytes (those come from whatever is
-//! currently built into each `dist/`) but the *routing contract*: each
-//! embed serves its own assets with the right content type and immutable
-//! caching, falls back to its own `index.html` for unknown paths so the
-//! client-side router can resolve them, and a path outside `/next` must
-//! never be answered by `router_next()`.
-//!
-//! `router_next()` is `.merge()`d here, exactly as `graph-owl-server`
-//! merges it — an earlier version of this router used `.route("/", ...)`
-//! plus a wildcard under `.nest("/next", ...)`, which every test below
-//! passed while the *live* server still served `ui/dist` at `GET /next/`.
-//! `nest()`'s path rewriting maps an inner `"/"` route to the bare prefix
-//! only (no trailing slash) with no inner path able to express the
-//! trailing-slash form, and `{*path}` never matches an empty remainder —
-//! so `/next/` matched neither registered route and fell through to the
-//! outer fallback. `router_next()` now owns `/next`, `/next/` and
-//! `/next/{*path}` as plain, fully-prefixed routes and is merged rather
-//! than nested; `bare_next_root_with_trailing_slash_serves_graphowl_app`
-//! below is the regression test for exactly that gap.
+//! currently built into `dist/`) but the routing contract: real static
+//! assets get the right content type and immutable caching, and an unknown
+//! client-side path falls back to `index.html` so the SPA router can
+//! resolve it.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 fn dist_files(dir: &str) -> Vec<String> {
@@ -42,12 +27,14 @@ fn has_js_extension(name: &str) -> bool {
 }
 
 #[tokio::test]
-async fn ui_router_serves_a_real_static_asset_with_immutable_caching() {
-    let files = dist_files(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/dist/static"));
-    let asset = files
-        .iter()
-        .find(|f| has_js_extension(f))
-        .expect("ui/dist/static has at least one .js file — run `npm run build` in ui/ first");
+async fn console_router_serves_a_real_static_asset_with_immutable_caching() {
+    let files = dist_files(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../graphowl-app/dist/static"
+    ));
+    let asset = files.iter().find(|f| has_js_extension(f)).expect(
+        "graphowl-app/dist/static has at least one .js file — run `npm run build` in graphowl-app/ first",
+    );
 
     let app = graph_owl_ui::router();
     let response = app
@@ -70,7 +57,7 @@ async fn ui_router_serves_a_real_static_asset_with_immutable_caching() {
 }
 
 #[tokio::test]
-async fn ui_router_falls_back_to_index_html_for_an_unknown_client_side_route() {
+async fn console_router_falls_back_to_index_html_for_an_unknown_client_side_route() {
     let app = graph_owl_ui::router();
     let response = app
         .oneshot(
@@ -95,110 +82,78 @@ async fn ui_router_falls_back_to_index_html_for_an_unknown_client_side_route() {
 }
 
 #[tokio::test]
-async fn next_router_serves_graphowl_app_assets_when_nested_under_next() {
-    let files = dist_files(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../graphowl-app/dist/static"
-    ));
-    let asset = files.iter().find(|f| has_js_extension(f)).expect(
-        "graphowl-app/dist/static has at least one .js file — \
-         run `VITE_BASE=/next/ npm run build` in graphowl-app/ first",
-    );
-
-    // Merged exactly as `graph-owl-server` merges it. `router_next()`'s
-    // routes already carry the `/next` prefix, so there is no automatic
-    // prefix-stripping to rely on here — `serve_next` strips it itself,
-    // which is the behaviour the embed build's `base: "/next/"` asset URLs
-    // depend on.
-    let app = axum::Router::new().merge(graph_owl_ui::router_next());
-
+async fn bare_root_with_trailing_slash_serves_the_console() {
+    // The exact shape of the bug this crate's history already found once
+    // (`_archived/README.md`'s `ui/` entry, and the CLAUDE.md gotcha on
+    // `nest()`'s trailing-slash gap) — asserted directly here now that `/`
+    // is the only mount, not inferred from a `/next/` regression test that
+    // no longer exists.
+    let app = graph_owl_ui::router();
     let response = app
-        .oneshot(
-            Request::get(format!("/next/static/{asset}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn next_router_falls_back_to_its_own_index_html_not_the_ui_ones() {
-    let app = axum::Router::new().merge(graph_owl_ui::router_next());
-
-    let response = app
-        .oneshot(Request::get("/next/overview").body(Body::empty()).unwrap())
-        .await
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8_lossy(&body);
-    // The temporary embed build sets `base: "/next/"`, so its own
-    // `index.html` references `/next/static/...` — the ui/ index.html
-    // (built with the default `/` base) never does. Asserting on this is
-    // the negative test: a mixed-up embed would still return *some* HTML,
-    // which is why "got a 200" alone would not have caught it.
     assert!(
-        html.contains("/next/static/"),
-        "expected graphowl-app's own index.html (base=/next/), got: {html}"
+        content_type.starts_with("text/html"),
+        "got {content_type:?}"
     );
 }
 
-/// **Regression test.** `GET /next/` — trailing slash, the URL a browser
-/// actually requests for the console root — is the exact request that
-/// served `ui/dist` instead of `graphowl-app/dist` on the live server while
-/// this same assertion, aimed at `/next/overview` instead, passed. See this
-/// file's module doc comment for the `nest()` mechanics that produced the
-/// gap.
-#[tokio::test]
-async fn bare_next_root_with_trailing_slash_serves_graphowl_app() {
-    let app = axum::Router::new().merge(graph_owl_ui::router_next());
+/// **RED requirement, Plan 122a A11**: "a structural test asserts `build.rs`
+/// watches `graphowl-app/dist` and that no path resolves into `ui/`." Reads
+/// `build.rs`'s own source rather than trusting intent — the same
+/// discipline `ui/`'s `vocabularyStructure.test.ts` used, generalised to
+/// this crate's own removal of the dual embed.
+#[test]
+fn build_rs_watches_graphowl_app_dist_and_never_ui() {
+    let build_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"))
+        .expect("build.rs should exist");
 
-    let response = app
-        .oneshot(Request::get("/next/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    // Only the executable `cargo:rerun-if-changed` lines matter here — a
+    // doc comment is free to say "ui/" while narrating the A0-A11
+    // migration (as this file's own does), and a check that flagged prose
+    // would be a check nobody could satisfy honestly.
+    let watch_lines: Vec<&str> = build_rs
+        .lines()
+        .filter(|line| {
+            line.trim_start()
+                .starts_with("println!(\"cargo:rerun-if-changed=")
+        })
+        .collect();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8_lossy(&body);
     assert!(
-        html.contains("/next/static/"),
-        "expected graphowl-app's own index.html (base=/next/), got: {html}"
+        watch_lines
+            .iter()
+            .any(|line| line.contains("graphowl-app/dist")),
+        "build.rs must watch graphowl-app/dist so a rebuilt frontend is not silently ignored: {watch_lines:?}"
     );
-}
-
-/// Companion to the trailing-slash case: `/next` with no slash at all must
-/// resolve identically, not just the two forms this crate happens to test.
-#[tokio::test]
-async fn bare_next_root_without_trailing_slash_serves_graphowl_app() {
-    let app = axum::Router::new().merge(graph_owl_ui::router_next());
-
-    let response = app
-        .oneshot(Request::get("/next").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8_lossy(&body);
     assert!(
-        html.contains("/next/static/"),
-        "expected graphowl-app's own index.html (base=/next/), got: {html}"
+        !watch_lines
+            .iter()
+            .any(|line| line.contains("../ui/") || line.contains("/ui/dist")),
+        "build.rs must not watch the archived ui/ embed: {watch_lines:?}"
     );
 }
 
-#[tokio::test]
-async fn a_path_outside_next_is_not_answered_by_the_next_sub_router() {
-    let app = axum::Router::new().merge(graph_owl_ui::router_next());
+/// Companion to the `build.rs` check: `lib.rs` itself must not reference
+/// the archived `ui/` tree either — a path that resolved into it would
+/// fail to compile today (nothing is there any more), but this is the
+/// assertion that keeps it that way on purpose, not by accident.
+#[test]
+fn lib_rs_never_resolves_into_ui() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("src/lib.rs should exist");
 
-    let response = app
-        .oneshot(Request::get("/overview").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        !lib_rs.contains("/../../ui/") && !lib_rs.contains("\"ui/dist\""),
+        "src/lib.rs must not embed anything from the archived ui/ tree: {lib_rs}"
+    );
 }

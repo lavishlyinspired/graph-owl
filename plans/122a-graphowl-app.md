@@ -515,6 +515,79 @@ regenerated.
 **RED** — a structural test asserts `build.rs` watches `graphowl-app/dist`
 and that no path resolves into `ui/`.
 
+**Shipped** — `graphowl-app/dist` embedded at `/` via a single `router()`
+(`graph-owl-ui/src/lib.rs`); `router_next()`/the `/next` embed removed
+entirely; `ui/` moved to `_archived/ui/` via `git mv` with a new bullet in
+`_archived/README.md`. CI (`ci.yml`), `scripts/demo.sh`, and
+`scripts/check-namespace-neutrality.py` all repointed from `ui/` to
+`graphowl-app/`; the standalone `ui` CI job removed since `graphowl-app`'s
+own job already covers the same ground.
+
+**Real bug found and fixed**: 4 of graphowl-app's 24 client-side route names
+collided exactly with real `graph-owl-server` API paths — `/overview` (`GET`,
+same method as the API — silently served the API's JSON instead of the
+console), `/drift` (same, `GET`/`GET`), `/lineage` and `/mcp` (`POST`-only on
+the API side, so `405` on a browser's `GET`). axum resolves an exact path
+match before ever reaching the SPA fallback, and this was invisible through
+A0–A10 because the console lived under `/next/`, which never collided with
+anything. Caught by a new RED test
+(`crates/graph-owl-server/tests/console_embed.rs`'s
+`every_route_in_graphowl_apps_own_route_list_is_reachable_at_root`, which
+reads `graphowl-app/src/lib/routes.ts` directly rather than hardcoding route
+names) the first time the console was promoted to the bare root. Fixed by
+renaming the 4 frontend route slugs (`home`, `lineage-view`, `drift-view`,
+`mcp-tools` — nav labels unchanged, only the URL segment moved) rather than
+touching the API: the API is the versioned, documented, SDK-generating
+product surface and does not move for a client's convenience.
+
+**A second real gap found and fixed**: `graphowl-app/tests/first-run.spec.ts`
+(new, Playwright + `@axe-core/playwright`, run via
+`scripts/verify-first-run-journey.sh` against a real Postgres-backed server)
+is the first axe pass this console ever ran, and it found genuine violations,
+all fixed same-session: (1) `--gowl-t6`/`--gowl-t7` text tokens, lifted
+verbatim from the mockup's own hex values, fall to 3.96:1/3.03:1 contrast in
+dark theme and 4.08:1/3.01:1 in light — both below the WCAG AA 4.5:1 floor
+`00f-ui-architecture.md` states as non-negotiable ("zero axe violations,"
+does not move); lightened to the minimum hue-preserving value that clears
+4.5:1 (found by bisecting HSL lightness against the WCAG contrast formula,
+`theme.css`). (2) `TopBar`'s root was a bare `<div>`, so its content (search
+shortcut, "AS OF" label, avatar) wasn't contained by any landmark — changed
+to `<header>`. (3) No page had an `<h1>` — the console has no on-screen page
+title by design (an instrument panel, not a document), so `AppShell` renders
+one visually hidden (`lib/nav.ts`'s new `pageTitleForPath`, unit-tested,
+sourced from the real `NAV` label for the current route). (4) 6 `<select>`
+elements across `studio.tsx`, `BuildTab.tsx`, `GraphTab.tsx`, `packs.tsx` and
+`governance.tsx` had no accessible name (a sibling `<div>` label is not a
+`<label>`) — given `aria-label`, reusing existing `strings.ts` entries where
+one already fit the adjacent visible label. This smoke suite deliberately
+covers 8 representative routes (one per nav group) plus the shell and a
+failed-search case — it is not a port of the archived `ui/`'s 7-file
+per-feature suite, and does not claim to be.
+
+**Binary size**: measured 58MB release, over the 50MB budget
+(`00f-ui-architecture.md`) — the workspace `Cargo.toml` had no
+`[profile.release]` section at all, so nothing stripped the symbol table.
+Added `strip = true`; re-measured at 47MB. Behaviour-preserving: Rust panic
+locations come from `#[track_caller]`, baked into the message itself, not
+from the symbol table `strip` removes.
+
+**Found and fixed in `scripts/check-wire-casing.py` while running the full
+gate** (unrelated to this slice's own code, surfaced by `--full`): the
+checker flagged `RdfEditDryRun.new_inferences` and
+`Strategy.starts_in` as snake_case-on-camelCase-wire violations. Neither is:
+`RdfEditDryRun`'s own doc comment already explains it uses
+`rename_all_fields` deliberately because it has no `ToSchema` derive to
+disagree with — the checker's `ToSchema` detection was a naive substring
+search over 400 preceding characters, and the doc comment's own prose
+mentioning "ToSchema" (to explain why the type doesn't need it) tripped it.
+`Strategy` uses `rename_all = "snake_case"` — a pack-config `Deserialize`
+type with a snake_case wire by design, which the checker didn't check before
+flagging a "camelCase" violation. Fixed the checker: it now requires an
+actual `#[derive(... ToSchema ...)]` attribute (not a substring anywhere
+nearby) and only fires when the enum's own casing directive is camelCase.
+Verified against synthetic true-positive and true-negative cases before
+trusting it silent on the rest of the workspace.
+
 ---
 
 ## 4. Explicitly deferred

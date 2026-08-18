@@ -248,6 +248,7 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
                 <select
                   value={relationKind}
                   onChange={(e) => setRelationKind(e.target.value as SkosRelationKind)}
+                  aria-label={strings.buildRelationKind}
                   className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[11px] text-gowl-t1"
                 >
                   {RELATION_KINDS.map((kind) => (

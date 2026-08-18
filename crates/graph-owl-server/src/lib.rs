@@ -668,14 +668,12 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             utoipa_swagger_ui::SwaggerUi::new("/docs")
                 .config(utoipa_swagger_ui::Config::new(["/openapi.json"])),
         )
-        // Plan 122a A0: the in-progress `graphowl-app/` rebuild, under its
-        // own `/next` prefix so it cannot collide with the `ui/` fallback
-        // below or with any API path. `.merge()`, not `.nest()` — see
-        // `graph_owl_ui::router_next()`'s doc comment for why `nest` cannot
-        // correctly serve this router's own root. Still a scoped, one-line
-        // removable addition — A11 deletes this line and `router_next()`
-        // when `graphowl-app` replaces `ui/`.
-        .merge(graph_owl_ui::router_next())
+        // Plan 122a A11: `graphowl-app` replaced `ui/` as the sole embedded
+        // console — `graph_owl_ui::router()` now serves `graphowl-app/dist`
+        // at `/` directly. A0–A10's temporary `/next`-prefixed second
+        // router (`router_next()`) is gone; see `_archived/README.md`'s
+        // `ui/` entry for that migration's history.
+        //
         // Mounted LAST so the SPA fallback cannot swallow an unknown API path.
         // A fallback registered first turns every mistyped endpoint into a 200
         // text/html and the client sees a blank page instead of an error.

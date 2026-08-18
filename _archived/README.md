@@ -33,3 +33,16 @@ be wrong.
 `scripts/verify-examples.sh`'s "adapter-csv" phase never actually read from
 it). Nothing to archive there: an empty directory has no content to
 preserve, and it was never tracked by git in the first place.
+
+- `ui/` — the original console (Epic 39), replaced by `graphowl-app/`
+  (Plan 122a A0–A11). Archived rather than deleted for the same reason as
+  everything else here: git history recovers it, but a reader asking "why
+  does the repo have two frontends in its history" gets an answer here
+  instead of an archaeology exercise. `graphowl-app/` was built alongside
+  it under a temporary `/next/` embed (A0) so the live console never broke
+  mid-rebuild, and A11 promoted it to serve `/` once all 24 destinations
+  were reachable and verified — `crates/graph-owl-ui` now embeds only
+  `graphowl-app/dist`, and `graph-owl-server`'s route table no longer
+  merges a `/next` router at all. `ui/`'s own `node_modules/` and `dist/`
+  were left in place rather than pruned — this is an archive of what
+  shipped, not a re-packaging of it.

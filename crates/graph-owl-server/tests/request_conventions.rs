@@ -180,10 +180,19 @@ async fn every_documented_query_parameter_is_still_accepted() {
 #[test]
 fn the_extractor_is_the_only_place_a_principal_is_constructed() {
     let source = include_str!("../src/lib.rs");
-    let constructions = source.matches("Principal::system()").count();
+    // A comment line mentioning the pattern in prose (to explain *why* it's
+    // the only construction site, of all things) is not a second
+    // construction site — only code lines count. A doc comment (`///`/`//!`)
+    // or a regular `//` comment, once leading whitespace is stripped, is
+    // excluded.
+    let constructions = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("Principal::system()"))
+        .count();
     assert_eq!(
         constructions, 1,
-        "Principal::system() must appear exactly once — inside the extractor"
+        "Principal::system() must appear exactly once in real code — inside the extractor"
     );
     assert!(
         source.contains("impl<S> FromRequestParts<S> for Auth"),

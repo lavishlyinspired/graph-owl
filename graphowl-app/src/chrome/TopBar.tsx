@@ -18,7 +18,7 @@ interface TopBarProps {
 
 export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, userInitials, workspaceName }: TopBarProps) {
   return (
-    <div className="flex h-[52px] flex-none items-center gap-5 border-b border-gowl-line bg-gowl-panel px-4.5">
+    <header className="flex h-[52px] flex-none items-center gap-5 border-b border-gowl-line bg-gowl-panel px-4.5">
       <div className="flex items-center gap-2.5">
         <div className="relative h-5 w-5 rounded-md bg-gowl-accent">
           <div className="absolute inset-1.5 rounded-sm bg-gowl-bg" />
@@ -60,6 +60,6 @@ export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, 
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gowl-avatar font-mono text-[11px] text-gowl-t2">
         {userInitials}
       </div>
-    </div>
+    </header>
   );
 }

@@ -1,18 +1,17 @@
 //! Embedded web console: serves the built single-page application from the
 //! server binary.
 //!
-//! **Status**: Epic 39 Slice A; Plan 122a A0 added a second, temporary embed.
-//! One binary, one process, no CDN, no reverse proxy — `00f-ui-architecture.md`.
-//! Frontend sources live in `ui/`; this crate only embeds and serves the
-//! build output.
+//! **Status**: Epic 39 Slice A; Plan 122a A0–A11 replaced the original
+//! `ui/` console with `graphowl-app/`. One binary, one process, no CDN, no
+//! reverse proxy — `00f-ui-architecture.md`. Frontend sources live in
+//! `graphowl-app/`; this crate only embeds and serves the build output.
 //!
-//! **Plan 122a A0–A11**: `graphowl-app/` is the console rebuild that replaces
-//! `ui/`. During the migration both are embedded — `ui/dist` still serves `/`
-//! (`router()`), `graphowl-app/dist` serves under `/next` (`router_next()`,
-//! `.merge()`d — see its doc comment for why not `.nest()`) — so the working
-//! console never breaks mid-rebuild. A11 removes `router()` and `Assets`
-//! (the `ui/` embed) entirely and promotes `router_next()`'s content to
-//! serve `/`.
+//! **A0–A10** embedded both consoles at once — `ui/dist` at `/`,
+//! `graphowl-app/dist` under `/next` — so the working console never broke
+//! mid-rebuild (see `_archived/README.md`'s `ui/` entry for the full
+//! history). **A11** removed the dual embed: `ui/` moved to
+//! `_archived/ui/`, and `graphowl-app/dist` was promoted to serve `/`
+//! directly.
 
 use axum::{
     Router,
@@ -24,12 +23,8 @@ use axum::{
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/../../ui/dist"]
-struct Assets;
-
-#[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/../../graphowl-app/dist"]
-struct NextAssets;
+struct Assets;
 
 /// Serves the console.
 ///
@@ -41,52 +36,16 @@ pub fn router() -> Router {
     Router::new().fallback(get(serve))
 }
 
-/// Serves the in-progress `graphowl-app/` rebuild under `/next`
-/// (Plan 122a A0). Temporary — removed at A11 once `graphowl-app` replaces
-/// `ui/` as the sole embed.
-///
-/// **`.merge()` this at the call site, never `.nest("/next", ...)`.** Routes
-/// are registered with the `/next` prefix already baked in — three of them,
-/// deliberately, because `axum::routing::path_router::path_for_nested_route`
-/// (traced directly against axum 0.8.9's source while chasing a live bug
-/// this shape produces) maps a nested router's own `"/"` route to the outer
-/// prefix *without* a trailing slash, and there is no inner path that maps
-/// to the prefix *with* one — `path == "/"` is special-cased to `prefix`
-/// alone before the general `format!("{prefix}{path}")` case ever runs. A
-/// catch-all wildcard doesn't fill the gap either: matchit's `{*path}`
-/// requires at least one captured character, so it never matches a bare
-/// trailing slash. The result, confirmed live: `GET /next` and
-/// `GET /next/overview` served `graphowl-app/dist` correctly, while
-/// `GET /next/` — the URL a browser actually requests for the console root
-/// — silently fell through to the outer router's fallback and served
-/// `ui/dist` instead. `.merge()` sidesteps `nest()`'s path rewriting
-/// entirely, so all three of `/next`, `/next/` and `/next/{*path}` are
-/// ordinary routes this router owns outright.
-pub fn router_next() -> Router {
-    Router::new()
-        .route("/next", get(serve_next))
-        .route("/next/", get(serve_next))
-        .route("/next/{*path}", get(serve_next))
-}
-
 // `axum::routing::get` requires a `Handler`, which is only implemented for
-// functions returning a `Future` — so these stay `async fn` even though
-// neither has an `.await` of its own; the work happens synchronously in
+// functions returning a `Future` — so this stays `async fn` even though it
+// has no `.await` of its own; the work happens synchronously in
 // `serve_from`, which is a plain function for exactly that reason.
 async fn serve(uri: Uri) -> Response {
-    serve_from::<Assets>(uri.path().trim_start_matches('/'), "console")
+    serve_from(uri.path().trim_start_matches('/'))
 }
 
-async fn serve_next(uri: Uri) -> Response {
-    // `router_next()` is `.merge()`d, not nested, so axum never strips a
-    // prefix for us — strip `/next` ourselves before looking the path up in
-    // `NextAssets`, whose embedded paths are relative to `graphowl-app/dist`.
-    let path = uri.path().strip_prefix("/next").unwrap_or(uri.path());
-    serve_from::<NextAssets>(path.trim_start_matches('/'), "graphowl-app")
-}
-
-fn serve_from<A: RustEmbed>(path: &str, label: &'static str) -> Response {
-    if let Some(asset) = A::get(path) {
+fn serve_from(path: &str) -> Response {
+    if let Some(asset) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         // Content-hashed filenames, so the bytes at a URL never change.
         return (
@@ -100,7 +59,7 @@ fn serve_from<A: RustEmbed>(path: &str, label: &'static str) -> Response {
     }
 
     // Client-side route: hand back the shell so the router resolves it.
-    match A::get("index.html") {
+    match Assets::get("index.html") {
         Some(index) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -111,7 +70,7 @@ fn serve_from<A: RustEmbed>(path: &str, label: &'static str) -> Response {
             .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Body::from(format!("{label} assets are not compiled into this binary")),
+            Body::from("console assets are not compiled into this binary"),
         )
             .into_response(),
     }

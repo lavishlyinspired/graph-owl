@@ -35,7 +35,7 @@ export const router = createBrowserRouter(
           // a search) while `/{route}/{id}` opens directly on it. Paths
           // takes two ends instead of one seed, so it reads `?from=&to=`
           // query params rather than a path segment.
-          const seededRoutes = ["explore", "entity", "lineage", "history"];
+          const seededRoutes = ["explore", "entity", "lineage-view", "history"];
           const path = seededRoutes.includes(route) ? `${route}/:id?` : route;
           return { path, element: <Component /> };
         }),
