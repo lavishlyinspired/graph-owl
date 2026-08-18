@@ -106,3 +106,5 @@ research
 # Stryker output
 /ext-apps/RecoNow/frontend/reports/
 .stryker-tmp/
+/ext-apps/RecoNow/backend/mutants/
+/ext-apps/RecoNow/backend/.mutmut-cache

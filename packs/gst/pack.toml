@@ -148,6 +148,9 @@ name = "cess"
 name = "filedDate"
 
 [[predicates]]
+name = "pulledOn"
+
+[[predicates]]
 name = "supplierName"
 
 [[predicates]]
@@ -201,6 +204,17 @@ value_type = 0
 
 [[predicates]]
 name = "reflectedIn"
+value_type = 0
+
+# GSTR-2A — Plan 123 Slice C. `observedIn` is the canonical invoice's edge to
+# a 2A line; `seenIn` is that line's edge to the pull it was read in. Both are
+# refs (value_type = 0); `pulledOn` is the literal date of the pull.
+[[predicates]]
+name = "observedIn"
+value_type = 0
+
+[[predicates]]
+name = "seenIn"
 value_type = 0
 
 [[predicates]]
@@ -714,6 +728,49 @@ meaning = "Booked against one GSTIN and filed under another registration sharing
 next_action = "Decide which registration the supply actually came from. It changes the place of supply, and therefore which heads the tax belongs under."
 tone = "warning"
 
+# --- GSTR-2A: what the portal has said since the 2B froze — Plan 123 Slice C
+
+[[findings]]
+label = "gst:FiledLateInGstr2a"
+summary = "The portal now shows the invoice in GSTR-2A, and it reached no GSTR-2B this pack holds"
+governed_by = "gst:Section16-2-aa"
+query = "filed-late-in-gstr2a"
+# Ranked above `gst:Gstr1NotIn2b` (priority 2): both say "declared but not
+# claimable", and this one says it on the authority's own evidence rather than
+# the supplier's, so it is the one to act on where both fire.
+priority = 1
+# **Declared, not inferred.** With no 2A loaded this rule returns no rows, and
+# "no rows" here would otherwise read as "no supplier filed late" — the exact
+# false clean this pack's three-state outcome exists to prevent. `Gstr2aInvoice`
+# rather than `Gstr2aSnapshot`: a snapshot with no lines is a pull that found
+# nothing, which is a real answer, but with no *lines* anywhere the rule had
+# no input at all.
+requires = ["https://graph-owl.dev/packs/gst#Gstr2aInvoice"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:pulledOn", var = "pulledOn" },
+  { predicate = "gst:period", var = "observedPeriod" },
+]
+
+[[findings]]
+label = "gst:AmendedAfterClaim"
+summary = "The portal's own value has changed since the GSTR-2B this claim was made against"
+governed_by = "gst:Section16-2-aa"
+query = "amended-after-claim"
+priority = 1
+requires = ["https://graph-owl.dev/packs/gst#Gstr2aInvoice"]
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "claimedAmount" },
+  { predicate = "gst:taxAmount", var = "observedAmount" },
+  { predicate = "gst:pulledOn", var = "pulledOn" },
+]
+
 [[findings]]
 label = "gst:PaymentOverdue"
 summary = "Credit taken on an invoice not paid within 180 days of its date"
@@ -758,6 +815,16 @@ label = "Claimed but never filed (Section 16(2)(aa))"
 name = "amount-mismatch"
 path = "queries/amount-mismatch.sparql"
 label = "Values differ by more than the cap then in force (Rule 36(4))"
+
+[[queries]]
+name = "filed-late-in-gstr2a"
+path = "queries/filed-late-in-gstr2a.sparql"
+label = "The portal now shows it, no GSTR-2B ever did (Section 16(2)(aa))"
+
+[[queries]]
+name = "amended-after-claim"
+path = "queries/amended-after-claim.sparql"
+label = "The portal's value moved after the 2B this claim rests on (Section 16(2)(aa))"
 
 [[queries]]
 name = "itc-not-available"
@@ -963,6 +1030,8 @@ labels = [
   # new finding costs a config entry rather than a component.
   "gst:SupplierNotFiled",
   "gst:Gstr1NotIn2b",
+  "gst:FiledLateInGstr2a",
+  "gst:AmendedAfterClaim",
   "gst:MissingInBooks",
   "gst:BooksGstr1Mismatch",
   "gst:GoodsReceiptTiming",

@@ -735,3 +735,76 @@ async fn an_invoice_carried_forward_into_a_later_periods_2b_reports_the_later_pe
         "must report the period the 2B actually reflected it in, not the invoice's own July date: {result}"
     );
 }
+
+/// **Regression, 19 August 2026.** Plan 123 Slice C0 gave this route an
+/// optional `{"graphs": [...]}` body and, in doing so, made a literal JSON
+/// `null` body fail to deserialize — the route answered `422` to a request
+/// that unambiguously means "run unscoped". It shipped because this crate's
+/// own tests were not being run at the time; three of them had been failing
+/// on it.
+///
+/// There are two ways a caller says "no scope" and both are real: the Python
+/// pack client sends **no body**, and anything building a request from a
+/// nullable value sends **`null`**. Neither may 422.
+#[tokio::test]
+async fn every_form_of_no_scope_runs_unscoped_rather_than_refusing() {
+    let (app, _db, _url) = test_app().await;
+    seed_gst_vocabulary_and_one_unmatched_invoice(&app).await;
+    register_missing_in_gstr2b_rule(&app).await;
+
+    // A literal JSON null.
+    let (status, body) = json(
+        &app,
+        "POST",
+        "/packs/gst/reconcile",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "null body: {body}");
+    assert_eq!(body["evaluated"], 1, "{body}");
+
+    // An empty object — the same meaning, spelled the other way.
+    let (status, body) = json(&app, "POST", "/packs/gst/reconcile", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "empty object: {body}");
+    assert_eq!(body["evaluated"], 1, "{body}");
+
+    // No body and **no content-type** — the real shape the Python pack client
+    // sends, which only sets content-type when it has a body to describe
+    // (`graph_owl_packs.loader._request`). Checked against that code rather
+    // than assumed: an empty body that still claims `application/json` is
+    // malformed JSON and is correctly refused, so asserting it here would have
+    // pinned a shape no client produces.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/packs/gst/reconcile")
+                .header("authorization", format!("Bearer {}", token("system")))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(response.status(), StatusCode::OK, "absent body");
+}
+
+/// The other half: a *malformed* scope must still be refused. Accepting `null`
+/// must not become accepting anything — a mistyped key that silently widened a
+/// run to the whole store is exactly the bug C0 exists to prevent.
+#[tokio::test]
+async fn a_misspelled_scope_key_is_refused_rather_than_silently_ignored() {
+    let (app, _db, _url) = test_app().await;
+    seed_gst_vocabulary_and_one_unmatched_invoice(&app).await;
+    register_missing_in_gstr2b_rule(&app).await;
+
+    let (status, _) = json(
+        &app,
+        "POST",
+        "/packs/gst/reconcile",
+        serde_json::json!({"graph": ["reco-abc-books"]}),
+    )
+    .await;
+
+    assert_ne!(status, StatusCode::OK, "a mistyped scope key must not run");
+}

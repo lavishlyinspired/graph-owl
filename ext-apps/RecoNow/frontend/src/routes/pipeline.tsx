@@ -17,7 +17,13 @@ import type { WorkspaceState } from "../lib/workspace";
 const DATASET_KINDS = [
   { kind: "books", label: "Purchase register", optional: false, enables: "" },
   { kind: "gstr2b", label: "GSTR-2B", optional: false, enables: "" },
-  { kind: "gstr1", label: "GSTR-2A / GSTR-1", optional: true, enables: "supplier-declaration checks" },
+  { kind: "gstr1", label: "GSTR-1 / IFF", optional: true, enables: "supplier-declaration checks" },
+  {
+    kind: "gstr2a",
+    label: "GSTR-2A (dynamic)",
+    optional: true,
+    enables: "late filings and amendments after your 2B froze",
+  },
   { kind: "payments", label: "Payment ledger", optional: true, enables: "Rule 37 — 180-day reversal" },
   { kind: "grn", label: "Goods receipt (GRN)", optional: true, enables: "s.16(2)(b) — goods received" },
 ] as const;

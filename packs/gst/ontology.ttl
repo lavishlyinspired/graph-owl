@@ -44,6 +44,23 @@ gst:Gstr1Filing     rdf:type gst:Class ; gst:label "GSTR-1/IFF filing (one per s
 # has been confirmed to carry it.
 gst:Gstr2bStatement rdf:type gst:Class ; gst:label "GSTR-2B statement (one per return period)" .
 
+# **A GSTR-2A line, and a snapshot of when it was seen — Plan 123 Slice C.**
+# 2A and 2B carry the same columns and are not the same thing. 2B is frozen on
+# the 14th and is what a claim rests on; 2A keeps moving afterwards, which is
+# how a recipient learns that a supplier filed late or amended *after* the 2B
+# they already claimed against was generated.
+#
+# The class exists for that difference alone. A `Gstr2aInvoice` without the
+# snapshot it was observed in would be a `Gstr1Invoice` under another name —
+# **the observation time is the entire content of the distinction**, which is
+# why `observedIn` is mandatory in practice even though RDF cannot require it.
+gst:Gstr2aInvoice   rdf:type gst:Class ; gst:label "GSTR-2A line (portal, as observed on a date)" .
+
+# One per (return period, pull date). Keyed by both deliberately: keyed by
+# period alone, a later pull would overwrite the earlier one and destroy the
+# history that makes drift computable at all.
+gst:Gstr2aSnapshot  rdf:type gst:Class ; gst:label "GSTR-2A snapshot (one per period, per pull)" .
+
 # **The taxpayer this deployment represents — a single-tenant pack context
 # anchor, not a globally reusable identity.** Exactly one instance exists,
 # `gst:recipient-self`, and every `Gstr2bStatement` points at it. Must not
@@ -124,6 +141,9 @@ gst:itcAvailable  rdf:type gst:Property ; gst:label "input tax credit available 
 # either contains the invoice or it does not, and that document is the
 # authority's own answer to whether the filing landed in time.
 gst:filedDate     rdf:type gst:Property ; gst:label "date the supplier filed the return declaring this invoice" .
+# The date a 2A snapshot was pulled from the portal. Distinct from `filedDate`
+# — that is when the supplier acted, this is when we looked.
+gst:pulledOn      rdf:type gst:Property ; gst:label "date this GSTR-2A snapshot was pulled from the portal" .
 gst:reverseCharge rdf:type gst:Property ; gst:label "reverse-charge flag (as reported in GSTR-2B)" .
 gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .
 
@@ -189,6 +209,11 @@ gst:belongsToPeriod rdf:type owl:ObjectProperty ; rdfs:domain gst:PurchaseInvoic
 gst:recordedIn    rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:PurchaseInvoice ; gst:label "recorded in (purchase register)" .
 gst:appearsIn     rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:Gstr1Invoice ; gst:label "appears in (GSTR-1/IFF)" .
 gst:reflectedIn   rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:Gstr2bInvoice ; gst:label "reflected in (GSTR-2B)" .
+# "Observed", not "reflected". 2B *reflects* a settled position; 2A records
+# only what the portal showed at one moment, and may show something else at
+# the next pull. The verb is the difference — Plan 123 Slice C.
+gst:observedIn    rdf:type owl:ObjectProperty ; rdfs:domain gst:Invoice ; rdfs:range gst:Gstr2aInvoice ; gst:label "observed in (GSTR-2A)" .
+gst:seenIn        rdf:type owl:ObjectProperty ; rdfs:domain gst:Gstr2aInvoice ; rdfs:range gst:Gstr2aSnapshot ; gst:label "seen in (which 2A pull)" .
 
 # The one genuinely new hop: a declared GSTR-1 line to the filing it came
 # from, and that filing to the supplier who filed it.

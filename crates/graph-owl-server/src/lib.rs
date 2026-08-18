@@ -9077,13 +9077,25 @@ async fn reconcile_pack(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(pack): Path<String>,
-    body: Option<Json<ReconcileScope>>,
+    // `Option<Json<Option<_>>>` rather than `Option<Json<_>>`, because there
+    // are **two** ways a caller says "no scope" and both must work: no body at
+    // all (the Python pack client's own default), and a literal JSON `null`
+    // (what a client building a request from a nullable value sends, and what
+    // `graph-owl-mcp` and this crate's own reconcile tests send). The inner
+    // `Option` is what accepts the second — without it `null` fails to
+    // deserialize into a struct and the route answers 422 to a request that
+    // unambiguously means "run unscoped".
+    //
+    // A malformed *object* is still rejected: `deny_unknown_fields` stands, so
+    // a mistyped key cannot silently widen a run's scope to the whole store.
+    body: Option<Json<Option<ReconcileScope>>>,
 ) -> Result<Json<graph_owl_api::ReconcileOutcome>, AppError> {
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
     let scope: std::collections::HashSet<String> = body
-        .map(|Json(s)| s.graphs)
+        .and_then(|Json(s)| s)
+        .map(|s| s.graphs)
         .unwrap_or_default()
         .into_iter()
         .collect();

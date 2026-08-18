@@ -57,9 +57,19 @@ NAMESPACE = "https://graph-owl.dev/packs/gst#"
 #: draws these distinctions ("Purchase invoice (taxpayer's register)" /
 #: "GSTR-2B invoice (as filed by the supplier)"). `gstr1` also covers a
 #: GSTR-2A upload: `packs/gst/ontology.ttl`'s own comment is explicit that
-#: there is deliberately no separate `Gstr2aInvoice` class — 2A is "a
-#: revolving view over the same supplier-declared data
-#: [gst:Gstr1Invoice] already carries."
+#: **`gstr2a` reverses an earlier decision here, deliberately — Plan 123
+#: Slice C.** This comment used to read "there is deliberately no separate
+#: `Gstr2aInvoice` class — 2A is a revolving view over the same
+#: supplier-declared data `gst:Gstr1Invoice` already carries". That is true of
+#: the *content* and misses why 2A is held at all: a revolving view has a
+#: **pull date**, and a filing does not. GSTR-2B is frozen on the 14th and is
+#: what a claim rests on; 2A keeps moving after that, and the only reason to
+#: keep it is to answer "what has the portal said since the 2B I claimed
+#: against". A class carrying no observation time cannot express that.
+#:
+#: The second thing collapsing them lost: GSTR-1 is what the **supplier** says
+#: they filed, 2A is what the **portal** shows. A reviewer chasing a late
+#: filing needs to know which one is speaking.
 CLASS_BY_KIND = {
     "books": "gst:PurchaseInvoice",
     # Event kinds. Optional uploads: a firm that cannot export a payment
@@ -71,6 +81,7 @@ CLASS_BY_KIND = {
     "portal": "gst:Gstr2bInvoice",
     "gstr2b": "gst:Gstr2bInvoice",
     "gstr1": "gst:Gstr1Invoice",
+    "gstr2a": "gst:Gstr2aInvoice",
 }
 
 #: The canonical-subject edge each kind's upload asserts — the half it
@@ -83,6 +94,9 @@ LINK_PREDICATE_BY_KIND = {
     "portal": "gst:reflectedIn",
     "gstr2b": "gst:reflectedIn",
     "gstr1": "gst:appearsIn",
+    # "Observed", not "reflected": 2B *reflects* a frozen position, 2A only
+    # records what the portal showed at one moment.
+    "gstr2a": "gst:observedIn",
 }
 
 #: Kinds whose invoice subject needs `gst:invoiceKey`. `books` and
@@ -96,12 +110,14 @@ LINK_PREDICATE_BY_KIND = {
 #: 16 August 2026, the moment GSTR-1 data first existed in the store for
 #: this rule to actually run against (verify-reconcile-parity.py's
 #: SupplierNotFiled count came back 10 against an expected 2).
-KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b", "portal"}
+KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b", "portal", "gstr2a"}
 
 #: Kinds whose invoice subject needs a combined `gst:taxAmount` —
 #: `missing-in-gstr2b.sparql` reads it off the books side,
 #: `missing-in-books.sparql` off the gstr1 side. Never gstr2b.
-KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1"}
+#: `gstr2a` is here because every Slice C rule compares a 2A tax amount
+#: against the 2B one — an amendment that changes the value is the finding.
+KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1", "gstr2a"}
 
 #: An event kind is not a document: it has no taxable value or tax heads, only
 #: a time and the invoice it happened to. `gst:onInvoice` points at the *books*
@@ -223,6 +239,23 @@ def _filing_iri(gstin_raw: str, period_raw: str) -> str:
     gstin = quote(str(gstin_raw or "").strip(), safe="")
     period = quote(str(period_raw or "").strip(), safe="")
     return f"{NAMESPACE}filing-{gstin}-{period}"
+
+
+def _snapshot_iri(period_raw: object, pulled_on_raw: object) -> str:
+    """One `gst:Gstr2aSnapshot` per (period, pull date) — Plan 123 Slice C.
+
+    **Keyed by the pull date as well as the period, which is the whole
+    point.** A snapshot keyed by period alone would let May's pull overwrite
+    April's, destroying exactly the history drift is computed from: two
+    observations of one period, taken at different times, are two facts and
+    not one fact revised.
+
+    A pull with no date still gets a snapshot — a firm whose export carries no
+    pull-date column loses drift, not the invoice.
+    """
+    period = quote(str(period_raw).strip(), safe="") if _is_present(period_raw) else "unknown-period"
+    pulled = quote(str(pulled_on_raw).strip(), safe="") if _is_present(pulled_on_raw) else "undated"
+    return f"{NAMESPACE}gstr2a-snapshot-{period}-{pulled}"
 
 
 def _canonical_iri(gstin_raw: str, invoice_no_raw: str) -> str:
@@ -372,6 +405,32 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
                     f"    gst:period {_turtle_string(row.get('period'))} .\n"
                 )
             triples.append(f"gst:reflectedIn <{statement}>")
+
+        # The 2A snapshot this line was observed in — Plan 123 Slice C. The
+        # date is on the *snapshot*, not the invoice: one pull is one
+        # observation however many lines it carried, and putting the date on
+        # each line would report drift between two invoices seen at the same
+        # moment.
+        if kind == "gstr2a":
+            snapshot = _snapshot_iri(row.get("period"), row.get("pulled_on"))
+            if snapshot not in seen_filings:
+                seen_filings.add(snapshot)
+                snapshot_triples = ["a gst:Gstr2aSnapshot"]
+                if _is_present(row.get("period")):
+                    snapshot_triples.append(f"gst:period {_turtle_string(row.get('period'))}")
+                if _is_present(row.get("pulled_on")):
+                    snapshot_triples.append(
+                        f"gst:pulledOn {_turtle_string(_normalize_date(row.get('pulled_on')))}"
+                    )
+                lines.append(f"<{snapshot}>\n    " + " ;\n    ".join(snapshot_triples) + " .\n")
+            # `seenIn`, not `observedIn`: `observedIn` is the canonical
+            # invoice's edge to this 2A line, `seenIn` is this line's edge to
+            # the pull it was read in. Following `appearsIn`/`filedIn`'s split
+            # rather than `reflectedIn`'s reuse — the drift rules traverse
+            # invoice -> snapshot -> pulledOn, and one verb per level means a
+            # reader of the SPARQL never has to work out which level they are
+            # standing on.
+            triples.append(f"gst:seenIn <{snapshot}>")
 
         body = " ;\n    ".join(triples)
         lines.append(f"<{subject}>\n    {body} .\n")

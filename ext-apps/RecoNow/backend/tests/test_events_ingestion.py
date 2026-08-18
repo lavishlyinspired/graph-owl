@@ -130,10 +130,19 @@ class TestOptionality:
 
         assert "gst:PaymentOverdue" in checks_disabled({"books", "gstr2b"})
         assert "gst:GoodsReceiptTiming" in checks_disabled({"books", "gstr2b"})
-        # GSTR-1/2A is optional too, and its absence disables three more —
+        # GSTR-1 is optional too, and its absence disables three more —
         # every check that needs the supplier's own declaration.
         assert "gst:MissingInBooks" in checks_disabled({"books", "gstr2b"})
-        assert checks_disabled({"books", "gstr2b", "payments", "grn", "gstr1"}) == {}
+        # GSTR-2A likewise, and its two are the ones nothing else can answer:
+        # a 2B alone cannot say what the portal has reported *since* it froze.
+        assert "gst:FiledLateInGstr2a" in checks_disabled({"books", "gstr2b", "gstr1"})
+        assert "gst:AmendedAfterClaim" in checks_disabled({"books", "gstr2b", "gstr1"})
+        # Uploading 2A must not be mistaken for uploading GSTR-1: they are
+        # different authorities and switch on different checks.
+        assert "gst:MissingInBooks" in checks_disabled({"books", "gstr2b", "gstr2a"})
+
+        every_kind = {"books", "gstr2b", "payments", "grn", "gstr1", "gstr2a"}
+        assert checks_disabled(every_kind) == {}
 
     def test_every_disabled_check_says_why_it_matters(self):
         """A rule label alone tells a reviewer nothing. "Rule 37 — credit must

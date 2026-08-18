@@ -161,13 +161,23 @@ def reconcile(
         tax_portal = record_tax(matched_portal) if matched_portal else 0.0
 
         if status == STATUS_MATCHED and matched_portal is None:
-            # No finding named this invoice, and it has no 2B counterpart
-            # either — the native engine's own rules did not flag it (most
-            # often reverse-charge, which every "not filed" rule excludes
-            # on purpose), so there is nothing actionable to report. Kept
-            # as its own row rather than dropped, matching
-            # reconciliation.py's own behaviour for the same case.
-            status, reason = STATUS_MATCHED, "No Finding"
+            # **No 2B row exists, so nothing matched** — whatever the rules
+            # did or did not say. `status` defaults to matched when no finding
+            # names an invoice, and keeping that default here converted "no
+            # rule fired" into "both sides agree": three invoices the supplier
+            # had never filed were reported as safe (found 19 August 2026 by
+            # hand-deriving the sample fixture's answer key, which is also what
+            # `test_characterisation.py` had been failing about all along).
+            #
+            # The old comment defended this on reverse-charge grounds, and it
+            # is right about *that* case only: under RCM the recipient
+            # self-assesses, so no supplier line is ever expected and an absent
+            # 2B row is not a failure. That exemption now checks the flag
+            # rather than being assumed for every unflagged invoice.
+            if str(book.get("reverse_charge") or "").strip().upper() == "Y":
+                status, reason = STATUS_MATCHED, "Reverse Charge — No 2B Expected"
+            else:
+                status, reason = STATUS_ONLY_BOOKS, REASON_NOT_IN_2B
 
         diff = None
         tax_diff = 0.0

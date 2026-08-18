@@ -1,0 +1,57 @@
+# The portal's own value has **changed since the GSTR-2B this recipient
+# claimed against** — Plan 123 Slice C.
+#
+# A supplier may amend a filed invoice (`gst:B2BA`) after the 2B carrying it
+# was frozen. The 2B does not move, so the claim already made stays as it was;
+# the 2A does move, and the difference between them is the amount a
+# reassessment will land on. Nothing in a 2B-only reconciliation can see this:
+# both sides agree, because both sides *are* the frozen document.
+#
+# **The comparison is 2A against 2B, not 2A against the books.** A books/2A
+# disagreement is an ordinary mismatch and `gst:AmountMismatch` already
+# reports it. What is specific here is that the *authority* has changed its
+# own answer, which is a different conversation with a different counterparty:
+# the supplier amended something, and the recipient's filed position is now
+# out of date through no error of their own.
+#
+# **No tolerance is applied, deliberately.** `gst:AmountMismatch` allows a cap
+# because two independently keyed documents can round differently. Here both
+# numbers come from the same authority, so any difference at all is a real
+# amendment rather than a rounding artefact — a tolerance would hide small
+# amendments, which are the ones nobody notices unaided.
+#
+# The 2B side is bound through `gst:reflectedIn` and the 2A side through
+# `gst:observedIn`; a row appears only where **both** exist, which is what
+# makes this distinct from `filed-late-in-gstr2a` (that one fires precisely
+# where the 2B side is absent). The two rules partition the same join and
+# cannot both fire on one invoice.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?claimedAmount ?observedAmount ?pulledOn
+WHERE {
+  GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?claimedGraph {
+    ?canonical gst:reflectedIn ?claimed .
+    ?claimed a gst:Gstr2bInvoice ;
+             gst:taxAmount ?claimedAmount .
+  }
+
+  GRAPH ?observedGraph {
+    ?canonical gst:observedIn ?seen .
+    ?seen a gst:Gstr2aInvoice ;
+          gst:taxAmount ?observedAmount ;
+          gst:seenIn    ?snapshot .
+    ?snapshot gst:pulledOn ?pulledOn .
+  }
+
+  FILTER (?observedAmount != ?claimedAmount)
+}
+ORDER BY ?number

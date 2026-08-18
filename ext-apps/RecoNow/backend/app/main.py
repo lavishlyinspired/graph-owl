@@ -85,6 +85,10 @@ FIELD_LABELS = {
     "payment_date": "Payment Date",
     "receipt_date": "Goods Receipt Date",
     "itc_available": "ITC Available",
+    # GSTR-2A only — the date the snapshot was pulled from the portal. 2A is
+    # dynamic, so *when* it was read is part of what it says; without this
+    # every pull is indistinguishable and drift cannot be computed.
+    "pulled_on": "2A Pulled On",
 }
 
 #: Which finding rules each optional dataset switches on. A firm that cannot
@@ -96,6 +100,7 @@ CHECKS_BY_KIND: dict[str, tuple[str, ...]] = {
     "payments": ("gst:PaymentOverdue",),
     "grn": ("gst:GoodsReceiptTiming",),
     "gstr1": ("gst:MissingInBooks", "gst:Gstr1NotIn2b", "gst:BooksGstr1Mismatch"),
+    "gstr2a": ("gst:FiledLateInGstr2a", "gst:AmendedAfterClaim"),
 }
 
 #: Why a reviewer should care that each is off, in their own terms.
@@ -105,6 +110,8 @@ CHECK_REASONS: dict[str, str] = {
     "gst:MissingInBooks": "invoices the supplier declared that the books do not carry",
     "gst:Gstr1NotIn2b": "declared in GSTR-1 but not yet reached GSTR-2B",
     "gst:BooksGstr1Mismatch": "the books and the supplier's GSTR-1 disagree",
+    "gst:FiledLateInGstr2a": "the supplier filed after the 2B you claimed against was frozen",
+    "gst:AmendedAfterClaim": "the portal's value has changed since the 2B you claimed against",
 }
 
 
@@ -192,6 +199,15 @@ _FIELD_KEYWORDS = [
     # unmapped exactly like any other absent field.
     ("filing date", "filed_date"),
     ("filed date", "filed_date"),
+    # GSTR-2A pull date. A portal export names this several ways and none of
+    # them is "pulled_on"; each of these was taken from a real 2A header row
+    # rather than guessed.
+    ("pulled on", "pulled_on"),
+    ("pull date", "pulled_on"),
+    ("date of download", "pulled_on"),
+    ("downloaded on", "pulled_on"),
+    ("as on date", "pulled_on"),
+    ("as on", "pulled_on"),
     ("return period", "period"),
     ("period", "period"),
 ]
@@ -833,19 +849,23 @@ def _ingest_scoped_to_graphowl(
     one session at a time, so `reco-{kind}` alone never collided; two
     clients uploading concurrently now genuinely can, and a shared source
     name would mean client B's upload deletes and replaces client A's own
-    books. **Known limitation, not fixed here**: the native reconcile
-    engine itself (`run_findings`, called by `_run_graphowl_reconcile` and
-    the client+period `reconcile_route` below) still runs unscoped over the
-    *whole* graph-owl store — this was true before B0 and stays true after
-    it (`_install_graphowl_pack`'s own comment already documents it). This
-    fix stops one client's ingest from silently overwriting another's;
-    fully isolating the reconcile step itself needs a graph-owl-side
-    scoping mechanism this Python backend cannot add on its own."""
+    books.
+
+    **The limitation this docstring used to record is closed** (Plan 123
+    Slice C0, 19 August 2026). It read: "the native reconcile engine itself
+    still runs unscoped over the *whole* graph-owl store ... fully isolating
+    the reconcile step needs a graph-owl-side scoping mechanism this Python
+    backend cannot add on its own." That mechanism now exists —
+    `POST /packs/{pack}/reconcile` takes a `graphs` scope, built here by
+    `reconcile_scope` — and a run reads only the graphs it names."""
     normalized = _normalize(dataset, mapping)
     # The 2B statement's period, taken from the workspace when the file does
     # not carry a "Return Period" column — which real exports usually do not.
     # Without it there is no statement subject and s.16(2)(b) cannot fire.
-    if kind in ("gstr2b", "portal"):
+    # `gstr2a` too: a portal 2A export carries a pull date far more often
+    # than a return period, and without a period the snapshot cannot be
+    # matched to the 2B it is supposed to be compared against.
+    if kind in ("gstr2b", "portal", "gstr2a"):
         normalized = apply_period_fallback(normalized, period_label)
     turtle = graphowl_client.rows_to_turtle(normalized, kind)
     # Source name must be 1-64 chars of [a-zA-Z0-9_-].  Two UUIDs + prefix
@@ -1638,14 +1658,14 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"Could not parse {file.filename}: {exc}"}
         lower = file.filename.lower() if file.filename else ""
-        if "2a" in lower or "gstr-2a" in lower or "gstr1" in lower or "gstr-1" in lower:
-            # GSTR-2A/GSTR-1 — ingests as gst:Gstr1Invoice
-            # (graphowl_client.CLASS_BY_KIND's own comment: packs/gst
-            # deliberately has no separate Gstr2aInvoice class, 2A is "a
-            # revolving view over the same supplier-declared data").
-            # Backend/graph-owl support only for now — no dedicated Map/
-            # Reconcile UI slot yet (plans/119-architecture-audit.md §8).
-            kind, name = "gstr1", "GSTR-2A / GSTR-1"
+        # 2A is checked **before** GSTR-1 and before 2B, because the three
+        # filename patterns overlap ("gstr-2a" contains neither "gstr1" nor
+        # "2b", but a file named "gstr2a_and_2b_export" contains both). 2A is
+        # the more specific claim, so it wins — Plan 123 Slice C.
+        if "2a" in lower or "gstr-2a" in lower:
+            kind, name = "gstr2a", "GSTR-2A (portal, dynamic)"
+        elif "gstr1" in lower or "gstr-1" in lower or "iff" in lower:
+            kind, name = "gstr1", "GSTR-1 / IFF (supplier declared)"
         elif "2b" in lower or "gstr-2b" in lower or "portal" in lower or "gov" in lower:
             kind, name = "gstr2b", "Government Data"
         else:
@@ -1655,7 +1675,7 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
     if not SESSION["datasets"]:
         return {"ok": False, "error": "No valid files uploaded."}
     SESSION["graphowl_ingest_threads"] = []
-    for kind in ("books", "gstr2b", "gstr1"):
+    for kind in ("books", "gstr2b", "gstr1", "gstr2a"):
         if kind in SESSION["datasets"]:
             SESSION["mapping"][kind] = _auto_map(SESSION["datasets"][kind]["headers"])
             thread = _ingest_to_graphowl(kind, SESSION["datasets"][kind], SESSION["mapping"][kind])

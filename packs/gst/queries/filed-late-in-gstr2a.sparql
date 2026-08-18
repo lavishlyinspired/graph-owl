@@ -1,0 +1,70 @@
+# The supplier filed **after** the GSTR-2B this recipient claimed against was
+# frozen — Plan 123 Slice C.
+#
+# **This is the finding a 2B alone can never produce**, and the reason 2A is
+# worth holding at all. GSTR-2B is generated on the 14th and does not change;
+# GSTR-2A keeps moving. An invoice that appears in a 2A pull but in no 2B is
+# either a supplier who filed late or one who filed against the wrong GSTIN —
+# both actionable, neither visible from the 2B alone, because from the 2B's
+# point of view nothing happened.
+#
+# **Not the same finding as `gstr1-not-in-2b`, and the difference is who is
+# speaking.** That rule reads the supplier's own GSTR-1 — what they *say* they
+# filed. This one reads the portal's 2A — what the authority *shows*. A
+# supplier can claim to have filed while the portal shows nothing, and a
+# reviewer chasing the difference needs to know which source they are looking
+# at. The two rules deliberately overlap; where both fire, the story is
+# consistent, which is itself information.
+#
+# **"No 2B" means no 2B in any period this deployment holds**, the same
+# reading `gstr1-not-in-2b.sparql` uses and for the same reason: an invoice
+# that surfaces in a *later* period's 2B is a carry-forward, not a failure,
+# and must not fire here. This is what makes the plan's own RED case work —
+# a supplier filing in month N+1 for a month-N invoice produces this finding
+# against month N and **no duplicate claim** in month N+1, because once the
+# N+1 2B carries it, `?claimed` binds and the rule stops firing.
+#
+# `OPTIONAL` + `!BOUND` rather than `FILTER NOT EXISTS`, and every pattern in
+# its own `GRAPH ?var { }` — both traps are documented at length in
+# `missing-in-gstr2b.sparql`, where they were found against real data.
+#
+# Reverse-charge invoices are excluded: the recipient self-assesses, so there
+# is no supplier line to arrive late.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?pulledOn ?observedPeriod
+WHERE {
+  GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy      ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?portal {
+    ?canonical gst:observedIn ?seen .
+    ?seen a gst:Gstr2aInvoice ;
+          gst:seenIn ?snapshot .
+    ?snapshot gst:pulledOn ?pulledOn ;
+              gst:period   ?observedPeriod .
+  }
+
+  OPTIONAL {
+    GRAPH ?rcmGraph {
+      ?invoice gst:reverseCharge ?rcm .
+    }
+  }
+
+  OPTIONAL {
+    GRAPH ?anyAuthority {
+      ?canonical gst:reflectedIn ?claimed .
+    }
+  }
+
+  FILTER (!BOUND(?claimed))
+  FILTER (!BOUND(?rcm) || ?rcm != "Y")
+}
+ORDER BY ?number
