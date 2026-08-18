@@ -330,3 +330,81 @@ export function fetchRisk(clientId: string, periodId: string): Promise<readonly 
     `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/risk`,
   );
 }
+
+export interface ResetStatus {
+  readonly clients: number;
+  readonly periods: number;
+  readonly cases: number;
+  readonly approvals: number;
+  readonly users: number;
+}
+
+export function fetchResetStatus(): Promise<ResetStatus> {
+  return apiFetch<ResetStatus>("/api/reset/status");
+}
+
+export interface Deliverable {
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly generated_at: string;
+}
+
+export function fetchDeliverables(clientId: string, periodId: string): Promise<readonly Deliverable[]> {
+  return apiFetch<Deliverable[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/deliverables`,
+  );
+}
+
+export interface ImportRecord {
+  readonly id: string;
+  readonly kind: string;
+  readonly columns_mapped: number;
+  readonly tolerance: number;
+  readonly imported_at: string;
+}
+
+export function fetchImports(clientId: string, periodId: string): Promise<readonly ImportRecord[]> {
+  return apiFetch<ImportRecord[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/imports`,
+  );
+}
+
+export interface MappingRecord {
+  readonly id: string;
+  readonly dataset_kind: string;
+  readonly mapping: Record<string, unknown>;
+  readonly tolerance: number;
+  readonly updated_at: string;
+}
+
+export function fetchMappings(clientId: string, periodId: string): Promise<readonly MappingRecord[]> {
+  return apiFetch<MappingRecord[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/mappings`,
+  );
+}
+
+export interface Rule {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly severity: string;
+  readonly enabled: boolean;
+  readonly case_count: number;
+}
+
+export function fetchRules(): Promise<readonly Rule[]> {
+  return apiFetch<Rule[]>("/api/rules");
+}
+
+export interface User {
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+  readonly role: string;
+  readonly assigned_cases: number;
+}
+
+export function fetchUsers(): Promise<readonly User[]> {
+  return apiFetch<User[]>("/api/users");
+}

@@ -1471,3 +1471,157 @@ async def supplier_risk(client_id: str, period_id: str):
         }
         for r in rows
     ]
+
+
+@app.get("/api/reset/status")
+async def reset_status():
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        clients = await conn.fetchval("SELECT COUNT(*) FROM client")
+        periods = await conn.fetchval("SELECT COUNT(*) FROM period")
+        cases = await conn.fetchval("SELECT COUNT(*) FROM case_record")
+        approvals = await conn.fetchval("SELECT COUNT(*) FROM approval")
+        users = await conn.fetchval("SELECT COUNT(*) FROM app_user")
+    return {
+        "clients": clients,
+        "periods": periods,
+        "cases": cases,
+        "approvals": approvals,
+        "users": users,
+    }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/deliverables")
+async def list_deliverables(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, kind, status, generated_at
+            FROM deliverable
+            WHERE client_id = $1 AND period_id = $2
+            ORDER BY generated_at DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "kind": r["kind"],
+            "status": r["status"],
+            "generated_at": r["generated_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/mappings")
+async def list_mappings(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, dataset_kind, mapping, tolerance, updated_at
+            FROM mapping_template
+            WHERE client_id = $1
+            ORDER BY updated_at DESC
+            """,
+            client_id,
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "dataset_kind": r["dataset_kind"],
+            "mapping": r["mapping"],
+            "tolerance": r["tolerance"],
+            "updated_at": r["updated_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/rules")
+async def list_rules():
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT reason_code, COUNT(*) as count
+            FROM case_record
+            WHERE reason_code IS NOT NULL
+            GROUP BY reason_code
+            ORDER BY count DESC
+            """
+        )
+    rules = [
+        {
+            "id": f"rule-{i+1}",
+            "code": r["reason_code"],
+            "name": r["reason_code"].replace("_", " ").title(),
+            "severity": "high" if i < 3 else "medium",
+            "enabled": True,
+            "case_count": r["count"],
+        }
+        for i, r in enumerate(rows)
+    ]
+    if not rules:
+        rules = [
+            {"id": "rule-1", "code": "TAX_HEAD_MISMATCH", "name": "Tax Head Mismatch", "severity": "high", "enabled": True, "case_count": 0},
+            {"id": "rule-2", "code": "SUPPLIER_NOT_FILED", "name": "Supplier Not Filed", "severity": "high", "enabled": True, "case_count": 0},
+            {"id": "rule-3", "code": "DUPLICATE_INVOICE", "name": "Duplicate Invoice", "severity": "medium", "enabled": True, "case_count": 0},
+            {"id": "rule-4", "code": "MISSING_IN_PORTAL", "name": "Missing in Portal", "severity": "medium", "enabled": True, "case_count": 0},
+            {"id": "rule-5", "code": "AMOUNT_MISMATCH", "name": "Amount Mismatch", "severity": "low", "enabled": True, "case_count": 0},
+        ]
+    return rules
+
+
+@app.get("/api/users")
+async def list_users():
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT u.id, u.name, u.email, u.role,
+                   COUNT(cr.id) as assigned_cases
+            FROM app_user u
+            LEFT JOIN case_record cr ON cr.assigned_to = u.id
+            GROUP BY u.id, u.name, u.email, u.role
+            ORDER BY u.name
+            """
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "name": r["name"],
+            "email": r["email"],
+            "role": r["role"],
+            "assigned_cases": r["assigned_cases"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/imports")
+async def list_imports(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, dataset_kind, mapping, tolerance, updated_at
+            FROM mapping_template
+            WHERE client_id = $1
+            ORDER BY updated_at DESC
+            """,
+            client_id,
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "kind": r["dataset_kind"],
+            "columns_mapped": sum(1 for v in json.loads(r["mapping"]).values() if v is not None),
+            "tolerance": r["tolerance"],
+            "imported_at": r["updated_at"].isoformat(),
+        }
+        for r in rows
+    ]
