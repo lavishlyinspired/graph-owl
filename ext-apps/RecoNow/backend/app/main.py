@@ -19,9 +19,11 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data
+from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
+from decimal import Decimal
+
 from .data_quality import inspect_rows
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
@@ -1120,6 +1122,20 @@ def _supplier_names(datasets: dict) -> dict[str, str]:
     return names
 
 
+def _decimals_to_floats(value):
+    """`Decimal` is exact and `json` cannot serialize it. Converting at the
+    HTTP boundary keeps every computation above this line exact — money
+    arithmetic in float is how a working paper comes to disagree with itself
+    by a rupee."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _decimals_to_floats(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimals_to_floats(v) for v in value]
+    return value
+
+
 def case_from_finding(finding: dict) -> dict:
     """Everything a Reco Now case takes from one graph-owl finding.
 
@@ -1377,6 +1393,69 @@ async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, 
             conn, client_id=client_id, period_id=period_id, case_id=case_id, decision=decision
         )
     return {"id": decision_id, "decision": decision}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/working-paper")
+async def working_paper_route(client_id: str, period_id: str) -> dict:
+    """The GSTR-3B working paper — gross → deductions → net, every figure
+    traced, and the filed return beside it.
+
+    Plan 123 §4 calls this *the deliverable*. It is the document a partner
+    reviews and an officer asks about, so each line names its own source and
+    every statutory deduction cites the provision that required it.
+
+    Amounts come from the **cases** rather than from the raw findings, because
+    a case already carries the tax at stake (`case_from_finding` resolves it
+    from the finding's own evidence bindings) and is what the rest of the
+    product counts. Deriving it twice, differently, is how the summary and the
+    detail come to disagree.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        stored = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+
+    by_kind = {entry["kind"]: entry for entry in stored}
+
+    def rows_for(kind: str) -> list[dict]:
+        entry = by_kind.get(kind)
+        if entry is None:
+            return []
+        dataset = {"headers": entry["headers"], "rows": entry["rows"]}
+        return graphowl_client.net_credit_notes(
+            graphowl_client.aggregate_invoice_lines(_normalize(dataset, entry["mapping"]))
+        )
+
+    def tax_of(row: dict) -> Decimal:
+        return Decimal(str(graphowl_client._combined_tax_amount(row)))
+
+    portal = [{"tax_amount": tax_of(row)} for row in rows_for("gstr2b")]
+
+    # A case's own booked tax is the amount at stake. **`None` is passed
+    # through, never coerced to zero** — `build_working_paper` counts an
+    # unquantified deduction separately, and flattening it here would report a
+    # complete chain over a case whose amount nobody established. That is
+    # exactly what this route did until a live run showed a flagged
+    # `gst:PaymentOverdue` deducting zero.
+    findings = [
+        {
+            "label": case["reason_code"],
+            "tax_amount": None
+            if case["books_amount"] is None
+            else Decimal(str(case["books_amount"])),
+        }
+        for case in cases
+    ]
+
+    # The 3B, if one was uploaded. Its figures are period totals, so the first
+    # row is the whole return — unlike every line-level kind here.
+    filed_rows = rows_for("gstr3b")
+    gstr3b = filed_rows[0] if filed_rows else None
+
+    paper = working_paper.build_working_paper(
+        gstr2b=portal, findings=findings, gstr3b=gstr3b
+    )
+    return _decimals_to_floats(paper)
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/reconciliation")

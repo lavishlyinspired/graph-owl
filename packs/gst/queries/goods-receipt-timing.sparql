@@ -40,15 +40,24 @@
 # the per-line `Gstr2bInvoice` record onto its `Gstr2bStatement`, reached
 # through `reflectedIn`'s second-level reuse.
 
+# **`taxAmount` is bound and projected for the same reason
+# `payment-overdue.sparql` carries it — Plan 123 Slice D.** s.16(2)(b) credit
+# that must wait for the goods is a deduction on a working paper, and a
+# deduction nobody can size is not actionable. Found live, alongside the Rule
+# 37 case: the GSTR-3B working paper had no amount to subtract while this rule
+# was reporting findings. The invoice is already bound, so carrying the amount
+# costs nothing.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
-SELECT ?purchase ?number ?gstin ?period ?receivedAt
+SELECT ?purchase ?number ?gstin ?taxAmount ?period ?receivedAt
 WHERE {
   GRAPH ?register {
     ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
-              gst:invoiceNumber ?number .
+              gst:invoiceNumber ?number ;
+              gst:taxAmount     ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
 

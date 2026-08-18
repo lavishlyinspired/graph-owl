@@ -322,6 +322,56 @@ export function fetchItcPosition(clientId: string, periodId: string): Promise<It
   );
 }
 
+/** One line of the GSTR-3B working paper. `source` is what makes it a working
+ *  paper rather than a summary: a figure a reviewer cannot trace is one they
+ *  have to take on trust. `citation` is present only on statutory deductions. */
+export interface WorkingPaperLine {
+  readonly key: string;
+  readonly kind: "opening" | "deduction" | "closing";
+  readonly label: string;
+  readonly amount: number;
+  /** How many findings landed on this line with no amount anybody
+   *  established. Counted, never coerced to zero — a deduction of zero and
+   *  one of unknown size are different claims, and zeroing makes the net
+   *  figure overstate what is claimable. */
+  readonly unquantified: number;
+  readonly source: string;
+  readonly citation: string | null;
+}
+
+/** How the computed position compares to the return that was actually filed.
+ *  Kept apart from the chain deliberately — netting a computed claim against a
+ *  filed one hides which of the two is being asserted. */
+export interface WorkingPaperFiled {
+  readonly direction: "excess" | "unclaimed" | "agrees" | "not_evaluated";
+  readonly difference: number | null;
+  readonly needs: string | null;
+  readonly available_2b: number;
+  readonly gross_claimed: number | null;
+  readonly reversed: number | null;
+  readonly net_claimed: number | null;
+  readonly arithmetic_ok: boolean | null;
+}
+
+export interface WorkingPaper {
+  readonly lines: readonly WorkingPaperLine[];
+  /** Whether every deduction the chain names could be sized. A paper with an
+   *  unquantified line is still the best available position; it just is not
+   *  the final one. */
+  readonly complete: boolean;
+  /** Findings the chain has no line for. Surfaced rather than dropped: a
+   *  deduction with nowhere to go would make the net figure overstate what is
+   *  claimable, silently. */
+  readonly unmodelled: readonly { readonly label: string; readonly amount: number }[];
+  readonly filed: WorkingPaperFiled;
+}
+
+export function fetchWorkingPaper(clientId: string, periodId: string): Promise<WorkingPaper> {
+  return apiFetch<WorkingPaper>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/working-paper`,
+  );
+}
+
 export interface AtRiskSupplier {
   readonly gstin: string;
   readonly name: string | null;

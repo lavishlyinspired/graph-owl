@@ -665,6 +665,10 @@ subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
   { predicate = "gst:invoiceNumber", var = "number" },
+  # The credit this defers. Without it a working paper cannot size the
+  # s.16(2)(b) deduction and must either skip it or subtract zero — both of
+  # which overstate what is claimable this period.
+  { predicate = "gst:taxAmount", var = "taxAmount" },
   { predicate = "gst:period", var = "period" },
   { predicate = "gst:atTime", var = "receivedAt" },
 ]
@@ -805,6 +809,10 @@ subject = "purchase"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },
   { predicate = "gst:supplierGstin", var = "gstin" },
+  # Without this the reversal has no size, and a consumer computing a net ITC
+  # position must either deduct zero or drop the line — both of which
+  # overstate what is claimable.
+  { predicate = "gst:taxAmount", var = "taxAmount" },
   { predicate = "gst:atTime", var = "purchasedAt" },
   { predicate = "gst:atTime", var = "paidAt" },
 ]

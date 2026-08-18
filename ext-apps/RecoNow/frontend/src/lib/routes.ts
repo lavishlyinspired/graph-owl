@@ -30,6 +30,7 @@ export const ROUTES = [
   "agents",
   "deliverables",
   "analytics",
+  "workingpaper",
   "imports",
   "datasources",
   "mappings",

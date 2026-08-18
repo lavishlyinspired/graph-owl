@@ -25,15 +25,24 @@
 # directly and are untouched by that migration) does not need the canonical
 # subject for anything further.
 
+# **`taxAmount` is bound and projected because a reversal nobody can size is
+# not actionable — Plan 123 Slice D.** Found live: the GSTR-3B working paper
+# deducted zero for every Rule 37 reversal while this rule was reporting
+# findings, because its evidence carried `atTime` bindings and no amount at
+# all. The consumer then had to choose between deducting zero (overstating
+# what is claimable) and dropping the line (the same thing, less visibly).
+# The invoice is already bound here, so the amount costs nothing to carry.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
-SELECT ?purchase ?number ?gstin ?purchasedAt ?paidAt
+SELECT ?purchase ?number ?gstin ?taxAmount ?purchasedAt ?paidAt
 WHERE {
   GRAPH ?register {
     ?canonical gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
-             gst:invoiceNumber ?number .
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
   GRAPH ?events {

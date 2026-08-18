@@ -32,3 +32,67 @@ describe("NAV", () => {
     expect(ROUTES.length).toBeGreaterThan(0);
   });
 });
+
+describe("the five-stage shape", () => {
+  it("groups the work by stage, not by noun", () => {
+    // Plan 123 Slice D. The old grouping named *things* — ITC, SUPPLIERS,
+    // COMPLIANCE, DELIVER — so a reviewer had to know which noun held the
+    // screen they wanted. The five stages name *what you are doing*, in the
+    // order a period is actually worked: get the data in, reconcile it, work
+    // the cases, understand the position, act on it.
+    expect(NAV.map((g) => g.label)).toEqual([
+      "HOME",
+      "DATA",
+      "RECONCILE",
+      "CASES",
+      "INTELLIGENCE",
+      "ACT",
+      "SETTINGS",
+    ]);
+  });
+
+  it("puts every screen a period's work touches into exactly one stage", () => {
+    const staged = NAV.filter((g) => !["HOME", "SETTINGS"].includes(g.label)).flatMap(
+      (g) => g.items.map((i) => i.route),
+    );
+
+    expect(new Set(staged).size).toBe(staged.length);
+  });
+
+  it("orders the stages so each depends only on the ones before it", () => {
+    // Reconciling needs data; a case needs a reconciliation to have produced
+    // it; the ITC position needs the cases resolved; acting needs the
+    // position. A nav that lists them in another order teaches the wrong
+    // sequence to whoever is learning the product from it.
+    const order = NAV.map((g) => g.label);
+
+    expect(order.indexOf("DATA")).toBeLessThan(order.indexOf("RECONCILE"));
+    expect(order.indexOf("RECONCILE")).toBeLessThan(order.indexOf("CASES"));
+    expect(order.indexOf("CASES")).toBeLessThan(order.indexOf("INTELLIGENCE"));
+    expect(order.indexOf("INTELLIGENCE")).toBeLessThan(order.indexOf("ACT"));
+  });
+
+  it("keeps upload at the head of DATA, because nothing else works without it", () => {
+    const data = NAV.find((g) => g.label === "DATA");
+
+    expect(data?.items[0]?.route).toBe("pipeline");
+  });
+
+  it("carries the GSTR-3B working paper under INTELLIGENCE", () => {
+    // The plan's own words: gross -> reversals -> net Table 4, every figure
+    // traced. It is an understanding screen, not an action one.
+    const intelligence = NAV.find((g) => g.label === "INTELLIGENCE");
+
+    expect(intelligence?.items.map((i) => i.route)).toContain("workingpaper");
+  });
+
+  it("loses no screen in the regrouping", () => {
+    // The regrouping is an information-architecture change, not a deletion.
+    // A screen that silently vanished would take its functionality with it.
+    const reachable = new Set(NAV.flatMap((g) => g.items.map((i) => i.route)));
+
+    for (const route of ROUTES) {
+      expect(reachable.has(route)).toBe(true);
+    }
+  });
+});
