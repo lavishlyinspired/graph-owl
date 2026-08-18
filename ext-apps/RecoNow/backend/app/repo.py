@@ -45,18 +45,30 @@ async def list_periods(conn: asyncpg.Connection, *, client_id: str) -> list[dict
 
 
 async def create_case(
-    conn: asyncpg.Connection, *, client_id: str, period_id: str, invoice_no: str, reason_code: str | None
+    conn: asyncpg.Connection,
+    *,
+    client_id: str,
+    period_id: str,
+    invoice_no: str,
+    reason_code: str | None,
+    supplier_name: str | None = None,
+    supplier_gstin: str | None = None,
+    books_amount: float | None = None,
+    portal_amount: float | None = None,
 ) -> str:
     row = await conn.fetchrow(
-        "INSERT INTO case_record (client_id, period_id, invoice_no, reason_code) VALUES ($1, $2, $3, $4) RETURNING id",
-        client_id, period_id, invoice_no, reason_code,
+        "INSERT INTO case_record "
+        "(client_id, period_id, invoice_no, reason_code, supplier_name, supplier_gstin, books_amount, portal_amount) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        client_id, period_id, invoice_no, reason_code, supplier_name, supplier_gstin, books_amount, portal_amount,
     )
     return str(row["id"])
 
 
 async def list_cases(conn: asyncpg.Connection, *, client_id: str, period_id: str) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        "SELECT id, invoice_no, reason_code, status, assigned_to, created_at, updated_at "
+        "SELECT id, invoice_no, reason_code, status, assigned_to, supplier_name, supplier_gstin, "
+        "books_amount, portal_amount, created_at, updated_at "
         "FROM case_record WHERE client_id = $1 AND period_id = $2 ORDER BY created_at",
         client_id, period_id,
     )

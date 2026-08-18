@@ -135,6 +135,27 @@ export function runReconcile(clientId: string, periodId: string): Promise<Reconc
   return apiPost(`/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/reconcile`, {});
 }
 
+export interface DashboardCase {
+  readonly invoice_no: string;
+  readonly reason_code: string | null;
+  readonly supplier_name: string | null;
+  readonly exposure: number;
+  readonly status: string;
+}
+
+export interface Dashboard {
+  readonly case_count: number;
+  readonly total_exposure: number;
+  readonly needs_decision: readonly DashboardCase[];
+  readonly pending_approvals: number;
+}
+
+export function fetchDashboard(clientId: string, periodId: string): Promise<Dashboard> {
+  return apiFetch<Dashboard>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/dashboard`,
+  );
+}
+
 export function decideApproval(
   clientId: string,
   periodId: string,

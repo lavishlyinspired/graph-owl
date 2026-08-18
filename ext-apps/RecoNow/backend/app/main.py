@@ -632,6 +632,51 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
     }
 
 
+@app.get("/api/clients/{client_id}/periods/{period_id}/dashboard")
+async def dashboard_route(client_id: str, period_id: str) -> dict:
+    """Plan 122b B2, scoped honestly: real totals computed directly from
+    case_record/approval, not the mockup's full 6-panel layout. A case's
+    exposure is books_amount minus portal_amount when both are known;
+    "not yet in 2B at all" (portal_amount is null) counts the full books
+    amount at risk, not zero — the same reasoning the mockup's own "only
+    in books" bucket uses. Every total here is a direct aggregate of the
+    same rows `needs_decision` lists, so the two can never silently
+    disagree — the plan's own stated RED for this screen."""
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+        approvals = await repo.list_approvals(conn, client_id=client_id, period_id=period_id, status="pending")
+
+    def _exposure(case: dict) -> float:
+        books = float(case["books_amount"]) if case["books_amount"] is not None else 0.0
+        portal = float(case["portal_amount"]) if case["portal_amount"] is not None else 0.0
+        if case["portal_amount"] is None:
+            return books
+        return abs(books - portal)
+
+    scored = sorted(
+        (
+            {
+                "invoice_no": c["invoice_no"],
+                "reason_code": c["reason_code"],
+                "supplier_name": c["supplier_name"],
+                "exposure": _exposure(c),
+                "status": c["status"],
+            }
+            for c in cases
+        ),
+        key=lambda row: row["exposure"],
+        reverse=True,
+    )
+
+    return {
+        "case_count": len(cases),
+        "total_exposure": sum(row["exposure"] for row in scored),
+        "needs_decision": scored,
+        "pending_approvals": len(approvals),
+    }
+
+
 @app.post("/api/clients/{client_id}/periods/{period_id}/approvals", status_code=201)
 async def create_approval_route(client_id: str, period_id: str, payload: dict) -> dict:
     pool = _require_db_pool()

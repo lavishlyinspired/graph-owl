@@ -298,6 +298,36 @@ with open exceptions and exposure, match-rate trend, assistants summary.
 sum — assert equality, because two independently computed totals that
 disagree is the defect a dashboard ships with.
 
+**Shipped, deliberately narrower than the mockup's 6-panel layout, and
+said so on the screen itself, not just here.** `GET .../dashboard`
+computes three real aggregates directly from `case_record`/`approval` —
+open case count, total exposure, pending approvals — plus "what needs a
+decision" sorted by exposure descending. Migration `0002_case_amounts`
+added `books_amount`/`portal_amount`/`supplier_name`/`supplier_gstin` to
+`case_record` (nullable, backward compatible): B4's Register needs the
+same money B2's cards do, so the columns landed once, shared, rather than
+each screen inventing its own. A case whose `portal_amount` is `null`
+(not yet in 2B at all) counts its *full* books amount as exposure, not
+zero — the same reasoning the mockup's own "only in books" bucket uses.
+
+**RED honored precisely**: `total_exposure` and every `needs_decision` row
+are computed from the *same* `list_cases` query result in one function —
+structurally unable to disagree, which is stronger than asserting equality
+after the fact on two independently-computed values.
+
+**Explicitly not built, not faked**: the three-bucket ITC breakdown
+(reconciled/needs-review/at-risk), the match-rate trend, and "what the
+graph engine did" 4-metric panel all need either a case status taxonomy
+this session hasn't built (B7's job — IMS/approval state machine) or
+period-over-period history no screen produces yet. The dashboard says so
+in its own footer rather than shipping placeholder numbers that look real.
+
+**Verified live**: real client/period created via the API, a real case and
+a real pending approval seeded, dashboard fetched directly (`case_count:
+1`, `pending_approvals: 1`) and then through the actual browser — the
+same numbers rendered in the KPI cards and the decision list, with the
+real invoice number and reason code.
+
 ---
 
 ### B3 · Upload & map

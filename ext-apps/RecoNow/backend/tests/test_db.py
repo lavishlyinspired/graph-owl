@@ -41,17 +41,36 @@ async def test_applying_migrations_twice_is_a_no_op(pool):
     assert versions == sorted(set(versions))
 
 
-async def test_rollback_drops_the_tables_the_matching_migration_created(pool):
+async def test_rollback_undoes_only_the_most_recent_migration(pool):
+    """`rollback_last_migration` rolls back one migration at a time (the
+    same shape `refinery` and every other migration runner uses) — rolling
+    back once with two migrations applied must undo 0002's own columns
+    without touching 0001's tables."""
     async with pool.acquire() as conn:
         await db.rollback_last_migration(conn)
+        columns = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'case_record'"
+        )
+        applied = {row["version"] for row in await conn.fetch("SELECT version FROM schema_migrations")}
+    column_names = {row["column_name"] for row in columns}
+    assert "books_amount" not in column_names
+    assert "invoice_no" in column_names  # 0001's own column, untouched
+    assert applied == {"0001_initial"}
+
+
+async def test_repeated_rollback_eventually_drops_every_table(pool):
+    async with pool.acquire() as conn:
+        applied = await conn.fetch("SELECT version FROM schema_migrations")
+        for _ in applied:
+            await db.rollback_last_migration(conn)
         tables = await conn.fetch(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
         )
-        applied = await conn.fetch("SELECT version FROM schema_migrations")
+        remaining = await conn.fetch("SELECT version FROM schema_migrations")
     names = {row["table_name"] for row in tables}
     assert "client" not in names
     assert "case_record" not in names
-    assert len(applied) == 0
+    assert len(remaining) == 0
 
 
 async def test_rollback_then_reapply_recreates_the_schema(pool):

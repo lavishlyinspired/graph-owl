@@ -25,4 +25,13 @@ export const strings = {
   newPeriodMonth: "Month",
   newPeriodYear: "Year",
   addPeriod: "Add period",
+  dashboardTitle: "Close-readiness",
+  dashboardDesc: "What needs a decision, ranked by exposure.",
+  dashboardCaseCount: "OPEN CASES",
+  dashboardExposure: "TOTAL EXPOSURE",
+  dashboardApprovals: "AWAITING APPROVAL",
+  dashboardNeedsDecision: "What needs a decision",
+  dashboardEmpty: "No cases yet — upload and reconcile a period to see them here.",
+  dashboardScopeNote:
+    "Match-rate trend and \"what the graph engine did\" need period-over-period history and richer finding metadata this backend does not compute yet — not shown here rather than shown wrong.",
 } as const;
