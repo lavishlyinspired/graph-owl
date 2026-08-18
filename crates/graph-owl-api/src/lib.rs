@@ -1958,6 +1958,17 @@ pub struct AssetAnalytics {
     /// neighbourhood, the same reading [`graph_owl_analytics::Components::orphans`]
     /// already gives.
     pub orphans: Vec<Sid>,
+    /// Directed cycles among the walked nodes — each an inner `Vec` of
+    /// subjects that can all reach each other **following edge direction**.
+    ///
+    /// **Not derivable from `orphans` or from any weakly-connected result**,
+    /// which is why it is a separate field rather than a view over one.
+    /// [`graph_owl_analytics::connected_components`] ignores direction, so
+    /// `a → b → c → a` and `a → b → c` are the same single component there;
+    /// here only the first is reported. Value returning to where it started
+    /// is a different claim from supply passing along a chain, and no
+    /// per-edge rule can make either one.
+    pub cycles: Vec<Vec<Sid>>,
     /// Which predicates were counted as graph structure — every one whose
     /// object was a reference among the walked nodes' own flakes, derived
     /// rather than pack-specific.
@@ -4275,11 +4286,22 @@ impl Catalog {
             .map(|node_id| projection.nodes[node_id].clone())
             .collect();
 
+        let cycles: Vec<Vec<Sid>> = graph_owl_analytics::cycles(&projection)
+            .into_iter()
+            .map(|component| {
+                component
+                    .into_iter()
+                    .map(|node_id| projection.nodes[node_id].clone())
+                    .collect()
+            })
+            .collect();
+
         Ok(AssetAnalytics {
             nodes: projection.nodes.clone(),
             in_degree: in_degree.into_iter().map(|d| d.value).collect(),
             out_degree: out_degree.into_iter().map(|d| d.value).collect(),
             orphans,
+            cycles,
             edge_types,
             truncated: subgraph.truncated,
         })

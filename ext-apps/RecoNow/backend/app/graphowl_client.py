@@ -483,6 +483,33 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     return "\n".join(lines)
 
 
+def record_alignments(*, server: str, requests: list[dict], token: str | None = None) -> int:
+    """Post each alignment, returning how many landed — Plan 123 Slice G.
+
+    **Counts successes rather than raising on the first failure.** These are
+    independent facts: one malformed header should not cost the other twenty
+    their alignment, and the caller wants to know how many were recorded, not
+    which one failed first. A total failure is still visible — the count is
+    zero.
+    """
+    landed = 0
+    for request in requests:
+        try:
+            _request(
+                f"{server.rstrip('/')}/alignments",
+                method="POST",
+                token=token,
+                body=json.dumps(request).encode(),
+            )
+            landed += 1
+        except Exception:  # noqa: BLE001, S110
+            # Deliberately swallowed per the docstring above. The count is the
+            # signal; a partial result is more useful than an exception that
+            # discards the alignments that did land.
+            continue
+    return landed
+
+
 def import_document(
     server: str, source: str, turtle: str, token: str | None = None
 ) -> dict:

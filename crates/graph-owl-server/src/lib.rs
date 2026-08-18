@@ -2712,6 +2712,9 @@ async fn asset_analytics(
         "inDegree": analytics.in_degree,
         "outDegree": analytics.out_degree,
         "orphans": analytics.orphans.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "cycles": analytics.cycles.iter().map(|cycle| {
+            cycle.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        }).collect::<Vec<_>>(),
         "edgeTypes": analytics.edge_types.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         "truncated": analytics.truncated,
     })))
@@ -3101,6 +3104,9 @@ async fn graph_context_analytics_route(
         "inDegree": analytics.in_degree,
         "outDegree": analytics.out_degree,
         "orphans": analytics.orphans.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "cycles": analytics.cycles.iter().map(|cycle| {
+            cycle.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        }).collect::<Vec<_>>(),
         "edgeTypes": analytics.edge_types.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         "truncated": analytics.truncated,
     })))

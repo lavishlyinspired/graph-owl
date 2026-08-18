@@ -175,11 +175,18 @@ async fn one_invoice_entered_twice_is_reported_once_not_twice() {
     // and a reviewer would chase the same duplicate twice.
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ; gst:taxAmount "18000" .
         gst:books-2 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ; gst:taxAmount "18000" .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     let rows = run(&app, "duplicate-claim").await;
 
@@ -191,11 +198,18 @@ async fn one_invoice_entered_twice_is_reported_once_not_twice() {
 async fn two_different_invoices_from_one_supplier_are_not_duplicates() {
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ; gst:taxAmount "18000" .
         gst:books-2 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-10" ; gst:taxAmount "18000" .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     assert!(run(&app, "duplicate-claim").await.is_empty());
 }
@@ -206,10 +220,17 @@ async fn two_different_invoices_from_one_supplier_are_not_duplicates() {
 async fn an_unactioned_ims_record_is_reported_before_it_is_deemed_accepted() {
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:imsStatus "Pending" .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     let rows = run(&app, "ims-not-actioned").await;
 
@@ -222,13 +243,20 @@ async fn an_accepted_or_rejected_ims_record_is_not_reported() {
     // pass the positive above and bury a preparer in resolved items.
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:imsStatus "Accepted" .
         gst:books-2 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-10" ;
             gst:taxAmount "9000" ; gst:imsStatus "Rejected" .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     assert!(run(&app, "ims-not-actioned").await.is_empty());
 }
@@ -239,11 +267,18 @@ async fn an_accepted_or_rejected_ims_record_is_not_reported() {
 async fn a_reverse_charge_invoice_the_supplier_also_declared_is_a_contradiction() {
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:reverseCharge "Y" .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
     import(
         &app,
         "gst-2b",
@@ -267,13 +302,24 @@ async fn a_reverse_charge_invoice_absent_from_every_2b_is_ordinary_not_a_finding
     // normal case. Reporting it would flag every RCM invoice a firm holds.
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:reverseCharge "Y" .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
-    assert!(run(&app, "reverse-charge-claimed-as-forward").await.is_empty());
+    assert!(
+        run(&app, "reverse-charge-claimed-as-forward")
+            .await
+            .is_empty()
+    );
 }
 
 // ------------------------------------------------------------------ s.16(4)
@@ -295,11 +341,18 @@ async fn unclaimed_credit_is_reported_with_the_deadline_the_period_declares() {
         "#,
     )
     .await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:belongsToPeriod gst:period-2026-03 .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     let rows = run(&app, "itc-time-bar-approaching").await;
 
@@ -322,11 +375,18 @@ async fn credit_already_reflected_in_a_2b_is_not_reported_as_time_barred() {
         "#,
     )
     .await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ;
             gst:taxAmount "18000" ; gst:belongsToPeriod gst:period-2026-03 .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
     import(
         &app,
         "gst-2b",
@@ -396,12 +456,19 @@ async fn a_period_with_no_exempt_turnover_owes_no_proportionate_reversal() {
 async fn a_credit_note_the_portal_does_not_carry_is_reported() {
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "CN-1" ;
             gst:taxAmount "-4500" ; gst:noteType "Credit" ;
             gst:originalInvoiceNumber "INV-9" .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     let rows = run(&app, "credit-note-not-in-portal").await;
 
@@ -415,10 +482,17 @@ async fn an_ordinary_invoice_with_no_note_type_is_not_reported_as_a_note() {
     // optionally would report the entire register as unmatched credit notes.
     let (app, _db, _url) = test_app().await;
     setup(&app).await;
-    import(&app, "gst-books", &books(r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
+    import(
+        &app,
+        "gst-books",
+        &books(
+            r#"gst:books-1 rdf:type gst:PurchaseInvoice ;
             gst:issuedBy gst:supplier-A ; gst:invoiceNumber "INV-9" ; gst:taxAmount "18000" .
         gst:canonical-1 gst:recordedIn gst:books-1 .
-        "#)).await;
+        "#,
+        ),
+    )
+    .await;
 
     assert!(run(&app, "credit-note-not-in-portal").await.is_empty());
 }

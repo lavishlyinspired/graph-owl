@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, working_paper
+from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
 from decimal import Decimal
@@ -735,7 +735,30 @@ async def confirm_dataset_mapping_route(client_id: str, period_id: str, kind: st
             source_headers=entry["headers"],
         )
 
-    return {"kind": kind, "confirmed": True}
+    # Plan 123 Slice G: the confirmed mapping also becomes a durable
+    # **alignment** — "this client's `Party Code` *is* `gst:supplierGstin`" —
+    # rather than a per-file binding thrown away after upload. Recorded as
+    # `human`/1.0 here because the caller has just confirmed it; an automated
+    # header guess is recorded separately, in the review band, so a guess can
+    # never become indistinguishable from a confirmation.
+    #
+    # Best-effort, like every other graph-owl call in this file: an alignment
+    # that does not land costs a reusable fact, not the upload.
+    aligned = 0
+    try:
+        aligned = graphowl_client.record_alignments(
+            server=GRAPH_OWL_SERVER,
+            requests=vocabulary.alignment_requests(
+                client_id=client_id,
+                headers=entry["headers"],
+                mapping=mapping,
+                confirmed_by_human=True,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[graphowl] alignment recording skipped — {exc}")
+
+    return {"kind": kind, "confirmed": True, "aligned_terms": aligned}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/datasets")

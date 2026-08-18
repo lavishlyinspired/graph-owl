@@ -415,6 +415,104 @@ impl UnionFind {
     }
 }
 
+/// Directed cycles in `g` — every set of nodes each of which can reach every
+/// other **following edge direction**.
+///
+/// **This is the one structural finding a per-edge rule cannot make, and
+/// [`connected_components`] cannot make it either.** That pass is *weakly*
+/// connected: it ignores direction, so `a → b → c → a` and `a → b → c` are
+/// indistinguishable — both one component. The difference is the entire
+/// finding, because value returning to where it started is a different claim
+/// from ordinary supply passing along a chain.
+///
+/// Returned as the strongly-connected components of size ≥ 2. Size 1 is
+/// excluded deliberately: every node is trivially strongly connected to
+/// itself, so including singletons would report every node in the graph. A
+/// **self-loop** is excluded for a different and more considered reason — a
+/// node pointing at itself is a data-quality problem, not a cycle among
+/// distinct parties, and reporting it as one fills the finding with noise
+/// nobody can act on.
+///
+/// Iterative Tarjan rather than the recursive formulation, because the
+/// recursion depth is the length of the longest path and a projection is
+/// caller-supplied: a deep chain would overflow the stack on data rather than
+/// on a bug.
+///
+/// # Panics
+///
+/// Never. Every index pushed to the stacks comes from `0..node_count` and
+/// every lookup is bounds-checked by construction.
+#[must_use]
+pub fn cycles(g: &GraphProjection) -> Vec<Vec<NodeId>> {
+    let n = g.adjacency.node_count();
+    let unvisited = usize::MAX;
+
+    let mut index_of = vec![unvisited; n];
+    let mut low_link = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<NodeId> = Vec::new();
+    let mut next_index = 0usize;
+    let mut found: Vec<Vec<NodeId>> = Vec::new();
+
+    // (node, how many of its out-edges have been consumed) — the explicit
+    // frame the recursive formulation would keep on the call stack.
+    let mut work: Vec<(NodeId, usize)> = Vec::new();
+
+    for root in 0..n {
+        if index_of[root] != unvisited {
+            continue;
+        }
+        work.push((root, 0));
+
+        while let Some(&mut (v, ref mut edge_cursor)) = work.last_mut() {
+            if *edge_cursor == 0 {
+                index_of[v] = next_index;
+                low_link[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+
+            let neighbours = g.adjacency.out_neighbours(v);
+            if *edge_cursor < neighbours.len() {
+                let w = neighbours[*edge_cursor];
+                *edge_cursor += 1;
+                if index_of[w] == unvisited {
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low_link[v] = low_link[v].min(index_of[w]);
+                }
+                continue;
+            }
+
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low_link[parent] = low_link[parent].min(low_link[v]);
+            }
+
+            if low_link[v] == index_of[v] {
+                let mut component = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                // Size 1 is every node trivially; a singleton is only a cycle
+                // if it points at itself, and a self-loop is excluded above.
+                if component.len() > 1 {
+                    component.sort_unstable();
+                    found.push(component);
+                }
+            }
+        }
+    }
+
+    found.sort_unstable();
+    found
+}
+
 /// Weakly-connected components over `g`, considering every edge
 /// [`GraphProjection::edge_types`] included regardless of direction.
 ///
@@ -1231,6 +1329,123 @@ mod tests {
                 "expected {expected_a}, got {:?}",
                 result.scores
             );
+        }
+    }
+    /// **Cycles — the one structural finding a per-edge rule cannot make.**
+    ///
+    /// A weakly-connected component cannot answer this: it ignores direction,
+    /// so `a -> b -> c -> a` and `a -> b -> c` are both one component. The
+    /// distinction is the whole finding, because a cycle among trading parties
+    /// means value returning to where it started and a chain means ordinary
+    /// supply.
+    mod cycle_detection {
+        use super::*;
+
+        fn ring() -> Vec<Flake> {
+            vec![
+                edge("a", "b", &feeds()),
+                edge("b", "c", &feeds()),
+                edge("c", "a", &feeds()),
+            ]
+        }
+
+        #[test]
+        fn a_three_node_ring_is_reported_as_one_cycle() {
+            let projection = project(&[], &ring(), &[feeds()], &budget()).expect("within budget");
+
+            let found = cycles(&projection);
+
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].len(), 3, "{found:?}");
+        }
+
+        #[test]
+        fn breaking_the_ring_with_one_edge_stops_it_being_a_cycle() {
+            // The plan's own mutator, as a test. A weakly-connected component
+            // would survive this — all three nodes stay in one component — so
+            // a test that only asserted "one component" would prove nothing.
+            let mut broken = ring();
+            broken.pop();
+
+            let found = cycles(&project(&[], &broken, &[feeds()], &budget()).expect("ok"));
+
+            assert!(found.is_empty(), "{found:?}");
+        }
+
+        #[test]
+        fn a_chain_of_any_length_is_never_a_cycle() {
+            let chain = vec![
+                edge("a", "b", &feeds()),
+                edge("b", "c", &feeds()),
+                edge("c", "d", &feeds()),
+                edge("d", "e", &feeds()),
+            ];
+
+            assert!(cycles(&project(&[], &chain, &[feeds()], &budget()).expect("ok")).is_empty());
+        }
+
+        #[test]
+        fn a_two_node_cycle_counts() {
+            // Reciprocal trading between exactly two parties is the smallest
+            // real instance of the pattern, and excluding it would miss the
+            // most common one.
+            let pair = vec![edge("a", "b", &feeds()), edge("b", "a", &feeds())];
+
+            let found = cycles(&project(&[], &pair, &[feeds()], &budget()).expect("ok"));
+
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].len(), 2);
+        }
+
+        #[test]
+        fn a_self_loop_is_not_reported_as_a_cycle() {
+            // A node pointing at itself is a data-quality problem, not a ring
+            // of trading parties, and reporting it as one would fill the
+            // finding with noise nobody can act on.
+            let loops = vec![edge("a", "a", &feeds())];
+
+            assert!(cycles(&project(&[], &loops, &[feeds()], &budget()).expect("ok")).is_empty());
+        }
+
+        #[test]
+        fn two_separate_rings_are_two_findings_not_one() {
+            let mut two = ring();
+            two.extend([
+                edge("x", "y", &feeds()),
+                edge("y", "z", &feeds()),
+                edge("z", "x", &feeds()),
+            ]);
+
+            let found = cycles(&project(&[], &two, &[feeds()], &budget()).expect("ok"));
+
+            assert_eq!(found.len(), 2, "{found:?}");
+        }
+
+        #[test]
+        fn a_ring_with_an_unconnected_node_beside_it_reports_only_the_ring() {
+            // The plan's own scenario: an unconnected party of larger value
+            // must not dilute or join the finding.
+            let mut with_outsider = ring();
+            with_outsider.push(edge("lonely", "nowhere", &feeds()));
+
+            let found = cycles(&project(&[], &with_outsider, &[feeds()], &budget()).expect("ok"));
+
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].len(), 3);
+        }
+
+        #[test]
+        fn a_ring_reachable_only_through_a_chain_is_still_found() {
+            // `entry -> a -> b -> c -> a`. The chain is not part of the cycle
+            // and must not be reported as though it were — a finding that
+            // swept in every upstream party would be unactionable.
+            let mut tailed = ring();
+            tailed.push(edge("entry", "a", &feeds()));
+
+            let found = cycles(&project(&[], &tailed, &[feeds()], &budget()).expect("ok"));
+
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].len(), 3, "{found:?}");
         }
     }
 }
