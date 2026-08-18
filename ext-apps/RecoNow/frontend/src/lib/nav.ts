@@ -37,30 +37,13 @@ export interface NavGroup {
  *  and every one of them is still reachable here. */
 export const NAV: readonly NavGroup[] = [
   { label: "HOME", items: [{ label: "Dashboard", route: "home" }] },
-  {
-    label: "DATA",
-    items: [
-      { label: "Upload & map", route: "pipeline" },
-      { label: "Imports", route: "imports" },
-      { label: "Sources", route: "datasources" },
-      { label: "Mappings", route: "mappings" },
-    ],
-  },
-  {
-    label: "RECONCILE",
-    items: [
-      { label: "Reconcile", route: "reconcile" },
-      { label: "Periods", route: "periods" },
-      { label: "Cross-period", route: "crossperiod" },
-    ],
-  },
+  { label: "DATA", items: [{ label: "Upload & map", route: "pipeline" }] },
+  { label: "RECONCILE", items: [{ label: "Reconcile", route: "reconcile" }] },
   {
     label: "CASES",
     items: [
       { label: "Register", route: "register" },
-      { label: "Exceptions", route: "exceptions" },
       { label: "Case detail", route: "case" },
-      { label: "Review queue", route: "queue" },
     ],
   },
   {
@@ -68,32 +51,18 @@ export const NAV: readonly NavGroup[] = [
     items: [
       { label: "ITC position", route: "itc" },
       { label: "GSTR-3B working paper", route: "workingpaper" },
-      { label: "At risk", route: "atrisk" },
-      { label: "Eligibility", route: "eligibility" },
-      { label: "Supplier risk", route: "risk" },
-      { label: "Analytics", route: "analytics" },
+      { label: "Patterns", route: "analytics" },
       { label: "Assistants", route: "agents" },
     ],
   },
   {
     label: "ACT",
     items: [
-      { label: "IMS", route: "ims" },
-      { label: "Approvals", route: "approvals" },
+      { label: "IMS & approvals", route: "ims" },
       { label: "Follow-ups", route: "followups" },
-      { label: "Suppliers", route: "suppliers" },
-      { label: "Authority", route: "authority" },
       { label: "Obligations", route: "obligations" },
       { label: "Deliverables", route: "deliverables" },
     ],
   },
-  {
-    label: "SETTINGS",
-    items: [
-      { label: "Rules", route: "rules" },
-      { label: "GSTINs", route: "gstins" },
-      { label: "Users", route: "users" },
-      { label: "New session", route: "reset" },
-    ],
-  },
+  { label: "SETTINGS", items: [{ label: "Settings", route: "settings" }] },
 ];

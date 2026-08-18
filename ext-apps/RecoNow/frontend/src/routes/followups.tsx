@@ -1,52 +1,32 @@
-import { useEffect, useState } from "react";
-import { useOutletContext } from "react-router-dom";
-import GenericScreen from "../components/GenericScreen";
-import { screenConfig } from "../lib/screenConfigs";
-import type { RowData, KpiItem } from "../lib/screenConfigs";
-import { formatRupees } from "../lib/format";
-import { fetchFollowUps, type FollowUp } from "../lib/api";
+import { useState } from "react";
+import { SectionTabs } from "../components/SectionTabs";
+import { sectionsFor } from "../lib/sections";
+import type { Capability } from "../lib/sections";
+import FollowupsMainPanel from "../panels/followupsMain";
+import SuppliersPanel from "../panels/suppliers";
+
+/** Followups — Plan 123 Slice D.
+ *
+ *  You chase a supplier, so the directory belongs with the chasing.
+ *
+ *  The panels below were separate routes until this slice. Each is unchanged;
+ *  only where it is reached from moved. `sections.ts` records why each one
+ *  lives here, and `sections.test.ts` fails if any capability the 30-route
+ *  console had is left without a home. */
+const PANELS: Partial<Record<Capability, React.ComponentType>> = {
+  "follow-ups": FollowupsMainPanel,
+  "suppliers": SuppliersPanel,
+};
 
 export default function FollowupsRoute() {
-  const { clientId, periodId } = useOutletContext<{ clientId: string; periodId: string }>();
-  const [rows, setRows] = useState<readonly FollowUp[]>([]);
-  const [loading, setLoading] = useState(true);
+  const sections = sectionsFor("followups");
+  const [active, setActive] = useState<Capability>(sections[0]!.capability);
+  const Panel = PANELS[active] ?? PANELS[sections[0]!.capability]!;
 
-  useEffect(() => {
-    if (!clientId || !periodId) return;
-    setLoading(true);
-    fetchFollowUps(clientId, periodId)
-      .then(setRows)
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [clientId, periodId]);
-
-  const tableRows: readonly RowData[] = rows.map((f) => ({
-    cells: [
-      { t: f.invoice_no },
-      { t: f.supplier_name ?? "—" },
-      { t: f.reason_code ?? "—" },
-      { t: `₹${f.exposure.toLocaleString()}` },
-      { t: f.status, color: f.status === "pending" ? "amber" : "green" },
-      { t: f.subject ?? f.summary?.slice(0, 60) ?? "—" },
-    ],
-  }));
-
-
-  // Totals derived from the same rows rendered below, so a KPI cannot
-  // disagree with its own table.
-  const rows_ = rows;
-  const kpis: readonly KpiItem[] = rows_.length
-    ? [
-        { label: "FOLLOW-UPS", value: String(rows_.length), sub: "cases needing contact", color: "#1c1b18" },
-        { label: "SUPPLIERS", value: String(new Set(rows_.map((r) => r.supplier_name ?? "?")).size), sub: "to contact", color: "#41508f" },
-        { label: "EXPOSURE", value: formatRupees(rows_.reduce((s, r) => s + r.exposure, 0)), sub: "recoverable if resolved", color: "#a13f28" },
-      ]
-    : [];
-
-  // Headings describe the cells this route builds, not the mockup's
-  // own column shape — see GenericScreen's liveCols.
-  const cols = ["INVOICE", "SUPPLIER", "REASON", "EXPOSURE", "STATUS", "SUBJECT"] as const;
-  const grid = "0.9fr 1.1fr 1.1fr 120px 90px 1.3fr";
-
-  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("followups")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  return (
+    <div>
+      <SectionTabs route="followups" active={active} onSelect={setActive} />
+      <Panel />
+    </div>
+  );
 }

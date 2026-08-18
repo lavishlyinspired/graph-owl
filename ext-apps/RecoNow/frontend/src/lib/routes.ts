@@ -1,50 +1,49 @@
-/** Plan 122b B1: the 28 destinations from the delivered mockup's own `nav`
- *  array (`Reco Now.dc.html`'s `renderVals().nav`), read off verbatim —
- *  same route-budget discipline `graphowl-app/src/lib/routes.ts` already
- *  established for the console.
+/** **13 routes, down from 30 — Plan 123 Slice D.**
  *
- *  6 are bespoke screens (`BESPOKE_ROUTES` below); the other 22 render
- *  through one shared, config-driven template (the mockup's own
- *  `isGeneric: !bespoke[cur]` — a single component driven by a per-screen
- *  `screens()` config, not 22 separate page components). */
+ *  The mockup's own `nav` array had 30 destinations, most of which were the
+ *  same capability under a different noun: Exceptions was a filter over the
+ *  Register, Approvals was an IMS decision, Sources and Imports asked one
+ *  question in two directions. Maintaining them separately meant a change to
+ *  the register's table had to be made three times.
+ *
+ *  **Nothing was removed.** Every capability the 30 routes carried is listed
+ *  in `sections.ts` and hosted on one of these, as a named section — and
+ *  `sections.test.ts` fails if any is left without a home. The consolidation
+ *  is an information-architecture change; a product that got smaller would be
+ *  a different decision and not one to make silently. */
 export const ROUTES = [
   "home",
   "pipeline",
   "reconcile",
-  "periods",
   "register",
-  "exceptions",
   "case",
-  "crossperiod",
   "itc",
-  "atrisk",
-  "eligibility",
-  "authority",
-  "obligations",
-  "suppliers",
-  "risk",
-  "followups",
-  "queue",
-  "ims",
-  "approvals",
-  "agents",
-  "deliverables",
-  "analytics",
   "workingpaper",
-  "imports",
-  "datasources",
-  "mappings",
-  "rules",
-  "gstins",
-  "users",
-  "reset",
+  "analytics",
+  "agents",
+  "ims",
+  "followups",
+  "obligations",
+  "deliverables",
+  "settings",
 ] as const;
 
 export type RouteName = (typeof ROUTES)[number];
 
-export const BESPOKE_ROUTES: readonly RouteName[] = ["home", "pipeline", "register", "case", "agents", "analytics"];
+/** Screens with their own layout rather than the config-driven template. */
+export const BESPOKE_ROUTES: readonly RouteName[] = [
+  "home",
+  "pipeline",
+  "reconcile",
+  "register",
+  "case",
+  "workingpaper",
+  "agents",
+  "analytics",
+];
 
-export const MAX_ROUTES = 30;
+/** Down from 30. The budget is the point of the slice, so it is enforced. */
+export const MAX_ROUTES = 15;
 
 export interface RouteBudgetResult {
   readonly count: number;

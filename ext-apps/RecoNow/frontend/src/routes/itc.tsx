@@ -1,44 +1,34 @@
-import { useEffect, useState } from "react";
-import { useOutletContext } from "react-router-dom";
-import GenericScreen from "../components/GenericScreen";
-import { screenConfig } from "../lib/screenConfigs";
-import type { RowData, KpiItem } from "../lib/screenConfigs";
-import { fetchItcPosition, type ItcPosition } from "../lib/api";
+import { useState } from "react";
+import { SectionTabs } from "../components/SectionTabs";
+import { sectionsFor } from "../lib/sections";
+import type { Capability } from "../lib/sections";
+import AtriskPanel from "../panels/atrisk";
+import EligibilityPanel from "../panels/eligibility";
+import ItcMainPanel from "../panels/itcMain";
+
+/** Itc — Plan 123 Slice D.
+ *
+ *  The credit position and the three readings of it — what is at risk, why each number landed where it did.
+ *
+ *  The panels below were separate routes until this slice. Each is unchanged;
+ *  only where it is reached from moved. `sections.ts` records why each one
+ *  lives here, and `sections.test.ts` fails if any capability the 30-route
+ *  console had is left without a home. */
+const PANELS: Partial<Record<Capability, React.ComponentType>> = {
+  "itc-position": ItcMainPanel,
+  "at-risk": AtriskPanel,
+  "eligibility": EligibilityPanel,
+};
 
 export default function ItcRoute() {
-  const { clientId, periodId } = useOutletContext<{ clientId: string; periodId: string }>();
-  const [itc, setItc] = useState<ItcPosition | null>(null);
-  const [loading, setLoading] = useState(true);
+  const sections = sectionsFor("itc");
+  const [active, setActive] = useState<Capability>(sections[0]!.capability);
+  const Panel = PANELS[active] ?? PANELS[sections[0]!.capability]!;
 
-  useEffect(() => {
-    if (!clientId || !periodId) return;
-    setLoading(true);
-    fetchItcPosition(clientId, periodId)
-      .then(setItc)
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [clientId, periodId]);
-
-  const rows: readonly RowData[] = itc
-    ? [
-        { cells: [{ t: "Books Amount" }, { t: `₹${itc.books_amount.toLocaleString()}` }] },
-        { cells: [{ t: "Portal Amount" }, { t: `₹${itc.portal_amount.toLocaleString()}` }] },
-        { cells: [{ t: "Net Exposure" }, { t: `₹${itc.exposure.toLocaleString()}`, color: itc.exposure > 0 ? "red" : undefined }] },
-      ]
-    : [];
-
-  const kpis: readonly KpiItem[] = itc
-    ? [
-        { label: "Total Cases", value: String(itc.case_count), sub: "", color: "blue" },
-        { label: "Pending Review", value: String(itc.pending_count), sub: "", color: "amber" },
-        { label: "Net Exposure", value: `₹${itc.exposure.toLocaleString()}`, sub: "", color: "red" },
-        { label: "Books Total", value: `₹${itc.books_amount.toLocaleString()}`, sub: "", color: "green" },
-      ]
-    : [];
-
-  // Headings describe the cells this route builds — see liveCols.
-  const cols = ["MEASURE", "AMOUNT"] as const;
-  const grid = "1.4fr 160px";
-
-  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("itc")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  return (
+    <div>
+      <SectionTabs route="itc" active={active} onSelect={setActive} />
+      <Panel />
+    </div>
+  );
 }
