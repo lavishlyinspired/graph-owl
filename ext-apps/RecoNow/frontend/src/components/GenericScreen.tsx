@@ -8,13 +8,19 @@ import type {
   SeriesItem,
   FlowChain,
   CellData,
+  RowData,
 } from "../lib/screenConfigs";
 
 interface GenericScreenProps {
   readonly config: ScreenConfig;
+  readonly liveRows?: readonly RowData[];
+  readonly liveKpis?: readonly KpiItem[];
+  readonly loading?: boolean;
 }
 
-export default function GenericScreen({ config }: GenericScreenProps) {
+export default function GenericScreen({ config, liveRows, liveKpis, loading }: GenericScreenProps) {
+  const effectiveRows = liveRows ?? config.rows;
+  const effectiveKpis = liveKpis ?? config.kpis;
   const [drawerRow, setDrawerRow] = useState<number | null>(null);
   const navigate = useNavigate();
 
@@ -47,23 +53,27 @@ export default function GenericScreen({ config }: GenericScreenProps) {
         </div>
       </div>
 
-      <KpiGrid kpis={config.kpis} />
+      {loading ? (
+        <div className="mb-4 flex h-[120px] items-center justify-center text-[13px] text-reco-t4">Loading…</div>
+      ) : (
+        <>
+          <KpiGrid kpis={effectiveKpis} />
 
-      <VizSection viz={config.viz} />
+          <VizSection viz={config.viz} />
 
-      <div className="grid grid-cols-[1fr_300px] items-start gap-3.5">
-        <div className="overflow-hidden rounded-[10px] border border-reco-line bg-white">
-          <div
-            className="grid gap-3 border-b border-reco-line bg-reco-panel-2 px-[18px] py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t4"
-            style={{ gridTemplateColumns: `28px ${config.grid} 96px` }}
-          >
-            <span>☐</span>
-            {config.cols.map((col) => (
-              <span key={col}>{col}</span>
-            ))}
-            <span />
-          </div>
-          {config.rows.map((row, i) => (
+          <div className="grid grid-cols-[1fr_300px] items-start gap-3.5">
+            <div className="overflow-hidden rounded-[10px] border border-reco-line bg-white">
+              <div
+                className="grid gap-3 border-b border-reco-line bg-reco-panel-2 px-[18px] py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t4"
+                style={{ gridTemplateColumns: `28px ${config.grid} 96px` }}
+              >
+                <span>☐</span>
+                {config.cols.map((col) => (
+                  <span key={col}>{col}</span>
+                ))}
+                <span />
+              </div>
+              {effectiveRows.map((row, i) => (
             <div
               key={i}
               className="grid cursor-pointer items-center gap-3 border-b border-reco-row px-[18px] py-3 hover:bg-reco-panel-2"
@@ -138,15 +148,17 @@ export default function GenericScreen({ config }: GenericScreenProps) {
         </div>
       </div>
 
-      {drawerRow !== null && config.rows[drawerRow] !== undefined && (
-        <Drawer
-          row={config.rows[drawerRow]!}
-          cols={config.cols}
-          title={config.title}
-          graphNote={config.graphNote}
-          actions={config.rowActs}
-          onClose={() => setDrawerRow(null)}
-        />
+          {drawerRow !== null && effectiveRows[drawerRow] !== undefined && (
+            <Drawer
+              row={effectiveRows[drawerRow]!}
+              cols={config.cols}
+              title={config.title}
+              graphNote={config.graphNote}
+              actions={config.rowActs}
+              onClose={() => setDrawerRow(null)}
+            />
+          )}
+        </>
       )}
     </div>
   );
