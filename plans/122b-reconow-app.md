@@ -593,3 +593,62 @@ considered.
 
 Frontend mutation runs are batched with the Rust ones per `CLAUDE.md` —
 `stryker` spawns 17 runners and must not interleave with a workspace suite.
+
+---
+
+## 7. Real-data cutover (18 August 2026)
+
+The B0–B10 slice sequence was superseded by a single instruction: upload the
+government GST data through the UI, make every screen derive from it, and use
+GraphOWL for what GraphOWL is for. That is done, against
+`ext-apps/Reco/SAMPLE/purchase_register_mar2026.csv` and
+`gstr2b_mar2026.csv`, driven through the browser rather than seeded.
+
+**Run it**: `ext-apps/RecoNow/run-dev.sh` — graph-owl :8080, Reco Now :8000,
+console :5173, GraphOWL console :5174.
+
+**What the March 2026 period actually produces**: 6 findings from the GST
+pack's own SPARQL rules → 6 cases → ₹26,240 ITC at risk across 3 suppliers
+and 3 invoices, against ₹16,13,000.50 of book value. Every figure on every
+screen is derived from that or from an explicit empty state.
+
+### The defects this surfaced
+
+Each was found by running real data through the product, not by review:
+
+| # | Defect | Why it mattered |
+|---|---|---|
+| 1 | Reco Now ran on :8080, graph-owl's port | Broke the vite proxy *and* pointed `GRAPH_OWL_SERVER` at Reco Now itself. The GST pack never loaded; no finding was ever produced. |
+| 2 | `liveRows ?? config.rows` | A failed fetch rendered the mockup's invented suppliers and rupee amounts, indistinguishable from a working screen. |
+| 3 | Mapping template reused across layouts | Mapped `invoice_no` onto the GSTIN column of the government file. Reconciliation would have compared GSTINs as invoice numbers. |
+| 4 | `governedBy` read as `governed_by` | camelCase on the wire; every case recorded no rule reference. |
+| 5 | Amounts never left the evidence | Every case stored NULL amounts and zero exposure. |
+| 6 | Dedup keyed on invoice alone | INV-MAR-011 carries two findings; the money-carrying one was dropped. |
+| 7 | Exposure double-counted, and crossed the wire as a string | ₹52,070 reported where ₹26,240 is at risk; 180000 reached the console as `"1.8E+5"`. |
+| 8 | Three definitions of exposure (Python + two SQL) | The supplier who filed nothing was reported as costing nothing. |
+| 9 | Column headings from the config, cells from the route | 13 screens rendered values under headings that meant something else. |
+| 10 | Fabricated drafts on Assistants | Supplier emails "awaiting approval" about invoices that do not exist, with no assistant model configured. |
+
+### Rules this establishes
+
+- **Quantities come from the caller or do not appear.** `GenericScreen` has no
+  data fallback. The config supplies layout; it never supplies a number.
+- **One definition of exposure.** `period_exposure` / `group_by_exposure` are
+  the only ones. A screen that wants a total calls them.
+- **A grouped screen is not a partition.** One invoice can carry two reason
+  codes, so group totals may exceed the period total. No screen may present a
+  sum across groups *as* the period total.
+- **The route names its own columns** (`liveCols`), and a mismatch is a loud
+  console error. The runtime guard found mismatches a static audit of the same
+  files missed.
+- **Absent is not zero.** `books_total` is None with no file uploaded;
+  the header omits ITC-at-risk rather than showing ₹0.
+
+### Known gaps, deliberately not filled
+
+| Gap | Why |
+|---|---|
+| Match-rate trend, entity-resolution counts, assistant token spend | No backend computes them. Absent rather than illustrated. |
+| Follow-up drafting | Needs an assistant model; `/api/health` reports none. Marked NOT CONFIGURED on screen. |
+| `run_findings` runs unscoped over the whole graph-owl store | Pre-existing (see `_ingest_scoped_to_graphowl`). Ingest *is* scoped per client+period; the reconcile step needs a graph-owl-side mechanism. |
+| `ext-apps/Reco` characterisation test fails | Pre-existing in the old app, confirmed by stashing. Untouched. |
