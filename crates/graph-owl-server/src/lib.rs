@@ -9059,15 +9059,36 @@ async fn run_pack_query_route(
 /// be `graph-owl-load-pack reconcile <id>` calling Python's `run_findings`
 /// is now this: the console's "Run reconciliation" button, one HTTP call,
 /// no CLI involved.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileScope {
+    /// Named graphs this run may read. Absent or empty means the whole store,
+    /// which is what every caller had before scoping existed.
+    ///
+    /// A caller that reconciles one slice of the estate — an accounting
+    /// period, a tenant, a source system — must name its graphs here, or a
+    /// rule will read another slice's facts and report a conclusion about
+    /// data the caller never supplied.
+    #[serde(default)]
+    graphs: Vec<String>,
+}
+
 async fn reconcile_pack(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(pack): Path<String>,
+    body: Option<Json<ReconcileScope>>,
 ) -> Result<Json<graph_owl_api::ReconcileOutcome>, AppError> {
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
-    Ok(Json(catalog.reconcile_pack(&principal, &pack).await?))
+    let scope: std::collections::HashSet<String> = body
+        .map(|Json(s)| s.graphs)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let graphs = if scope.is_empty() { None } else { Some(&scope) };
+    Ok(Json(catalog.reconcile_pack(&principal, &pack, graphs).await?))
 }
 
 /// A pack's open obligations, due date first — Epic 105 P8's first real

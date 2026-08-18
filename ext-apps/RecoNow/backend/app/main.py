@@ -750,6 +750,79 @@ def _is_present_value(value: object) -> bool:
     return value is not None and str(value).strip() != ""
 
 
+#: Graphs every reconciliation must read whatever period it is for — the
+#: pack's own vocabulary and law. These are not period data: Rule 36(4)'s cap
+#: lives here, and a run that could not see it would stop finding amount
+#: mismatches altogether.
+PACK_GRAPHS = ("gst-ontology", "gst-law", "gst-law-rule-36-4")
+
+
+def period_source_name(client_id: str, period_id: str, kind: str) -> str:
+    """The graph one (client, period, kind) upload lands in.
+
+    The same construction `_ingest_scoped_to_graphowl` uses. Extracted so the
+    reconciliation can name exactly the graphs it just wrote, rather than
+    re-deriving the hash in two places that could drift.
+    """
+    short_id = hashlib.sha256(f"{client_id}:{period_id}:{kind}".encode()).hexdigest()[:12]
+    return f"reco-{short_id}-{kind}"
+
+
+def findings_for_period(
+    findings: list[dict], known_invoices: set[tuple[str, str]]
+) -> list[dict]:
+    """Findings about invoices this period actually carries.
+
+    `list_findings` returns every finding recorded for the pack, across every
+    period. Scoping the *evaluation* stopped rules concluding from another
+    period's facts, but findings already on record still leaked: April, whose
+    GSTR-2B has no ITC-eligibility column, reported `gst:ITCNotAvailable` as
+    NOT EVALUATED and 89,800 of blocked ITC in the same breath — March's.
+
+    A finding is about an invoice, and an invoice belongs to the period whose
+    files carry it.
+
+    **Identity comes from `case_from_finding`, not from reading keys off the
+    finding.** A raw finding has no `invoice_no` field — the invoice number is
+    an evidence binding (`var == "number"`). An earlier version of this read
+    `finding["invoice_no"]`, got None for every finding, and silently dropped
+    all of them; the symptom was a period reporting zero blocked ITC while its
+    own rule said the credit was blocked.
+
+    A finding naming no supplier is matched on the invoice number alone.
+    `gst:ITCNotAvailable` bound no GSTIN until recently, and dropping those
+    would lose exactly the blocked-credit cases this exists to surface.
+    """
+    by_invoice: dict[str, set[str]] = {}
+    for gstin, invoice in known_invoices:
+        by_invoice.setdefault(invoice, set()).add(gstin)
+
+    kept = []
+    for finding in findings:
+        identity = case_from_finding(finding)
+        invoice = rc.normalize_invoice_no(identity["invoice_no"])
+        gstins = by_invoice.get(invoice)
+        if gstins is None:
+            continue
+        gstin = str(identity.get("supplier_gstin") or "").strip().upper()
+        if gstin and gstin not in gstins:
+            continue
+        kept.append(finding)
+    return kept
+
+
+def reconcile_scope(client_id: str, period_id: str, kinds: list[str]) -> list[str]:
+    """The graphs a reconciliation of this period may read.
+
+    This period's uploads, plus the pack. **Not the whole store**: evaluation
+    used to run unscoped, so a period with no goods-receipt file reported
+    s.16(2)(b) as *passed* because another period had supplied the data — the
+    exact "checked, clean" lie the three-state rule outcome exists to prevent,
+    one level up.
+    """
+    return [period_source_name(client_id, period_id, kind) for kind in kinds] + list(PACK_GRAPHS)
+
+
 def _ingest_scoped_to_graphowl(
     client_id: str, period_id: str, kind: str, dataset: dict, mapping: dict,
     period_label: str | None = None,
@@ -779,8 +852,7 @@ def _ingest_scoped_to_graphowl(
     # blow the limit, so we take the first 12 hex chars of a SHA-256 of the
     # (client_id, period_id, kind) tuple — unique enough for a source graph
     # name and short enough to pass graph-owl's validation.
-    short_id = hashlib.sha256(f"{client_id}:{period_id}:{kind}".encode()).hexdigest()[:12]
-    source = f"reco-{short_id}-{kind}"
+    source = period_source_name(client_id, period_id, kind)
     if not turtle:
         return {"source": source, "landed": 0, "skipped": 0, "rejected": []}
     graphowl_client.delete_document(GRAPH_OWL_SERVER, source, GRAPH_OWL_TOKEN)
@@ -841,10 +913,30 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
             ingested[kind] = {"error": str(exc)}
 
     try:
-        result = run_findings(graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        result = run_findings(
+            graphowl_client.PACK_ID,
+            GRAPH_OWL_SERVER,
+            GRAPH_OWL_TOKEN,
+            graphs=reconcile_scope(client_id, period_id, list(datasets)),
+        )
         findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
     except (LoadError, graphowl_client.IngestError) as exc:
         return {"ok": False, "error": str(exc), "ingested": ingested}
+
+    # `list_findings` returns every finding recorded for the pack, across every
+    # period. Scoping the evaluation stopped rules *concluding* from another
+    # period's facts; this stops another period's already-recorded findings
+    # becoming this period's cases. See `findings_for_period`.
+    known_invoices = {
+        (
+            str(row.get("supplier_gstin") or "").strip().upper(),
+            rc.normalize_invoice_no(row.get("invoice_no")),
+        )
+        for entry in datasets.values()
+        for row in _normalize(entry["dataset"], entry["mapping"])
+        if _is_present_value(row.get("invoice_no"))
+    }
+    findings = findings_for_period(findings, known_invoices)
 
     # What the engine said about each rule, stored as it said it. Reco Now
     # used to *infer* "this check is off" from which files had been uploaded —

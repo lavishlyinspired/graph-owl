@@ -45,12 +45,24 @@ class ReconcileResult:
     rules: list[dict] = field(default_factory=list)
 
 
-def run_findings(pack_id: str, server: str, token: str | None = None) -> ReconcileResult:
+def run_findings(
+    pack_id: str,
+    server: str,
+    token: str | None = None,
+    graphs: list[str] | None = None,
+) -> ReconcileResult:
     """Ask the server to evaluate `pack_id`'s registered rules.
 
     Takes a pack **id**, not a directory — unlike `load_pack`, this reads
     nothing local. The rules were already registered by `load_pack`; this
     is the trigger, not the definition.
+
+    `graphs` names the named graphs this run may read. **A caller that
+    reconciles one slice of the estate must pass them.** Without a scope the
+    rules read the whole store, and a rule will report a conclusion about a
+    slice whose data was never supplied because a different slice supplied it.
+    Omitted means the whole store, which is what every caller had before
+    scoping existed.
 
     # Raises
 
@@ -60,6 +72,7 @@ def run_findings(pack_id: str, server: str, token: str | None = None) -> Reconci
         f"{server.rstrip('/')}/packs/{pack_id}/reconcile",
         method="POST",
         token=token,
+        body=json.dumps({"graphs": list(graphs)}).encode() if graphs else None,
     )
     if not isinstance(response, dict):
         raise LoadError(f"POST /packs/{pack_id}/reconcile returned an unexpected shape")

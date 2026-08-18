@@ -846,7 +846,7 @@ impl ContextSource for CatalogContext {
             return Ok(None);
         }
 
-        match self.catalog.reconcile_pack(&who, pack).await {
+        match self.catalog.reconcile_pack(&who, pack, None).await {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) => Err(unavailable(&error)),
         }
@@ -938,7 +938,7 @@ impl ContextSource for CatalogContext {
             return Ok(None);
         }
 
-        match self.catalog.run_rule(&who, pack, label).await {
+        match self.catalog.run_rule(&who, pack, label, None).await {
             Ok(outcome) => Ok(Some(outcome)),
             Err(CatalogError::NotFound) => Ok(None),
             Err(error) => Err(unavailable(&error)),

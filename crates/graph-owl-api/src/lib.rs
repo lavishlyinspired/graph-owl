@@ -962,6 +962,44 @@ fn admitted_by_vocabulary_namespace(
             && cx.is_none_or(|graph| named_graph_predicate.admits(&graph.id)))
 }
 
+/// Whether a fact is inside the graphs *this run* was told to read.
+///
+/// Distinct from authorization, and applied after it. Authorization answers
+/// "may this principal see this fact"; a run scope answers "should this
+/// evaluation be looking at it at all". A reconciliation of one accounting
+/// period must not read another period's facts even though the same principal
+/// may see both — and it did, which made a rule report "checked, clean" on a
+/// period whose data was never uploaded, because a *different* period had
+/// supplied it.
+///
+/// `None` means unscoped: every fact the principal may see. That is the
+/// behaviour every existing caller had and still has.
+///
+/// A fact with no named graph is always in scope. Those are not import-sourced
+/// — schema, projection, vocabulary — and belong to no run.
+///
+/// A caller names graphs by the source it imported under (`reco-abc-books`);
+/// the stored graph id carries the engine's own prefix
+/// (`graph:import:reco-abc-books`). Matching the id *or* its trailing segment
+/// means a caller does not have to know that prefix, which is graph-owl's
+/// convention rather than anything the caller chose.
+fn in_run_scope(
+    cx: Option<&graph_owl_core::flake::Sid>,
+    run_graphs: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    let Some(allowed) = run_graphs else {
+        return true;
+    };
+    cx.is_none_or(|graph| {
+        allowed.contains(&graph.id)
+            || graph
+                .id
+                .rsplit(':')
+                .next()
+                .is_some_and(|tail| allowed.contains(tail))
+    })
+}
+
 /// Keep only the facts this principal may see, up to the budget.
 ///
 /// A flake is visible when its subject is a visible asset. A **relationship**
@@ -977,6 +1015,7 @@ fn scope_facts(
     visible: &std::collections::HashSet<String>,
     named_graph_predicate: &AccessPredicate,
     max_facts: usize,
+    run_graphs: Option<&std::collections::HashSet<String>>,
 ) -> (Vec<graph_owl_core::flake::Flake>, bool) {
     use graph_owl_core::flake::FlakeValue;
 
@@ -1036,6 +1075,14 @@ fn scope_facts(
                 )
         })
         .cloned()
+        .collect();
+
+    // The run scope, applied after authorization and before the budget: a
+    // fact outside this run's graphs is not merely unauthorized, it is not
+    // part of the question being asked.
+    let permitted: Vec<_> = permitted
+        .into_iter()
+        .filter(|flake| in_run_scope(flake.cx.as_ref(), run_graphs))
         .collect();
 
     let truncated = permitted.len() > max_facts;
@@ -3403,6 +3450,7 @@ impl Catalog {
         &self,
         principal: &Principal,
         requires: &[String],
+        graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<String>, CatalogError> {
         let mut unmet = Vec::new();
         for class in requires {
@@ -3418,8 +3466,12 @@ impl Catalog {
                    UNION {{ GRAPH ?g {{ ?s <{class}> ?o }} }} \
                  }} LIMIT 1"
             );
+            // Scoped exactly as the rule it guards. Probing the whole store
+            // while the rule reads one period is how a rule reported "checked,
+            // clean" on a period whose data was never uploaded — another
+            // period had supplied it.
             let outcome = self
-                .sparql(principal, &probe, None, SparqlBudget::default())
+                .sparql_scoped(principal, &probe, None, None, SparqlBudget::default(), graphs)
                 .await?;
             if outcome.rows.is_empty() {
                 unmet.push(class.clone());
@@ -3452,6 +3504,7 @@ impl Catalog {
         &self,
         principal: &Principal,
         pack: &str,
+        graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<ReconcileOutcome, CatalogError> {
         let rules = self.finding_rules(pack).await?;
         let evaluated = rules.len();
@@ -3462,7 +3515,9 @@ impl Catalog {
             // What this rule says it cannot conclude without. A rule whose
             // inputs are absent has not "found nothing" — it has not looked,
             // and recording that difference is the point of this loop.
-            let unmet = self.unmet_requirements(principal, &rule.requires).await?;
+            let unmet = self
+                .unmet_requirements(principal, &rule.requires, graphs)
+                .await?;
             if !unmet.is_empty() {
                 outcomes.push(RuleOutcome {
                     label: rule.label.clone(),
@@ -3475,7 +3530,7 @@ impl Catalog {
             }
 
             let outcome = self
-                .sparql(principal, &rule.query, None, SparqlBudget::default())
+                .sparql_scoped(principal, &rule.query, None, None, SparqlBudget::default(), graphs)
                 .await?;
             let produced = findings_from_rows(rule, &outcome.rows)?;
             outcomes.push(RuleOutcome {
@@ -3538,6 +3593,7 @@ impl Catalog {
         principal: &Principal,
         pack: &str,
         label: &str,
+        graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<ReconcileOutcome, CatalogError> {
         let rules = self.finding_rules(pack).await?;
         let rule = rules
@@ -3548,7 +3604,9 @@ impl Catalog {
         // The same requirement check `reconcile_pack` applies. Running one
         // rule on its own must not be the way a caller gets an unqualified
         // "found nothing" that the whole-pack path would have qualified.
-        let unmet = self.unmet_requirements(principal, &rule.requires).await?;
+        let unmet = self
+            .unmet_requirements(principal, &rule.requires, graphs)
+            .await?;
         if !unmet.is_empty() {
             return Ok(ReconcileOutcome {
                 pack: pack.to_string(),
@@ -3567,7 +3625,7 @@ impl Catalog {
         }
 
         let outcome = self
-            .sparql(principal, &rule.query, None, SparqlBudget::default())
+            .sparql_scoped(principal, &rule.query, None, None, SparqlBudget::default(), graphs)
             .await?;
         let findings = findings_from_rows(rule, &outcome.rows)?;
         let found = findings.len();
@@ -4744,7 +4802,7 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
-        self.sparql_scoped(principal, query, as_of, None, budget)
+        self.sparql_scoped(principal, query, as_of, None, budget, None)
             .await
     }
 
@@ -4777,7 +4835,22 @@ impl Catalog {
         valid_at: &graph_owl_traversal::ValidityWindow,
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
-        self.sparql_scoped(principal, query, as_of, Some(valid_at), budget)
+        self.sparql_scoped(principal, query, as_of, Some(valid_at), budget, None)
+            .await
+    }
+
+    /// Answer a SPARQL query reading **only** the named graphs given.
+    ///
+    /// Authorization still applies on top: this narrows what the run looks at,
+    /// it never widens what the principal may see.
+    pub async fn sparql_in_graphs(
+        &self,
+        principal: &Principal,
+        query: &str,
+        graphs: &std::collections::HashSet<String>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        self.sparql_scoped(principal, query, None, None, budget, Some(graphs))
             .await
     }
 
@@ -4788,6 +4861,7 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         valid_at: Option<&graph_owl_traversal::ValidityWindow>,
         budget: SparqlBudget,
+        run_graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<SparqlOutcome, CatalogError> {
         let parsed = spargebra::SparqlParser::new()
             .parse_query(query)
@@ -4808,7 +4882,7 @@ impl Catalog {
             self.rewrite_for_ql(parsed, budget.ql).await?;
 
         let mut outcome = self
-            .execute_algebra(principal, &parsed, as_of, valid_at, budget)
+            .execute_algebra(principal, &parsed, as_of, valid_at, budget, run_graphs)
             .await?;
         outcome.ql_rewrite = ql_rewrite;
         outcome.refused_axioms = refused_axioms;
@@ -5894,7 +5968,7 @@ impl Catalog {
             base_iri: None,
         };
 
-        self.execute_algebra(principal, &parsed, as_of, None, budget)
+        self.execute_algebra(principal, &parsed, as_of, None, budget, None)
             .await
     }
 
@@ -5968,7 +6042,7 @@ impl Catalog {
             base_iri: None,
         };
         let scoped = self
-            .scoped_facts(principal, &parsed, None, None, budget)
+            .scoped_facts(principal, &parsed, None, None, budget, None)
             .await?;
         let fields = projected_variables(&parsed);
         let facts = scoped.facts;
@@ -6044,9 +6118,10 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         valid_at: Option<&graph_owl_traversal::ValidityWindow>,
         budget: SparqlBudget,
+        run_graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<SparqlOutcome, CatalogError> {
         let scoped = self
-            .scoped_facts(principal, parsed, as_of, valid_at, budget)
+            .scoped_facts(principal, parsed, as_of, valid_at, budget, run_graphs)
             .await?;
         // Read before `scoped.dataset` is moved out below — a borrow of
         // `scoped.facts` alone, so the two partial moves don't conflict.
@@ -6147,6 +6222,7 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         valid_at: Option<&graph_owl_traversal::ValidityWindow>,
         budget: SparqlBudget,
+        run_graphs: Option<&std::collections::HashSet<String>>,
     ) -> Result<ScopedFacts, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
@@ -6256,7 +6332,7 @@ impl Catalog {
         }
 
         let (facts, truncated) =
-            scope_facts(&all, &visible, &named_graph_predicate, budget.max_facts);
+            scope_facts(&all, &visible, &named_graph_predicate, budget.max_facts, run_graphs);
         let fact_count = facts.len();
         let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
@@ -6332,7 +6408,7 @@ impl Catalog {
             base_iri: None,
         };
         let scoped = self
-            .scoped_facts(principal, &discovery_query, as_of, None, budget)
+            .scoped_facts(principal, &discovery_query, as_of, None, budget, None)
             .await?;
         let mut truncated = scoped.truncated;
 
@@ -6375,7 +6451,7 @@ impl Catalog {
             base_iri: None,
         };
         let mut outcome = self
-            .execute_algebra(principal, &final_query, as_of, None, budget)
+            .execute_algebra(principal, &final_query, as_of, None, budget, None)
             .await?;
         outcome.truncated |= truncated;
         Ok(outcome)
@@ -16504,7 +16580,7 @@ impl Catalog {
             base_iri,
         };
 
-        self.execute_algebra(principal, &query, None, None, budget)
+        self.execute_algebra(principal, &query, None, None, budget, None)
             .await
     }
 
