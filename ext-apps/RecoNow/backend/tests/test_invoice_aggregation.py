@@ -271,3 +271,60 @@ def test_a_credit_note_is_judged_against_the_invoice_not_one_rate_line():
 
     assert turtle.count("a gst:Gstr2bInvoice") == 1, "the note is absorbed, not a second subject"
     assert '"35000"' in turtle, turtle
+
+
+class TestSignedCreditNotes:
+    """Real GST files sign credit notes negative.
+
+    The March 2026 sample carries `CN-MAR-001` at **-12000** with
+    `Note Type = Credit Note`. Applying a negative sign to an already-negative
+    amount adds instead of subtracting: a 42,000 invoice with a 12,000 credit
+    note netted to 54,000, and the phantom 12,000 then showed up as a review
+    item against a portal side that had it right. Found by running the real
+    file, not the fixtures.
+
+    The note's *kind* decides the direction; its recorded sign is only how the
+    file happens to write it.
+    """
+
+    def test_a_negative_credit_note_subtracts(self):
+        rows = [
+            _line(invoice="INV-3", taxable=42000, igst=7560),
+            _line(invoice="CN-1", taxable=-12000, igst=-2160,
+                  note_type="Credit Note", original_invoice_no="INV-3"),
+        ]
+
+        netted = net_credit_notes(rows)
+
+        assert netted[0]["taxable"] == pytest.approx(30000)
+        assert netted[0]["igst"] == pytest.approx(5400)
+
+    def test_a_positive_credit_note_also_subtracts(self):
+        """Some ERPs write the magnitude and rely on the note type."""
+        rows = [
+            _line(invoice="INV-3", taxable=42000),
+            _line(invoice="CN-1", taxable=12000,
+                  note_type="Credit Note", original_invoice_no="INV-3"),
+        ]
+
+        assert net_credit_notes(rows)[0]["taxable"] == pytest.approx(30000)
+
+    def test_a_negative_debit_note_still_increases(self):
+        rows = [
+            _line(invoice="INV-3", taxable=42000),
+            _line(invoice="DN-1", taxable=-5000,
+                  note_type="Debit Note", original_invoice_no="INV-3"),
+        ]
+
+        assert net_credit_notes(rows)[0]["taxable"] == pytest.approx(47000)
+
+    def test_the_over_large_guard_uses_magnitude_not_sign(self):
+        """A -50,000 note against a 42,000 invoice is over-large however it is
+        signed, and must be surfaced rather than applied."""
+        rows = [
+            _line(invoice="INV-3", taxable=42000),
+            _line(invoice="CN-1", taxable=-50000,
+                  note_type="Credit Note", original_invoice_no="INV-3"),
+        ]
+
+        assert len(net_credit_notes(rows)) == 2

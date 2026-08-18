@@ -595,11 +595,17 @@ def net_credit_notes(rows: list[dict]) -> list[dict]:
         ))
         if target is None:
             continue
-        if kind == "credit" and _amount(row.get("taxable")) > _amount(target.get("taxable")):
+        # Real GST files sign credit notes negative (the March 2026 sample
+        # writes CN-MAR-001 as -12000), but some ERPs write the magnitude and
+        # rely on the note type. The *kind* decides the direction; the recorded
+        # sign is only how the file happens to write it. Multiplying a negative
+        # amount by -1 added instead of subtracting, netting a 42,000 invoice
+        # with a 12,000 credit note to 54,000.
+        if kind == "credit" and abs(_amount(row.get("taxable"))) > abs(_amount(target.get("taxable"))):
             continue  # over-large: surfaced for a human, not applied
         sign = Decimal(-1) if kind == "credit" else Decimal(1)
         for field in _SUMMED_FIELDS:
-            target[field] = _amount(target.get(field)) + sign * _amount(row.get(field))
+            target[field] = _amount(target.get(field)) + sign * abs(_amount(row.get(field)))
         absorbed.add(id(row))
 
     return [r for r in rows if id(r) not in absorbed]

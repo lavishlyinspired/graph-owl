@@ -20,6 +20,10 @@ from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
 from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data
+# Aliased: main.py already defines an `itc_position` *route handler*, which
+# would shadow this import.
+from .reconcile_result import itc_position as compute_itc_position
+from .reconcile_result import reconcile_buckets
 
 app = FastAPI(title="RecoNow — Intelligence for Indirect Tax", version="1.0.0")
 
@@ -1093,6 +1097,73 @@ async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, 
             conn, client_id=client_id, period_id=period_id, case_id=case_id, decision=decision
         )
     return {"id": decision_id, "decision": decision}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/reconciliation")
+async def reconciliation_route(client_id: str, period_id: str) -> dict:
+    """The reconciliation *result* — four buckets, a match rate, an ITC
+    position — not just its exceptions.
+
+    A finding is raised only when something is wrong, so a matched invoice
+    produces none. Every screen built on findings alone could report what
+    needs attention and never what was done, which is the first thing a
+    reviewer asks. Computed from the uploaded rows and the findings together,
+    in one pass, so the summary and the list cannot disagree.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        stored = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+
+    by_kind = {e["kind"]: e for e in stored}
+
+    def rows_for(kind: str) -> list[dict]:
+        entry = by_kind.get(kind)
+        if entry is None:
+            return []
+        dataset = {"headers": entry["headers"], "rows": entry["rows"]}
+        # Same aggregation the graph ingestion applies, so the buckets count
+        # invoices the way the rules compare them.
+        return graphowl_client.net_credit_notes(
+            graphowl_client.aggregate_invoice_lines(_normalize(dataset, entry["mapping"]))
+        )
+
+    findings = [
+        {
+            "invoice_no": c["invoice_no"],
+            "reason_code": c["reason_code"],
+            "supplier_gstin": c["supplier_gstin"],
+        }
+        for c in cases
+    ]
+
+    result = reconcile_buckets(rows_for("books"), rows_for("gstr2b"), findings)
+    position = compute_itc_position(result)
+
+    return {
+        "total": result.total,
+        "match_rate": result.match_rate,
+        "counts": result.counts,
+        "itc": {k: float(v) for k, v in position.items()},
+        "have_books": "books" in by_kind,
+        "have_portal": "gstr2b" in by_kind,
+        "rows": [
+            {
+                "invoice_no": r["invoice_no"],
+                "supplier_gstin": r["supplier_gstin"],
+                "supplier_name": r["supplier_name"],
+                "bucket": r["bucket"],
+                "books_taxable": float(r["books_taxable"]),
+                "portal_taxable": float(r["portal_taxable"]),
+                "books_tax": float(r["books_tax"]),
+                "portal_tax": float(r["portal_tax"]),
+                "difference": float(r["books_taxable"] - r["portal_taxable"]),
+                "labels": r["labels"],
+                "blocked": r["blocked"],
+            }
+            for r in result.rows
+        ],
+    }
 
 
 @app.get("/api/clients/{client_id}/analytics")
