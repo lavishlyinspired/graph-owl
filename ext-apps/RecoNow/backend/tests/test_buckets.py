@@ -216,3 +216,70 @@ class TestObservedDifference:
         result = reconcile_buckets([_row()], [_row()], [])
 
         assert result.counts[BUCKET_MATCHED] == 1
+
+
+class TestFindingsWithoutGstin:
+    """A finding that omits the supplier must still reach its invoice.
+
+    Found live: `gst:ITCNotAvailable` binds `number` and `taxAmount` as
+    evidence but not `gstin`, so its cases carried no supplier GSTIN. Matching
+    on `(gstin, invoice)` then failed silently — two invoices with blocked
+    credit under s.17(5) were bucketed *matched* and their blocked ITC
+    reported as zero. The label was produced correctly and thrown away at the
+    join.
+
+    Falling back to the invoice number alone is safe only where that number is
+    unambiguous in the period. Where two suppliers share one, guessing would
+    attach a blocked-credit finding to the wrong supplier's invoice, which is
+    worse than not attaching it.
+    """
+
+    def test_a_finding_with_no_gstin_still_matches_its_invoice(self):
+        result = reconcile_buckets(
+            [_row(invoice="INV-MAR-006")],
+            [_row(invoice="INV-MAR-006")],
+            [{"invoice_no": "INV-MAR-006", "reason_code": "gst:ITCNotAvailable",
+              "supplier_gstin": None}],
+        )
+
+        assert result.counts[BUCKET_REVIEW] == 1
+        assert result.rows[0]["blocked"] is True
+
+    def test_blocked_credit_is_quantified_when_the_finding_omits_the_gstin(self):
+        position = itc_position(
+            reconcile_buckets(
+                [_row(invoice="INV-MAR-006", igst=55800)],
+                [_row(invoice="INV-MAR-006", igst=55800)],
+                [{"invoice_no": "INV-MAR-006", "reason_code": "gst:ITCNotAvailable",
+                  "supplier_gstin": ""}],
+            )
+        )
+
+        assert position["blocked"] == pytest.approx(55800)
+
+    def test_an_ambiguous_invoice_number_is_not_guessed_at(self):
+        """Two suppliers, one invoice number, a finding naming neither.
+        Attaching it to either would be a coin flip on whose credit is
+        blocked."""
+        result = reconcile_buckets(
+            [_row(invoice="001", gstin="27AABCS1429B1Z8"),
+             _row(invoice="001", gstin="29AACCS9460D1Z4")],
+            [_row(invoice="001", gstin="27AABCS1429B1Z8"),
+             _row(invoice="001", gstin="29AACCS9460D1Z4")],
+            [{"invoice_no": "001", "reason_code": "gst:ITCNotAvailable", "supplier_gstin": None}],
+        )
+
+        assert all(not r["blocked"] for r in result.rows)
+
+    def test_a_finding_that_does_carry_a_gstin_still_matches_exactly(self):
+        result = reconcile_buckets(
+            [_row(invoice="001", gstin="27AABCS1429B1Z8"),
+             _row(invoice="001", gstin="29AACCS9460D1Z4")],
+            [_row(invoice="001", gstin="27AABCS1429B1Z8"),
+             _row(invoice="001", gstin="29AACCS9460D1Z4")],
+            [_finding("001", "gst:ITCNotAvailable", gstin="29AACCS9460D1Z4")],
+        )
+
+        blocked = [r for r in result.rows if r["blocked"]]
+        assert len(blocked) == 1
+        assert blocked[0]["supplier_gstin"] == "29AACCS9460D1Z4"

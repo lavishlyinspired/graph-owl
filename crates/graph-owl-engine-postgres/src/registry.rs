@@ -237,6 +237,7 @@ fn finding_rule_from_row(row: &sqlx::postgres::PgRow) -> Result<FindingRuleDef, 
         similarity: row.get("similarity"),
         span: row.get("span"),
         priority: row.get("priority"),
+        requires: serde_json::from_value(row.get("requires")).unwrap_or_default(),
     })
 }
 
@@ -249,8 +250,8 @@ impl FindingRuleRegistry for PostgresTripleStore {
 
         sqlx::query(
             "INSERT INTO finding_rules
-                (pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                (pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority, requires)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (pack, label) DO UPDATE SET
                 summary     = EXCLUDED.summary,
                 governed_by = EXCLUDED.governed_by,
@@ -259,7 +260,8 @@ impl FindingRuleRegistry for PostgresTripleStore {
                 evidence    = EXCLUDED.evidence,
                 similarity  = EXCLUDED.similarity,
                 span        = EXCLUDED.span,
-                priority    = EXCLUDED.priority",
+                priority    = EXCLUDED.priority,
+                requires    = EXCLUDED.requires",
         )
         .bind(&rule.pack)
         .bind(&rule.label)
@@ -271,6 +273,7 @@ impl FindingRuleRegistry for PostgresTripleStore {
         .bind(&rule.similarity)
         .bind(&rule.span)
         .bind(rule.priority)
+        .bind(serde_json::to_value(&rule.requires).unwrap_or_else(|_| serde_json::json!([])))
         .execute(self.pool())
         .await
         .map_err(|e| RegistryError::Backend(e.to_string()))?;
@@ -280,7 +283,7 @@ impl FindingRuleRegistry for PostgresTripleStore {
 
     async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
         let rows = sqlx::query(
-            "SELECT pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority
+            "SELECT pack, label, summary, governed_by, query, subject_var, evidence, similarity, span, priority, requires
              FROM finding_rules WHERE pack = $1 ORDER BY label",
         )
         .bind(pack)

@@ -121,12 +121,34 @@ def reconcile_buckets(
     books = {_key(r): r for r in books_rows}
     portal = {_key(r): r for r in portal_rows}
 
+    # Invoice numbers that identify exactly one invoice in this period. A
+    # finding that omits the supplier can be attached to one of these safely;
+    # anything else would be a guess about whose credit is affected.
+    seen_keys = set(books) | set(portal)
+    unique_by_invoice: dict[str, tuple[str, str]] = {}
+    for gstin, invoice in seen_keys:
+        if invoice in unique_by_invoice:
+            unique_by_invoice[invoice] = ("", "")  # ambiguous — never matched
+        else:
+            unique_by_invoice[invoice] = (gstin, invoice)
+
     findings_by_key: dict[tuple[str, str], list[str]] = {}
     for finding in findings:
-        key = _key(finding)
         label = finding.get("reason_code")
-        if label:
-            findings_by_key.setdefault(key, []).append(label)
+        if not label:
+            continue
+        key = _key(finding)
+        # A finding need not carry a supplier GSTIN — `gst:ITCNotAvailable`
+        # binds only the invoice number and tax amount as evidence, so its
+        # cases have none. Matching strictly on (gstin, invoice) dropped those
+        # labels silently, and two invoices with blocked credit were reported
+        # as matched with zero blocked ITC. Fall back to the invoice number,
+        # but only where it is unambiguous in the period.
+        if key not in seen_keys and not key[0]:
+            fallback = unique_by_invoice.get(key[1])
+            if fallback and fallback[0]:
+                key = fallback
+        findings_by_key.setdefault(key, []).append(label)
 
     rows: list[dict] = []
     for key in list(books) + [k for k in portal if k not in books]:

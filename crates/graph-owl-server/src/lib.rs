@@ -8792,6 +8792,11 @@ struct FindingRuleInput {
     span: Option<serde_json::Value>,
     #[serde(default)]
     priority: Option<i16>,
+    /// Terms the rule cannot conclude anything without — a class it needs
+    /// instances of, or a predicate it needs uses of. Absent means "needs
+    /// nothing special", which is most rules.
+    #[serde(default)]
+    requires: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -8834,6 +8839,7 @@ async fn declare_finding_rules(
                 similarity: rule.similarity,
                 span: rule.span,
                 priority: rule.priority,
+                requires: rule.requires,
             })
             .await?;
     }

@@ -544,9 +544,29 @@ export interface ItcPositionBreakdown {
   readonly total_considered: number;
 }
 
+/** Whether a rule reached a conclusion, as **graph-owl reported it**. Not
+ *  inferred in the frontend: "could not evaluate" is execution evidence, and
+ *  it belongs in the engine's record, not in a banner. */
+export type RuleStatus = "passed" | "flagged" | "notEvaluated";
+
+export interface RuleOutcome {
+  readonly label: string;
+  readonly governed_by: string | null;
+  readonly status: RuleStatus;
+  readonly found: number;
+  /** Classes or predicates the rule needed and did not find. Non-empty only
+   *  when `status` is `notEvaluated`. */
+  readonly unmet: readonly string[];
+  readonly recorded_at: string;
+}
+
 export interface Reconciliation {
-  /** Rule label -> why it matters, for every check the uploaded files cannot
-   *  support. Silence about an unrun check reads like a check that passed. */
+  /** What each rule concluded on the last run, from the engine's own
+   *  execution record. Empty before a reconciliation has been run. */
+  readonly rule_outcomes: readonly RuleOutcome[];
+  /** Rule label -> why it matters, for checks the uploaded files cannot
+   *  support. The pre-reconciliation view: before a run there are no
+   *  outcomes, and a reviewer still needs to know what is unsupported. */
   readonly checks_disabled: Record<string, string>;
   readonly total: number;
   readonly match_rate: number;

@@ -345,6 +345,13 @@ def _register_finding_rules(base: str, manifest: Manifest, token: str | None) ->
                 # explicit `null`, matching similarity/span's own
                 # convention above) for a rule that declares none.
                 "priority": rule.get("priority"),
+                # Classes this rule cannot conclude anything without. The
+                # engine probes each for at least one instance before running
+                # the rule, so that "checked and clean" and "could not check"
+                # stop being the same zero-findings answer. Empty for the
+                # great majority of rules, which read only what any
+                # reconciliation already has.
+                "requires": rule.get("requires", []),
             }
         )
 

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
-import { fetchReconciliation, type Bucket, type ReconRow, type Reconciliation } from "../lib/api";
+import {
+  fetchReconciliation,
+  type Bucket,
+  type ReconRow,
+  type Reconciliation,
+  type RuleOutcome,
+} from "../lib/api";
 import { formatRupees } from "../lib/format";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -107,7 +113,7 @@ export default function ReconcileRoute() {
         })}
       </div>
 
-      <DisabledChecks checks={data.checks_disabled} />
+      <RulePanel outcomes={data.rule_outcomes} unsupported={data.checks_disabled} />
 
       <ItcPositionPanel itc={data.itc} />
 
@@ -311,28 +317,106 @@ function ItcPositionPanel({ itc }: { readonly itc: Reconciliation["itc"] }) {
 }
 
 
-/** What this reconciliation could not check, beside what it did.
+/** Every rule, in one of three states.
  *
- *  A check that never ran and a check that found nothing look identical on a
- *  screen that shows only results. For a statutory test — Rule 37, s.16(2)(b)
- *  — that difference is a client's money, so the absent ones are named. */
-function DisabledChecks({ checks }: { readonly checks: Record<string, string> }) {
-  const entries = Object.entries(checks);
-  if (entries.length === 0) return null;
-
-  return (
-    <div className="mb-3.5 rounded-[10px] border border-reco-amber-border bg-reco-amber-bg px-4 py-3.5">
-      <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-amber">
-        NOT CHECKED — {entries.length} RULE{entries.length === 1 ? "" : "S"} NEED FILES THAT ARE NOT UPLOADED
-      </div>
-      <div className="flex flex-col gap-1">
-        {entries.map(([label, reason]) => (
+ *  A check that never ran and a check that found nothing are opposite claims
+ *  and used to render identically as "no issues". For a statutory test —
+ *  Rule 37, s.16(2)(b), s.17(5) — that difference is a client's money.
+ *
+ *  The states come from **graph-owl's own execution record**, not from
+ *  inspecting which files were uploaded. The engine probes each rule's
+ *  declared requirements before running it and reports what it found; this
+ *  component renders that. "Could not evaluate, and here is what was
+ *  missing" is evidence about the run, and it belongs in the engine.
+ */
+function RulePanel({
+  outcomes,
+  unsupported,
+}: {
+  readonly outcomes: readonly RuleOutcome[];
+  readonly unsupported: Record<string, string>;
+}) {
+  // Before any reconciliation has been run there are no outcomes, but a
+  // reviewer still needs to know which checks the uploaded files can support.
+  if (outcomes.length === 0) {
+    const pending = Object.entries(unsupported);
+    if (pending.length === 0) return null;
+    return (
+      <div className="mb-3.5 rounded-[10px] border border-reco-amber-border bg-reco-amber-bg px-4 py-3.5">
+        <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-amber">
+          NOT YET RECONCILED — {pending.length} CHECK{pending.length === 1 ? "" : "S"} CANNOT RUN ON THE FILES UPLOADED
+        </div>
+        {pending.map(([label, reason]) => (
           <div key={label} className="flex gap-2 text-[11.5px] leading-snug">
             <span className="font-mono text-reco-t4">{label}</span>
             <span className="text-reco-t2">{reason}</span>
           </div>
         ))}
       </div>
+    );
+  }
+
+  const flagged = outcomes.filter((o) => o.status === "flagged");
+  const notEvaluated = outcomes.filter((o) => o.status === "notEvaluated");
+  const passed = outcomes.filter((o) => o.status === "passed");
+
+  return (
+    <div className="mb-3.5 rounded-[10px] border border-reco-line bg-white p-4">
+      <div className="mb-3 flex items-baseline justify-between">
+        <span className="font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">
+          STATUTORY CHECKS
+        </span>
+        <span className="text-[11.5px] text-reco-t5">
+          {flagged.length} failed · {passed.length} passed · {notEvaluated.length} not evaluated
+        </span>
+      </div>
+
+      {notEvaluated.length > 0 && (
+        <div className="mb-3 rounded-md border border-reco-amber-border bg-reco-amber-bg px-3 py-2.5">
+          <div className="mb-1.5 text-[11.5px] font-semibold text-reco-amber">
+            Not evaluated — these were not checked, which is not the same as passing
+          </div>
+          {notEvaluated.map((o) => (
+            <RuleLine key={o.label} outcome={o} />
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-0.5">
+        {[...flagged, ...passed].map((o) => (
+          <RuleLine key={o.label} outcome={o} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const RULE_STATE = {
+  flagged: { mark: "✕", colour: "#a13f28", label: "FAILED" },
+  passed: { mark: "✓", colour: "#2f6b4d", label: "PASSED" },
+  notEvaluated: { mark: "⚠", colour: "#a86a2c", label: "NOT EVALUATED" },
+} as const;
+
+function RuleLine({ outcome }: { readonly outcome: RuleOutcome }) {
+  const state = RULE_STATE[outcome.status];
+  const missing = outcome.unmet.map((u) => u.split("#").pop()).join(", ");
+
+  return (
+    <div className="grid grid-cols-[16px_1.4fr_1.1fr_1fr] items-baseline gap-2 py-[3px]">
+      <span className="text-[12px]" style={{ color: state.colour }}>
+        {state.mark}
+      </span>
+      <span className="font-mono text-[11.5px] text-reco-t1">{outcome.label}</span>
+      <span className="font-mono text-[10.5px] text-reco-t5">{outcome.governed_by ?? ""}</span>
+      <span className="text-[11px]" style={{ color: state.colour }}>
+        {outcome.status === "flagged"
+          ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
+          : outcome.status === "passed"
+            ? "checked, clean"
+            : missing
+              ? `needs ${missing}`
+              : "could not run"}
+      </span>
     </div>
   );
 }

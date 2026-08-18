@@ -1176,6 +1176,47 @@ pub struct ReconcileOutcome {
     pub opened: usize,
     /// Findings this run re-derived that a reviewer had already been shown.
     pub already_open: usize,
+    /// What each rule concluded, and whether it could conclude at all.
+    ///
+    /// `evaluated` above is a count, and a count cannot distinguish a rule
+    /// that checked and was satisfied from one whose input data was absent.
+    /// Both contribute zero findings, and a consumer showing only totals
+    /// renders them identically as "no issues" — opposite claims about a
+    /// client's compliance. This says which is which.
+    pub rules: Vec<RuleOutcome>,
+}
+
+/// What one finding rule concluded on one run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleOutcome {
+    /// The rule, by the label its pack registered it under.
+    pub label: String,
+    /// The provision the rule enforces, carried so a consumer can name what
+    /// was *not* checked without a second lookup.
+    pub governed_by: String,
+    /// Whether the rule reached a conclusion, and which.
+    pub status: RuleStatus,
+    /// Findings this rule produced. Zero is meaningful only alongside
+    /// `status`.
+    pub found: usize,
+    /// Declared requirements with no instances in the store. Empty unless
+    /// `status` is `notEvaluated`.
+    pub unmet: Vec<String>,
+}
+
+/// Whether a rule reached a conclusion, and which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleStatus {
+    /// Ran, found nothing to report — the affirmative "checked, clean".
+    Passed,
+    /// Ran, and produced at least one finding.
+    Flagged,
+    /// Could not run: something it declares it needs has no instances in the
+    /// store. **Not a pass.** Reporting this as clean is the failure mode the
+    /// whole per-rule outcome exists to prevent.
+    NotEvaluated,
 }
 
 /// The bare value behind a SPARQL result term.
@@ -3343,6 +3384,49 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
+    /// Which of a rule's declared requirements have no instances in the store.
+    ///
+    /// A cheap existence probe per class — `LIMIT 1`, not a count: the
+    /// question is "is there anything of this kind at all", and the answer
+    /// stops mattering after the first row.
+    ///
+    /// A requirement is just an IRI, and the probe matches it **either as a
+    /// class with instances or as a predicate in use** — a pack author should
+    /// not have to tell the engine which kind of term they named, and an IRI
+    /// on its own does not say. `gst:GoodsReceipt` is a class;
+    /// `gst:itcAvailable` is a predicate; both are things a rule can be unable
+    /// to proceed without, and both are declared the same way.
+    ///
+    /// A rule declaring nothing is always evaluable, which is the great
+    /// majority of them.
+    async fn unmet_requirements(
+        &self,
+        principal: &Principal,
+        requires: &[String],
+    ) -> Result<Vec<String>, CatalogError> {
+        let mut unmet = Vec::new();
+        for class in requires {
+            // **Inside `GRAPH ?g`, not the default graph.** Every import lands
+            // under a named, source-scoped graph, so a default-graph probe
+            // matches nothing however much data is present — which would mark
+            // every rule "not evaluated" and be exactly as wrong as the bug
+            // this whole mechanism exists to fix, in the other direction.
+            // Caught by probing a class that demonstrably had instances.
+            let probe = format!(
+                "SELECT ?s WHERE {{ \
+                   {{ GRAPH ?g {{ ?s a <{class}> }} }} \
+                   UNION {{ GRAPH ?g {{ ?s <{class}> ?o }} }} \
+                 }} LIMIT 1"
+            );
+            let outcome = self
+                .sparql(principal, &probe, None, SparqlBudget::default())
+                .await?;
+            if outcome.rows.is_empty() {
+                unmet.push(class.clone());
+            }
+        }
+        Ok(unmet)
+    }
 
     /// Evaluate every rule a pack has registered, and record what they
     /// conclude — Epic 105 P5b, the platform doc's P5 finding runtime,
@@ -3373,11 +3457,35 @@ impl Catalog {
         let evaluated = rules.len();
 
         let mut all_findings = Vec::new();
+        let mut outcomes = Vec::with_capacity(rules.len());
         for rule in &rules {
+            // What this rule says it cannot conclude without. A rule whose
+            // inputs are absent has not "found nothing" — it has not looked,
+            // and recording that difference is the point of this loop.
+            let unmet = self.unmet_requirements(principal, &rule.requires).await?;
+            if !unmet.is_empty() {
+                outcomes.push(RuleOutcome {
+                    label: rule.label.clone(),
+                    governed_by: rule.governed_by.clone(),
+                    status: RuleStatus::NotEvaluated,
+                    found: 0,
+                    unmet,
+                });
+                continue;
+            }
+
             let outcome = self
                 .sparql(principal, &rule.query, None, SparqlBudget::default())
                 .await?;
-            all_findings.extend(findings_from_rows(rule, &outcome.rows)?);
+            let produced = findings_from_rows(rule, &outcome.rows)?;
+            outcomes.push(RuleOutcome {
+                label: rule.label.clone(),
+                governed_by: rule.governed_by.clone(),
+                status: if produced.is_empty() { RuleStatus::Passed } else { RuleStatus::Flagged },
+                found: produced.len(),
+                unmet: Vec::new(),
+            });
+            all_findings.extend(produced);
         }
         let found = all_findings.len();
 
@@ -3388,6 +3496,7 @@ impl Catalog {
                 found: 0,
                 opened: 0,
                 already_open: 0,
+                rules: outcomes,
             });
         }
 
@@ -3398,6 +3507,7 @@ impl Catalog {
             found,
             opened: recorded.opened,
             already_open: recorded.already_open,
+            rules: outcomes,
         })
     }
 
@@ -3435,11 +3545,39 @@ impl Catalog {
             .find(|r| r.label == label)
             .ok_or(CatalogError::NotFound)?;
 
+        // The same requirement check `reconcile_pack` applies. Running one
+        // rule on its own must not be the way a caller gets an unqualified
+        // "found nothing" that the whole-pack path would have qualified.
+        let unmet = self.unmet_requirements(principal, &rule.requires).await?;
+        if !unmet.is_empty() {
+            return Ok(ReconcileOutcome {
+                pack: pack.to_string(),
+                evaluated: 1,
+                found: 0,
+                opened: 0,
+                already_open: 0,
+                rules: vec![RuleOutcome {
+                    label: rule.label.clone(),
+                    governed_by: rule.governed_by.clone(),
+                    status: RuleStatus::NotEvaluated,
+                    found: 0,
+                    unmet,
+                }],
+            });
+        }
+
         let outcome = self
             .sparql(principal, &rule.query, None, SparqlBudget::default())
             .await?;
         let findings = findings_from_rows(rule, &outcome.rows)?;
         let found = findings.len();
+        let outcomes = vec![RuleOutcome {
+            label: rule.label.clone(),
+            governed_by: rule.governed_by.clone(),
+            status: if found == 0 { RuleStatus::Passed } else { RuleStatus::Flagged },
+            found,
+            unmet: Vec::new(),
+        }];
 
         if findings.is_empty() {
             return Ok(ReconcileOutcome {
@@ -3448,6 +3586,7 @@ impl Catalog {
                 found: 0,
                 opened: 0,
                 already_open: 0,
+                rules: outcomes,
             });
         }
 
@@ -3458,6 +3597,7 @@ impl Catalog {
             found,
             opened: recorded.opened,
             already_open: recorded.already_open,
+            rules: outcomes,
         })
     }
 

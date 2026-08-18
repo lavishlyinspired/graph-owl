@@ -837,6 +837,15 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
     except (LoadError, graphowl_client.IngestError) as exc:
         return {"ok": False, "error": str(exc), "ingested": ingested}
 
+    # What the engine said about each rule, stored as it said it. Reco Now
+    # used to *infer* "this check is off" from which files had been uploaded —
+    # a Python guess sitting beside graph-owl's own execution record, free to
+    # disagree with it without anything noticing.
+    async with pool.acquire() as conn:
+        await repo.replace_rule_outcomes(
+            conn, client_id=client_id, period_id=period_id, outcomes=result.rules
+        )
+
     created = 0
     async with pool.acquire() as conn:
         # A re-run must not duplicate cases for the same invoice — the
@@ -1233,6 +1242,7 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
     async with pool.acquire() as conn:
         stored = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
         cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+        outcomes = await repo.list_rule_outcomes(conn, client_id=client_id, period_id=period_id)
 
     by_kind = {e["kind"]: e for e in stored}
 
@@ -1260,10 +1270,19 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
     position = compute_itc_position(result)
 
     return {
-        # What this reconciliation could *not* check, named beside what it
-        # did. Silence about an unrun check reads exactly like a check that
-        # found nothing, and the difference is a client's money.
-        "checks_disabled": checks_disabled(set(by_kind)),
+        # What each rule concluded, as **graph-owl reported it** — passed,
+        # flagged, or not evaluated because a declared requirement had no
+        # instances. Not inferred here from which files exist: that was a
+        # second opinion competing with the engine's own execution record.
+        #
+        # `checks_disabled` is kept as the pre-reconciliation view: before a
+        # run there are no outcomes, and a reviewer still needs to know which
+        # checks the uploaded files can support.
+        "rule_outcomes": outcomes,
+        "checks_disabled": checks_disabled(set(by_kind)) if not outcomes else {
+            o["label"]: CHECK_REASONS.get(o["label"], "")
+            for o in outcomes if o["status"] == "notEvaluated"
+        },
         "total": result.total,
         "match_rate": result.match_rate,
         "counts": result.counts,

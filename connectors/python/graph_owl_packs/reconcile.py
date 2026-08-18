@@ -19,7 +19,7 @@ not a place to acquire an HTTP dependency.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .loader import LoadError, _request
 
@@ -33,6 +33,16 @@ class ReconcileResult:
     found: int
     opened: int
     already_open: int
+    #: What each rule concluded, and whether it could conclude at all —
+    #: `{label, governedBy, status, found, unmet}` per rule, straight from the
+    #: engine.
+    #:
+    #: `evaluated` above is a count, and a count cannot tell a rule that
+    #: checked and was satisfied from one whose input data was absent. Both
+    #: contribute zero findings, and a consumer showing only totals renders
+    #: them identically as "no issues" — opposite claims. Defaults to empty so
+    #: a server predating this field still parses.
+    rules: list[dict] = field(default_factory=list)
 
 
 def run_findings(pack_id: str, server: str, token: str | None = None) -> ReconcileResult:
@@ -60,6 +70,7 @@ def run_findings(pack_id: str, server: str, token: str | None = None) -> Reconci
         found=int(response.get("found", 0)),
         opened=int(response.get("opened", 0)),
         already_open=int(response.get("alreadyOpen", 0)),
+        rules=list(response.get("rules") or []),
     )
 
 

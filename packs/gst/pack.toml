@@ -392,8 +392,18 @@ summary = "The invoice matches, and the authority reports the credit as unavaila
 governed_by = "gst:Section17-5"
 query = "itc-not-available"
 priority = 1
+# A 2B that carries no ITC-eligibility flag at all cannot tell this rule which
+# credits the authority has blocked. Zero findings would then read as "no
+# blocked credit", when the truth is that eligibility was never stated.
+requires = ["https://graph-owl.dev/packs/gst#itcAvailable"]
 subject = "purchase"
 evidence = [
+  # The query already selects `?gstin`; binding it means a blocked-credit
+  # finding names the supplier whose credit is blocked. Without it the finding
+  # identified an invoice number and nothing else, and a consumer joining on
+  # (supplier, invoice) dropped it — two invoices blocked under s.17(5) were
+  # reported as matched with zero blocked ITC.
+  { predicate = "gst:supplierGstin", var = "gstin" },
   { predicate = "gst:invoiceNumber", var = "number" },
   { predicate = "gst:taxAmount", var = "taxAmount" },
   { predicate = "gst:itcAvailable", var = "itcAvailable" },
@@ -614,6 +624,10 @@ summary = "The invoice is matched and its GSTR-2B period contains it, but the go
 governed_by = "gst:Section16-2-b"
 query = "goods-receipt-timing"
 priority = 1
+# No goods-receipt records means no receipt dates to compare against the
+# period, so the rule cannot say whether anything arrived late. Silence here
+# would read as "everything arrived in time".
+requires = ["https://graph-owl.dev/packs/gst#GoodsReceipt"]
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
@@ -705,6 +719,12 @@ label = "gst:PaymentOverdue"
 summary = "Credit taken on an invoice not paid within 180 days of its date"
 governed_by = "gst:Section16-2-d"
 query = "payment-overdue"
+# Without purchase events there is nothing to measure 180 days *from*, and the
+# rule returns no rows — which must not be read as "everything was paid on
+# time". `gst:PaymentEvent` is deliberately **not** required: the query holds
+# it in an OPTIONAL block, because an invoice with no payment at all is
+# precisely what this rule is looking for.
+requires = ["https://graph-owl.dev/packs/gst#PurchaseEvent"]
 subject = "purchase"
 evidence = [
   { predicate = "gst:invoiceNumber", var = "number" },

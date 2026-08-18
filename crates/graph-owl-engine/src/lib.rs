@@ -455,6 +455,25 @@ pub struct FindingRuleDef {
     /// undeclared one.
     #[serde(default)]
     pub priority: Option<i16>,
+    /// Classes this rule cannot conclude anything without — IRIs, checked for
+    /// at least one instance before the rule runs.
+    ///
+    /// Exists so that "ran, found nothing" and "could not run" stop being the
+    /// same answer. `reconcile_pack` reported only a count of rules evaluated,
+    /// so a rule whose input data was absent looked exactly like a rule that
+    /// checked and was satisfied — on a compliance screen, "no issues" for
+    /// both. They are opposite claims.
+    ///
+    /// **Declared by the pack, never inferred from the query.** Inference is
+    /// cheaper and wrong in the case that matters: a rule may mention a class
+    /// inside `OPTIONAL`, where the class being absent is precisely what the
+    /// rule detects rather than something that stops it. Only the author knows
+    /// which inputs are load-bearing.
+    ///
+    /// Empty for the great majority of rules, which read only what any
+    /// reconciliation already has.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// Finding rules definable at runtime, so a pack's reconciliation logic
