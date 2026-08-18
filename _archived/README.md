@@ -34,6 +34,10 @@ be wrong.
 it). Nothing to archive there: an empty directory has no content to
 preserve, and it was never tracked by git in the first place.
 
+- `ui-concept/` (originally `ui-concept/index.html`, commit `9e6321c`) — a
+  standalone, single-file HTML console prototype, superseded by
+  `graphowl-app/` (Plan 122a), the real implementation it prototyped.
+
 - `ui/` — the original console (Epic 39), replaced by `graphowl-app/`
   (Plan 122a A0–A11). Archived rather than deleted for the same reason as
   everything else here: git history recovers it, but a reader asking "why
