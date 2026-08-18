@@ -455,11 +455,23 @@ it. *Mutators*: the grounding ratio inverted; the read-only guard removed.
 **Value** — growth by fact state, the source-row → certified-fact funnel,
 confidence decay by predicate, traversal hotspots.
 
-**`A9.api`** — **needs its own plan.** Requires a rollup or time-series
-story the engine does not have. `POST /graph/context/analytics` and
-`/metrics` cover none of these four. Size it honestly before A9 starts; if
-it is an epic, A9 waits and the console ships without it rather than
-shipping a fake one.
+**`A9.api`** — **needs its own plan. Checked again, 2026-08-18, before
+accepting that — confirmed, not assumed.** `POST /graph/context/analytics`
+does not exist as a registered route at all (grepped the full router; the
+plan's own reference to it appears to predate a rename or was aspirational).
+`/metrics` is Prometheus-shaped observability (request counts, latencies),
+not fact-state or confidence data. The one real, adjacent building block is
+`GET /assets/{id}/analytics` (`asset_analytics`, Epic 38-adjacent) —
+in/out-degree, orphans and edge types for **one asset's bounded
+neighborhood** — which is a genuine "traversal hotspots" primitive but at
+the wrong scope (per-asset, not catalog-wide) and covers only one of the
+four required visualizations. Growth-by-fact-state, the funnel, and
+confidence decay all need a time-series or rollup story the engine
+does not have in any form. **Unlike A6/A7/A8, this one really is mostly
+blocked, not just under-checked — the plan's original call to let A9 wait
+was correct.** Not attempted; `StudioRoute`-style honest placeholder stays
+in place rather than shipping one real visualization out of four and
+calling the tab done.
 
 **AC** — four visualizations, each cell/bar traceable to the facts behind
 it ("Show the facts"). The period narrative cites its fact count.
