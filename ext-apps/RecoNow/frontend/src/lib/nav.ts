@@ -18,6 +18,7 @@ export const NAV: readonly NavGroup[] = [
     label: "RECONCILE",
     items: [
       { label: "Upload & map", route: "pipeline" },
+      { label: "Reconcile", route: "reconcile" },
       { label: "Periods", route: "periods" },
       { label: "Register", route: "register" },
       { label: "Exceptions", route: "exceptions" },

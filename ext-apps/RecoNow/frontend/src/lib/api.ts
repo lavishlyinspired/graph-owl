@@ -515,3 +515,47 @@ export interface Analytics {
 export function fetchAnalytics(clientId: string): Promise<Analytics> {
   return apiFetch<Analytics>(`/api/clients/${encodeURIComponent(clientId)}/analytics`);
 }
+
+export type Bucket = "matched" | "review" | "only_books" | "only_portal";
+
+export interface ReconRow {
+  readonly invoice_no: string | null;
+  readonly supplier_gstin: string | null;
+  readonly supplier_name: string | null;
+  readonly bucket: Bucket;
+  readonly books_taxable: number;
+  readonly portal_taxable: number;
+  readonly books_tax: number;
+  readonly portal_tax: number;
+  readonly difference: number;
+  readonly labels: readonly string[];
+  readonly blocked: boolean;
+}
+
+export interface ItcPositionBreakdown {
+  readonly confirmed: number;
+  /** Deferred, not lost — the supplier has not filed yet. */
+  readonly pending: number;
+  /** s.17(5) or reverse charge. Lost. */
+  readonly blocked: number;
+  readonly under_review: number;
+  /** On the portal, absent from the books. */
+  readonly unclaimed: number;
+  readonly total_considered: number;
+}
+
+export interface Reconciliation {
+  readonly total: number;
+  readonly match_rate: number;
+  readonly counts: Record<Bucket, number>;
+  readonly itc: ItcPositionBreakdown;
+  readonly have_books: boolean;
+  readonly have_portal: boolean;
+  readonly rows: readonly ReconRow[];
+}
+
+export function fetchReconciliation(clientId: string, periodId: string): Promise<Reconciliation> {
+  return apiFetch<Reconciliation>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/reconciliation`,
+  );
+}

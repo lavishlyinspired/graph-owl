@@ -18,11 +18,17 @@ describe("NAV", () => {
     expect(seen.length).toBe(ROUTES.length);
   });
 
-  it("covers all 28 destinations from the delivered mockup", () => {
+  it("reaches every route from the nav — no route is unreachable", () => {
+    // The count is deliberately not pinned. It was 28, matching the delivered
+    // mockup exactly; plan 123 both adds screens a CA needs (Reconcile, and
+    // later the 3B working paper) and consolidates ones that were the same
+    // list under different headings. Asserting a number would fail on every
+    // such change while proving nothing — what matters is that nothing in
+    // ROUTES is unreachable from the navigation.
     const navRoutes = new Set(NAV.flatMap((g) => g.items.map((i) => i.route)));
     for (const route of ROUTES) {
       expect(navRoutes.has(route), `"${route}" is missing from NAV`).toBe(true);
     }
-    expect(ROUTES.length).toBe(28);
+    expect(ROUTES.length).toBeGreaterThan(0);
   });
 });

@@ -10,6 +10,7 @@
 export const ROUTES = [
   "home",
   "pipeline",
+  "reconcile",
   "periods",
   "register",
   "exceptions",
