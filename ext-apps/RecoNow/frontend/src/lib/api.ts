@@ -71,6 +71,70 @@ export function fetchApprovals(clientId: string, periodId: string, status = "pen
   );
 }
 
+export interface DatasetUploadResult {
+  readonly kind: string;
+  readonly headers: readonly string[];
+  readonly preview: readonly Record<string, unknown>[];
+  readonly total_rows: number;
+  readonly mapping: Record<string, number | null>;
+  readonly from_template: boolean;
+}
+
+export function uploadDataset(
+  clientId: string,
+  periodId: string,
+  kind: string,
+  file: File,
+): Promise<DatasetUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch(
+    `${API_BASE}/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/datasets/${kind}/upload`,
+    { method: "POST", body: form },
+  ).then((r) => {
+    if (!r.ok) throw new Error(`upload ${kind} -> ${r.status}`);
+    return r.json() as Promise<DatasetUploadResult>;
+  });
+}
+
+export function confirmDatasetMapping(
+  clientId: string,
+  periodId: string,
+  kind: string,
+  mapping: Record<string, number | null>,
+  tolerance: number,
+): Promise<{ kind: string; confirmed: boolean }> {
+  return apiPost(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/datasets/${kind}/mapping`,
+    { mapping, tolerance },
+  );
+}
+
+export interface DatasetSummary {
+  readonly kind: string;
+  readonly name: string;
+  readonly total_rows: number;
+  readonly confirmed: boolean;
+}
+
+export function fetchDatasets(clientId: string, periodId: string): Promise<readonly DatasetSummary[]> {
+  return apiFetch<DatasetSummary[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/datasets`,
+  );
+}
+
+export interface ReconcileResult {
+  readonly ok: boolean;
+  readonly evaluated?: number;
+  readonly found?: number;
+  readonly cases_created?: number;
+  readonly error?: string;
+}
+
+export function runReconcile(clientId: string, periodId: string): Promise<ReconcileResult> {
+  return apiPost(`/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/reconcile`, {});
+}
+
 export function decideApproval(
   clientId: string,
   periodId: string,

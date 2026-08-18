@@ -315,6 +315,80 @@ saved template applies to a second period's identically shaped file.
 *Mutators*: the block condition inverted; the template matching on the
 wrong key.
 
+**Shipped**, reordered ahead of B2: B2's own AC needs real reconciliation
+totals ("every card total reconciles to the register's filtered sum",
+"what the graph engine did ... from real run data"), which only exist once
+a reconcile has actually run — building the dashboard first would mean
+building it against numbers that cannot exist yet. `app/main.py` gained
+`.../datasets/{kind}/upload`, `.../datasets/{kind}/mapping`,
+`.../datasets`, and `.../reconcile`, all reusing the pre-existing parsing
+and auto-map helpers (`_parse_upload`, `_build_dataset`, `_auto_map`,
+`_normalize`) unchanged, per this plan's own D3/B0 precedent of not
+rewriting what already works. `WORKSPACES`, a new in-memory dict keyed by
+`f"{client_id}:{period_id}"`, is the legitimate replacement for
+`SESSION["datasets"]`/`SESSION["mapping"]` — in-progress mapping state, not
+a workflow decision B0's durability guarantee is about. The mapping
+*template* itself, once confirmed, persists through B0's own
+`mapping_template` table (`repo.upsert_mapping_template` /
+`get_mapping_template`), which is what makes template reuse across periods
+real rather than re-derived from scratch.
+
+**A real isolation gap found while wiring this, not by a test**:
+`_ingest_to_graphowl`'s old `source = f"reco-{kind}"` was a single global
+name — harmless for the pre-B0 single-session app, silently unsafe now
+that two clients' uploads can be in flight against the same graph-owl
+store at once, since a re-upload deletes-then-replaces its source and a
+shared name means client B's upload would delete and replace client A's
+own books. Fixed in `_ingest_scoped_to_graphowl`: the source name now
+carries `client_id` and `period_id`. **Documented, not fixed, because it
+cannot be from this side**: the native reconcile engine itself
+(`run_findings`) still runs unscoped over the *whole* graph-owl store —
+true before this slice (`_install_graphowl_pack`'s own comment already
+says so) and still true after it. Scoped ingestion stops one client's
+upload from overwriting another's; it does not give two clients a safely
+concurrent *reconcile* — that needs a graph-owl-side scoping mechanism,
+out of reach for a Python backend to add unilaterally. Recorded here so it
+is a known, named gap rather than something a future session has to
+rediscover.
+
+`reconcile` bridges GraphOWL's own findings into B0's `case_record` table
+— the first place native-engine output becomes a durable workflow row —
+de-duplicating by `invoice_no` within the client+period so a re-run (a
+corrected mapping, a re-upload) does not double a case that already exists.
+
+**Verified live**, backend and browser both: uploaded a real CSV
+(`books_test.csv`, 2 real invoices) through the actual browser file input
+against a real Postgres — the mapping table rendered the true auto-detected
+columns and sample values (`Invoice Date → 15-12-2025`, `Taxable Amount →
+500000`, ...), confirmed the mapping, and the sidebar's checkmark and the
+now-enabled "Reconcile" button both updated correctly. Clicking Reconcile
+against no running graph-owl-server produced the exact expected degraded
+message ("... was unreachable: [Errno 61] Connection refused") rather than
+a crash or a silent no-op — the same best-effort contract
+`_install_graphowl_pack` already established, now proven live for this
+path too. **Scope note, stated rather than hidden**: this session did not
+stand up a real graph-owl-server with the GST pack loaded, so the
+reconcile *success* path (a real `run_findings` call actually finding
+something, and the finding → `case_record` bridge actually firing) is
+covered by the pieces it composes — `graphowl_client.py`'s own existing
+645-line test suite, and this slice's isolation/dedup logic tested
+directly — but not by one live end-to-end run all the way through a real
+finding. Worth a live pass in a future slice once `scripts/demo.sh`-style
+seeding is wired to the client/period model.
+
+**A second real bug found live**: a client/period id persisted in
+`localStorage` from an earlier session survived a switch to a *different*
+Postgres database — the ids were non-null, so every `!clientId` guard
+downstream passed, while the TopBar (which fetches its own list fresh)
+correctly showed "Select a client". A stale-but-truthy id would have let
+`pipeline.tsx` accept uploads and mapping confirmations against a client
+that does not exist in the current database — the confirm step would only
+fail later, at the Postgres foreign-key constraint, with no clear error
+shown. Fixed in `AppShell`: a validation effect fetches the real
+clients/periods lists whenever the workspace ids change and clears the
+workspace the moment either no longer resolves, rather than trusting a
+persisted id indefinitely.
+
 ---
 
 ### B4 · Register · Exceptions · Case detail

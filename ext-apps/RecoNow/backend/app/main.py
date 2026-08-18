@@ -468,6 +468,170 @@ async def ask_route(client_id: str, period_id: str, payload: dict) -> dict:
     return {"grounded": True, "answer": answer, "citations": citations}
 
 
+# ---------------------------------------------------------------- Plan 122b B3
+# Upload & map. `WORKSPACES` is the client+period-scoped replacement for
+# SESSION["datasets"]/SESSION["mapping"] — legitimately still in-memory
+# (this is in-progress mapping state, not a workflow decision), but keyed
+# per (client_id, period_id) instead of being one global dict. The mapping
+# *template* itself, once confirmed, persists durably via
+# repo.upsert_mapping_template so a second period reuses it.
+WORKSPACES: dict[str, dict] = {}
+
+
+def _workspace(client_id: str, period_id: str) -> dict:
+    key = f"{client_id}:{period_id}"
+    return WORKSPACES.setdefault(key, {"datasets": {}})
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/datasets/{kind}/upload")
+async def upload_dataset_route(client_id: str, period_id: str, kind: str, file: UploadFile = File(...)) -> dict:
+    pool = _require_db_pool()
+    raw = await file.read()
+    try:
+        payload = _parse_upload(raw, file.filename or "upload.csv")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"could not parse {file.filename}: {exc}") from exc
+    dataset = _build_dataset(payload, file.filename or kind, kind)
+
+    async with pool.acquire() as conn:
+        template = await repo.get_mapping_template(conn, client_id=client_id, dataset_kind=kind)
+    if template is not None:
+        mapping = template["mapping"]
+        from_template = True
+    else:
+        mapping = _auto_map(dataset["headers"])
+        from_template = False
+
+    workspace = _workspace(client_id, period_id)
+    workspace["datasets"][kind] = {"dataset": dataset, "mapping": mapping, "confirmed": False}
+
+    return {
+        "kind": kind,
+        "headers": dataset["headers"],
+        "preview": dataset["rows"][:5],
+        "total_rows": dataset["total_rows"],
+        "mapping": mapping,
+        "from_template": from_template,
+    }
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/datasets/{kind}/mapping")
+async def confirm_dataset_mapping_route(client_id: str, period_id: str, kind: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    mapping = payload.get("mapping")
+    tolerance = float(payload.get("tolerance", 1.0))
+    if not mapping:
+        raise HTTPException(status_code=400, detail="mapping is required")
+
+    workspace = _workspace(client_id, period_id)
+    entry = workspace["datasets"].get(kind)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"no {kind} dataset uploaded for this period yet")
+    entry["mapping"] = mapping
+    entry["confirmed"] = True
+
+    async with pool.acquire() as conn:
+        await repo.upsert_mapping_template(conn, client_id=client_id, dataset_kind=kind, mapping=mapping, tolerance=tolerance)
+
+    return {"kind": kind, "confirmed": True}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/datasets")
+async def list_datasets_route(client_id: str, period_id: str) -> list[dict]:
+    workspace = _workspace(client_id, period_id)
+    return [
+        {
+            "kind": kind,
+            "name": entry["dataset"]["name"],
+            "total_rows": entry["dataset"]["total_rows"],
+            "confirmed": entry["confirmed"],
+        }
+        for kind, entry in workspace["datasets"].items()
+    ]
+
+
+def _ingest_scoped_to_graphowl(client_id: str, period_id: str, kind: str, dataset: dict, mapping: dict) -> dict:
+    """`_ingest_to_graphowl`'s reasoning (stable source, deleted before
+    every re-import) still holds — the source name itself now carries
+    client_id and period_id, not just kind. The pre-B0 app served exactly
+    one session at a time, so `reco-{kind}` alone never collided; two
+    clients uploading concurrently now genuinely can, and a shared source
+    name would mean client B's upload deletes and replaces client A's own
+    books. **Known limitation, not fixed here**: the native reconcile
+    engine itself (`run_findings`, called by `_run_graphowl_reconcile` and
+    the client+period `reconcile_route` below) still runs unscoped over the
+    *whole* graph-owl store — this was true before B0 and stays true after
+    it (`_install_graphowl_pack`'s own comment already documents it). This
+    fix stops one client's ingest from silently overwriting another's;
+    fully isolating the reconcile step itself needs a graph-owl-side
+    scoping mechanism this Python backend cannot add on its own."""
+    normalized = _normalize(dataset, mapping)
+    turtle = graphowl_client.rows_to_turtle(normalized, kind)
+    source = f"reco-{client_id}-{period_id}-{kind}"
+    if not turtle:
+        return {"source": source, "landed": 0, "skipped": 0, "rejected": []}
+    graphowl_client.delete_document(GRAPH_OWL_SERVER, source, GRAPH_OWL_TOKEN)
+    result = graphowl_client.import_document(GRAPH_OWL_SERVER, source, turtle, GRAPH_OWL_TOKEN)
+    return {
+        "source": source,
+        "landed": len(result.get("landed", [])),
+        "skipped": len(result.get("skipped", [])),
+        "rejected": result.get("rejected", []),
+    }
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/reconcile")
+async def reconcile_route(client_id: str, period_id: str) -> dict:
+    pool = _require_db_pool()
+    workspace = _workspace(client_id, period_id)
+    datasets = workspace["datasets"]
+    if not datasets:
+        raise HTTPException(status_code=409, detail="upload at least one dataset first")
+    unconfirmed = [kind for kind, entry in datasets.items() if not entry["confirmed"]]
+    if unconfirmed:
+        raise HTTPException(
+            status_code=409, detail=f"unconfirmed datasets block reconciliation: {', '.join(unconfirmed)}"
+        )
+
+    ingested = {}
+    for kind, entry in datasets.items():
+        try:
+            ingested[kind] = _ingest_scoped_to_graphowl(client_id, period_id, kind, entry["dataset"], entry["mapping"])
+        except graphowl_client.IngestError as exc:
+            ingested[kind] = {"error": str(exc)}
+
+    try:
+        result = run_findings(graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+    except (LoadError, graphowl_client.IngestError) as exc:
+        return {"ok": False, "error": str(exc), "ingested": ingested}
+
+    created = 0
+    async with pool.acquire() as conn:
+        # A re-run must not duplicate cases for the same invoice — the
+        # register (B4) reads case_record directly, and reconcile is meant
+        # to be safely re-runnable (a re-upload, a corrected mapping).
+        existing = {c["invoice_no"] for c in await repo.list_cases(conn, client_id=client_id, period_id=period_id)}
+        for finding in findings:
+            invoice_no = str(finding.get("subject") or finding.get("id") or "unknown")
+            if invoice_no in existing:
+                continue
+            await repo.create_case(
+                conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
+                reason_code=finding.get("rule"),
+            )
+            existing.add(invoice_no)
+            created += 1
+
+    return {
+        "ok": True,
+        "ingested": ingested,
+        "evaluated": result.evaluated,
+        "found": result.found,
+        "cases_created": created,
+    }
+
+
 @app.post("/api/clients/{client_id}/periods/{period_id}/approvals", status_code=201)
 async def create_approval_route(client_id: str, period_id: str, payload: dict) -> dict:
     pool = _require_db_pool()

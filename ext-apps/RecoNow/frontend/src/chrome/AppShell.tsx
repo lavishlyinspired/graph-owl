@@ -4,8 +4,8 @@ import { TopBar } from "./TopBar";
 import { Rail } from "./Rail";
 import { AskPanel } from "./AskPanel";
 import { InboxDrawer } from "./InboxDrawer";
-import { fetchApprovals } from "../lib/api";
-import { loadWorkspace, persistWorkspace, selectClient, selectPeriod } from "../lib/workspace";
+import { fetchApprovals, fetchClients, fetchPeriods } from "../lib/api";
+import { EMPTY_WORKSPACE, loadWorkspace, persistWorkspace, selectClient, selectPeriod } from "../lib/workspace";
 import { NAV } from "../lib/nav";
 import { strings } from "../lib/strings";
 
@@ -18,6 +18,34 @@ export function AppShell() {
   const [pendingVersion, setPendingVersion] = useState(0);
 
   useEffect(() => persistWorkspace(workspace), [workspace]);
+
+  // A workspace persisted to localStorage can outlive the server it was
+  // saved against — found live: a client/period selected against one
+  // Postgres database, still present in localStorage after switching to a
+  // fresh one, satisfied every `clientId != null` check downstream while
+  // pointing at nothing. Confirmed once, on mount / whenever the ids
+  // change, rather than trusted forever.
+  useEffect(() => {
+    const clientId = workspace.clientId;
+    if (!clientId) return;
+    fetchClients()
+      .then((clients) => {
+        if (!clients.some((c) => c.id === clientId)) {
+          setWorkspace(EMPTY_WORKSPACE);
+          return;
+        }
+        const periodId = workspace.periodId;
+        if (!periodId) return;
+        fetchPeriods(clientId).then((periods) => {
+          if (!periods.some((p) => p.id === periodId)) {
+            setWorkspace((w) => (w.clientId === clientId ? selectClient(w, clientId) : w));
+          }
+        });
+      })
+      .catch(() => {
+        /* transient network failure — do not evict a possibly-still-valid workspace */
+      });
+  }, [workspace.clientId, workspace.periodId]);
 
   useEffect(() => {
     if (!workspace.clientId || !workspace.periodId) {
