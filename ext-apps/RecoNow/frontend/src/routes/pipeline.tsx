@@ -8,6 +8,7 @@ import {
   uploadDataset,
   type DatasetSummary,
   type DatasetUploadResult,
+  type DataIssue,
 } from "../lib/api";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -172,6 +173,10 @@ export default function PipelineRoute() {
 
         <div>
           {upload && activeKind && upload.kind === activeKind && (
+            <DataIssues issues={upload.issues ?? []} rows={upload.total_rows} />
+          )}
+
+          {upload && activeKind && upload.kind === activeKind && (
             <div className="mb-3 flex items-center gap-2">
               <button
                 type="button"
@@ -324,6 +329,80 @@ function DataTable({ upload }: { readonly upload: DatasetUploadResult }) {
           Showing the first {limit} of {upload.total_rows} rows. Reconciliation reads every row.
         </div>
       )}
+    </div>
+  );
+}
+
+
+/** What is wrong with this file, at the moment it is uploaded.
+ *
+ *  The ingestion already skipped a payment row with no date — correctly, since
+ *  an event with no time cannot answer "how many days apart" and treating it
+ *  as never-paid would manufacture a reversal the client does not owe. But it
+ *  skipped it *silently*: nothing told the person who uploaded the file that
+ *  seven of their eight payments would not be counted.
+ *
+ *  Blocking first, because those are the rows that will not reach the graph at
+ *  all. Nothing here refuses the file — a file with problems is still the best
+ *  information available. */
+function DataIssues({
+  issues,
+  rows,
+}: {
+  readonly issues: readonly DataIssue[];
+  readonly rows: number;
+}) {
+  if (issues.length === 0) {
+    return (
+      <div className="mb-3 rounded-md border border-reco-line bg-white px-3 py-2 text-[11.5px] text-reco-t4">
+        <span className="text-reco-ok">✓</span> {rows} rows read with no problems found.
+      </div>
+    );
+  }
+
+  const blocking = issues.filter((i) => i.severity === "blocking");
+
+  return (
+    <div
+      className="mb-3 overflow-hidden rounded-[10px]"
+      style={{
+        border: `${blocking.length ? 2 : 1}px solid ${blocking.length ? "#eed7d1" : "#f0dcc2"}`,
+        background: blocking.length ? "#fdf1ee" : "#fdf3e7",
+      }}
+    >
+      <div
+        className="px-3.5 py-2"
+        style={{ borderBottom: `1px solid ${blocking.length ? "#eed7d1" : "#f0dcc2"}` }}
+      >
+        <span
+          className="font-mono text-[10px] font-semibold tracking-[0.1em]"
+          style={{ color: blocking.length ? "#a13f28" : "#a86a2c" }}
+        >
+          {blocking.length > 0 ? "⚠ ROWS THAT WILL NOT BE COUNTED" : "⚠ WORTH A LOOK"}
+        </span>
+        <span className="ml-2 text-[11.5px] text-reco-t2">
+          {issues.length} issue{issues.length === 1 ? "" : "s"} in {rows} rows
+        </span>
+      </div>
+      <div className="px-3.5 py-2">
+        {issues.map((issue) => (
+          <div key={issue.code} className="border-b border-reco-row py-1.5 last:border-b-0">
+            <div className="flex items-baseline gap-2">
+              <span
+                className="font-mono text-[10px]"
+                style={{ color: issue.severity === "blocking" ? "#a13f28" : "#a86a2c" }}
+              >
+                {issue.severity === "blocking" ? "✕" : "⚠"}
+              </span>
+              <span className="font-mono text-[11px] text-reco-t1">{issue.code}</span>
+              <span className="font-mono text-[10.5px] text-reco-t5">
+                {issue.rows} row{issue.rows === 1 ? "" : "s"} · e.g. row {issue.example_row}
+              </span>
+            </div>
+            <div className="ml-5 text-[11.5px] leading-snug text-reco-t2">{issue.detail}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

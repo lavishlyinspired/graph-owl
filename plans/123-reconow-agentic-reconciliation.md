@@ -381,6 +381,48 @@ alone.
 
 ---
 
+## 11a. Blocking finding — reconciliation is not period-scoped
+
+**Found 19 August 2026 by verifying the three-state rule outcome across two
+periods, and it undercuts that feature.**
+
+Ingest *is* scoped: each (client, period, kind) lands in its own named source
+graph (`reco-{hash}-{kind}`), and the store shows one graph per kind per
+period, exactly as designed.
+
+**Evaluation is not.** `reconcile_pack` runs each rule's SPARQL across the
+whole store, and the new `requires` probe does the same. Both are correct for
+one period and wrong for two:
+
+- A period with no goods-receipt file reported `gst:GoodsReceiptTiming` as
+  **passed**, because a *different* period had supplied GRN data. That is
+  precisely the "checked, clean" lie the three-state outcome exists to
+  prevent — reintroduced one level up.
+- April, holding only a payment ledger, reported 38 findings. They were
+  mostly March's.
+
+**This is not a regression.** The unscoped reconcile is pre-existing and
+already recorded in `_ingest_scoped_to_graphowl`'s own comment. What is new is
+that more now rests on it: rule outcomes are stored per (client, period) while
+the engine that produced them cannot tell periods apart, so the *storage*
+implies a precision the *computation* does not have.
+
+**Consequences to accept until it is fixed**: with one period per client
+everything above is correct. With two, per-period rule outcomes and finding
+counts are unreliable, and "passed" is the dangerous direction.
+
+**The fix is not a probe tweak.** Scoping the probe alone would leave findings
+global — a period would then show honest rule states beside another period's
+findings, which is worse than uniformly wrong. Reconciliation needs a scope
+argument end to end: which named graphs a run may read, applied to both the
+rule queries and the requirement probes. That is a graph-owl change of real
+size and it should be its own slice, **before F (agents)** — an agent
+grounded in cross-period findings would be confidently wrong.
+
+Sequencing therefore inserts **C0 · period-scoped evaluation** ahead of C.
+
+---
+
 ## 12. Risks
 
 | Risk | Handling |

@@ -22,6 +22,7 @@ from graph_owl_packs.reconcile import run_findings
 from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
+from .data_quality import inspect_rows
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -611,6 +612,10 @@ async def upload_dataset_route(client_id: str, period_id: str, kind: str, file: 
         "mapping": mapping,
         "from_template": from_template,
         "confirmed": False,
+        # What is wrong with this file, said now rather than discovered later
+        # as a check that quietly did not run. Warnings only — a file with
+        # problems is still the best information available.
+        "issues": inspect_rows(_normalize(dataset, mapping), kind),
     }
 
 
@@ -645,6 +650,10 @@ async def get_dataset_route(client_id: str, period_id: str, kind: str) -> dict:
         "mapping": entry["mapping"],
         "from_template": False,
         "confirmed": entry["confirmed"],
+        "issues": inspect_rows(
+            _normalize({"headers": entry["headers"], "rows": entry["rows"]}, entry["mapping"]),
+            kind,
+        ),
     }
 
 

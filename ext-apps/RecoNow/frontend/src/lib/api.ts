@@ -71,7 +71,20 @@ export function fetchApprovals(clientId: string, periodId: string, status = "pen
   );
 }
 
+/** A problem found in an uploaded file, reported when it lands rather than
+ *  discovered later as a check that quietly did not run. */
+export interface DataIssue {
+  readonly code: string;
+  readonly detail: string;
+  readonly severity: "blocking" | "warning";
+  /** How many rows are affected. */
+  readonly rows: number;
+  /** 1-based, matching what a spreadsheet shows. */
+  readonly example_row: number;
+}
+
 export interface DatasetUploadResult {
+  readonly issues?: readonly DataIssue[];
   readonly kind: string;
   readonly name?: string;
   readonly headers: readonly string[];

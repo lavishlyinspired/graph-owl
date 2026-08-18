@@ -323,11 +323,17 @@ function ItcPositionPanel({ itc }: { readonly itc: Reconciliation["itc"] }) {
  *  and used to render identically as "no issues". For a statutory test —
  *  Rule 37, s.16(2)(b), s.17(5) — that difference is a client's money.
  *
+ *  So the three states are **separate blocks with their own headings**, not
+ *  one list distinguished by the colour of a tick. A reviewer skimming this
+ *  panel should be unable to mistake "not evaluated" for "passed" without
+ *  reading the marks, and Not evaluated comes first because it is the state
+ *  that silently reads as good news.
+ *
  *  The states come from **graph-owl's own execution record**, not from
  *  inspecting which files were uploaded. The engine probes each rule's
  *  declared requirements before running it and reports what it found; this
- *  component renders that. "Could not evaluate, and here is what was
- *  missing" is evidence about the run, and it belongs in the engine.
+ *  renders that. "Could not evaluate, and here is what was missing" is
+ *  evidence about the run, and it belongs in the engine.
  */
 function RulePanel({
   outcomes,
@@ -336,23 +342,30 @@ function RulePanel({
   readonly outcomes: readonly RuleOutcome[];
   readonly unsupported: Record<string, string>;
 }) {
-  // Before any reconciliation has been run there are no outcomes, but a
-  // reviewer still needs to know which checks the uploaded files can support.
+  // Before any reconciliation has run there are no outcomes, but a reviewer
+  // still needs to know which checks the uploaded files can support.
   if (outcomes.length === 0) {
     const pending = Object.entries(unsupported);
     if (pending.length === 0) return null;
     return (
-      <div className="mb-3.5 rounded-[10px] border border-reco-amber-border bg-reco-amber-bg px-4 py-3.5">
-        <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-amber">
-          NOT YET RECONCILED — {pending.length} CHECK{pending.length === 1 ? "" : "S"} CANNOT RUN ON THE FILES UPLOADED
+      <section className="mb-3.5 overflow-hidden rounded-[10px] border-2 border-reco-amber-border bg-reco-amber-bg">
+        <div className="border-b border-reco-amber-border px-4 py-2.5">
+          <span className="font-mono text-[10px] font-semibold tracking-[0.1em] text-reco-amber">
+            ⚠ NOT YET RECONCILED
+          </span>
+          <span className="ml-2 text-[11.5px] text-reco-t2">
+            {pending.length} check{pending.length === 1 ? "" : "s"} cannot run on the files uploaded
+          </span>
         </div>
-        {pending.map(([label, reason]) => (
-          <div key={label} className="flex gap-2 text-[11.5px] leading-snug">
-            <span className="font-mono text-reco-t4">{label}</span>
-            <span className="text-reco-t2">{reason}</span>
-          </div>
-        ))}
-      </div>
+        <div className="px-4 py-2.5">
+          {pending.map(([label, reason]) => (
+            <div key={label} className="grid grid-cols-[1.3fr_2fr] gap-3 py-[3px]">
+              <span className="font-mono text-[11.5px] text-reco-t1">{label}</span>
+              <span className="text-[11.5px] text-reco-t2">{reason}</span>
+            </div>
+          ))}
+        </div>
+      </section>
     );
   }
 
@@ -361,60 +374,134 @@ function RulePanel({
   const passed = outcomes.filter((o) => o.status === "passed");
 
   return (
-    <div className="mb-3.5 rounded-[10px] border border-reco-line bg-white p-4">
-      <div className="mb-3 flex items-baseline justify-between">
+    <section className="mb-3.5">
+      <div className="mb-2 flex items-baseline justify-between">
         <span className="font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">
           STATUTORY CHECKS
         </span>
-        <span className="text-[11.5px] text-reco-t5">
-          {flagged.length} failed · {passed.length} passed · {notEvaluated.length} not evaluated
-        </span>
+        <div className="flex items-center gap-2">
+          <Chip n={flagged.length} label="failed" colour="#a13f28" />
+          <Chip n={notEvaluated.length} label="not evaluated" colour="#a86a2c" />
+          <Chip n={passed.length} label="passed" colour="#2f6b4d" />
+        </div>
       </div>
 
+      {/* First, and boxed, because it is the state that silently reads as good
+          news. A reviewer who skims must still see it. */}
       {notEvaluated.length > 0 && (
-        <div className="mb-3 rounded-md border border-reco-amber-border bg-reco-amber-bg px-3 py-2.5">
-          <div className="mb-1.5 text-[11.5px] font-semibold text-reco-amber">
-            Not evaluated — these were not checked, which is not the same as passing
-          </div>
-          {notEvaluated.map((o) => (
-            <RuleLine key={o.label} outcome={o} />
-          ))}
-        </div>
+        <StateBlock
+          tone="amber"
+          heading="⚠ NOT EVALUATED"
+          note="These were not checked. That is not the same as passing."
+          outcomes={notEvaluated}
+        />
       )}
+      {flagged.length > 0 && (
+        <StateBlock
+          tone="red"
+          heading="✕ FAILED"
+          note="Ran, and found something to answer for."
+          outcomes={flagged}
+        />
+      )}
+      {passed.length > 0 && (
+        <StateBlock
+          tone="green"
+          heading="✓ PASSED"
+          note="Ran against this period's data and found nothing."
+          outcomes={passed}
+        />
+      )}
+    </section>
+  );
+}
 
-      <div className="flex flex-col gap-0.5">
-        {[...flagged, ...passed].map((o) => (
-          <RuleLine key={o.label} outcome={o} />
+function Chip({
+  n,
+  label,
+  colour,
+}: {
+  readonly n: number;
+  readonly label: string;
+  readonly colour: string;
+}) {
+  const shade = n === 0 ? "#8a857c" : colour;
+  return (
+    <span
+      className="rounded-full border px-2 py-[2px] font-mono text-[10px]"
+      style={{ color: shade, borderColor: shade + "55" }}
+    >
+      {n} {label}
+    </span>
+  );
+}
+
+const TONE = {
+  amber: { border: "#f0dcc2", bg: "#fdf3e7", text: "#a86a2c" },
+  red: { border: "#eed7d1", bg: "#fdf1ee", text: "#a13f28" },
+  green: { border: "#e3e0d9", bg: "#ffffff", text: "#2f6b4d" },
+} as const;
+
+function StateBlock({
+  tone,
+  heading,
+  note,
+  outcomes,
+}: {
+  readonly tone: keyof typeof TONE;
+  readonly heading: string;
+  readonly note: string;
+  readonly outcomes: readonly RuleOutcome[];
+}) {
+  const t = TONE[tone];
+  return (
+    <div
+      className="mb-2 overflow-hidden rounded-[10px]"
+      style={{
+        background: t.bg,
+        border: `${tone === "amber" ? 2 : 1}px solid ${t.border}`,
+      }}
+    >
+      <div
+        className="flex items-baseline gap-2.5 px-4 py-2"
+        style={{ borderBottom: `1px solid ${t.border}` }}
+      >
+        <span
+          className="font-mono text-[10px] font-semibold tracking-[0.1em]"
+          style={{ color: t.text }}
+        >
+          {heading}
+        </span>
+        <span className="text-[11px] text-reco-t4">{note}</span>
+      </div>
+      <div className="px-4 py-1.5">
+        {outcomes.map((o) => (
+          <RuleLine key={o.label} outcome={o} colour={t.text} />
         ))}
       </div>
     </div>
   );
 }
 
-const RULE_STATE = {
-  flagged: { mark: "✕", colour: "#a13f28", label: "FAILED" },
-  passed: { mark: "✓", colour: "#2f6b4d", label: "PASSED" },
-  notEvaluated: { mark: "⚠", colour: "#a86a2c", label: "NOT EVALUATED" },
-} as const;
-
-function RuleLine({ outcome }: { readonly outcome: RuleOutcome }) {
-  const state = RULE_STATE[outcome.status];
+function RuleLine({
+  outcome,
+  colour,
+}: {
+  readonly outcome: RuleOutcome;
+  readonly colour: string;
+}) {
   const missing = outcome.unmet.map((u) => u.split("#").pop()).join(", ");
-
   return (
-    <div className="grid grid-cols-[16px_1.4fr_1.1fr_1fr] items-baseline gap-2 py-[3px]">
-      <span className="text-[12px]" style={{ color: state.colour }}>
-        {state.mark}
-      </span>
+    <div className="grid grid-cols-[1.3fr_0.9fr_1fr] items-baseline gap-3 py-[3px]">
       <span className="font-mono text-[11.5px] text-reco-t1">{outcome.label}</span>
       <span className="font-mono text-[10.5px] text-reco-t5">{outcome.governed_by ?? ""}</span>
-      <span className="text-[11px]" style={{ color: state.colour }}>
+      <span className="text-[11px]" style={{ color: colour }}>
         {outcome.status === "flagged"
           ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
           : outcome.status === "passed"
             ? "checked, clean"
             : missing
-              ? `needs ${missing}`
+              ? `no ${missing} in this period`
               : "could not run"}
       </span>
     </div>
