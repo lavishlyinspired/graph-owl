@@ -4,6 +4,7 @@ import type {
   ScreenConfig,
   VizData,
   KpiItem,
+  CopilotData,
   BarItem,
   SeriesItem,
   FlowChain,
@@ -15,12 +16,33 @@ interface GenericScreenProps {
   readonly config: ScreenConfig;
   readonly liveRows?: readonly RowData[];
   readonly liveKpis?: readonly KpiItem[];
+  readonly liveViz?: VizData;
+  readonly liveCopilot?: CopilotData;
   readonly loading?: boolean;
+  readonly error?: string | null;
 }
 
-export default function GenericScreen({ config, liveRows, liveKpis, loading }: GenericScreenProps) {
-  const effectiveRows = liveRows ?? config.rows;
-  const effectiveKpis = liveKpis ?? config.kpis;
+/** The screen config supplies *layout* — titles, column headings, grid widths,
+ *  the shape of the chart. It also carries the delivered mockup's illustrative
+ *  figures, and those are never rendered.
+ *
+ *  This used to be `liveRows ?? config.rows`, so any screen whose fetch failed,
+ *  or that passed no rows at all, quietly rendered the mockup's invented
+ *  suppliers and rupee amounts. For a product that reports a client's tax
+ *  position that is not a degraded state, it is a fabricated one — and it is
+ *  indistinguishable from a working screen, which is what made it dangerous.
+ *  Quantities now come from the caller or they do not appear. */
+export default function GenericScreen({
+  config,
+  liveRows,
+  liveKpis,
+  liveViz,
+  liveCopilot,
+  loading,
+  error,
+}: GenericScreenProps) {
+  const effectiveRows = liveRows ?? [];
+  const effectiveKpis = liveKpis ?? [];
   const [drawerRow, setDrawerRow] = useState<number | null>(null);
   const navigate = useNavigate();
 
@@ -55,11 +77,18 @@ export default function GenericScreen({ config, liveRows, liveKpis, loading }: G
 
       {loading ? (
         <div className="mb-4 flex h-[120px] items-center justify-center text-[13px] text-reco-t4">Loading…</div>
+      ) : error ? (
+        <div
+          data-testid="generic-error"
+          className="mb-4 rounded-[10px] border border-reco-bad-border bg-reco-bad-bg px-4 py-3.5 text-[12.5px] text-reco-bad"
+        >
+          {error}
+        </div>
       ) : (
         <>
-          <KpiGrid kpis={effectiveKpis} />
+          {effectiveKpis.length > 0 && <KpiGrid kpis={effectiveKpis} />}
 
-          <VizSection viz={config.viz} />
+          {liveViz && <VizSection viz={liveViz} />}
 
           <div className="grid grid-cols-[1fr_300px] items-start gap-3.5">
             <div className="overflow-hidden rounded-[10px] border border-reco-line bg-white">
@@ -73,6 +102,17 @@ export default function GenericScreen({ config, liveRows, liveKpis, loading }: G
                 ))}
                 <span />
               </div>
+              {effectiveRows.length === 0 && (
+                <div
+                  data-testid="generic-empty"
+                  className="px-[18px] py-9 text-center text-[12.5px] text-reco-t4"
+                >
+                  Nothing to show for this client and period yet.
+                  <div className="mt-1 text-[11.5px] text-reco-t5">
+                    Upload and reconcile a period, and this fills from the reconciled data.
+                  </div>
+                </div>
+              )}
               {effectiveRows.map((row, i) => (
             <div
               key={i}
@@ -118,33 +158,43 @@ export default function GenericScreen({ config, liveRows, liveKpis, loading }: G
                 className="flex w-full items-center justify-between border-b border-reco-row py-[7px] text-left last:border-b-0"
                 onClick={() => handleRelated(rel.route)}
               >
+                {/* `rel.meta` is deliberately not rendered: in the mockup it
+                    carries counts ("24 pending", "₹3.42 Cr") that no query
+                    produces. The destination is real navigation and stays. */}
                 <span className="text-[12px] text-reco-accent">{rel.name}</span>
-                <span className="text-[11px] text-reco-t5">{rel.meta}</span>
+                <span className="text-[11px] text-reco-t5">→</span>
               </button>
             ))}
           </div>
 
-          <div className="rounded-[10px] border border-reco-line bg-[#fbfaf8] p-4">
-            <div className="mb-2.5 flex items-center gap-2">
-              <span className="h-[7px] w-[7px] rounded-full bg-reco-purple" />
-              <span className="font-mono text-[9.5px] tracking-[0.12em] text-reco-purple">
-                ASSISTANT · READ THIS SCREEN
-              </span>
+          {/* The mockup's copilot copy quotes specific figures — "₹8.2 L sits
+              inside the s.16(4) window", "24 IMS records with no action". No
+              query produces them. A panel that says "built from graph facts"
+              is the last place to show a number that came from a design file,
+              so it renders only when a caller supplies a real one. */}
+          {liveCopilot && (
+            <div className="rounded-[10px] border border-reco-line bg-[#fbfaf8] p-4">
+              <div className="mb-2.5 flex items-center gap-2">
+                <span className="h-[7px] w-[7px] rounded-full bg-reco-purple" />
+                <span className="font-mono text-[9.5px] tracking-[0.12em] text-reco-purple">
+                  ASSISTANT · READ THIS SCREEN
+                </span>
+              </div>
+              <div className="mb-3 text-[12.5px] leading-relaxed text-reco-t2">
+                {liveCopilot.text}
+              </div>
+              <button
+                type="button"
+                className="w-full rounded-[7px] bg-reco-t0 py-2 text-[12px] text-center text-white"
+              >
+                {liveCopilot.action}
+              </button>
+              <div className="mt-2.5 text-[10.5px] leading-snug text-reco-t5">
+                Suggestion only, built from graph facts. Nothing runs until you
+                press it.
+              </div>
             </div>
-            <div className="mb-3 text-[12.5px] leading-relaxed text-reco-t2">
-              {config.copilot.text}
-            </div>
-            <button
-              type="button"
-              className="w-full rounded-[7px] bg-reco-t0 py-2 text-[12px] text-center text-white"
-            >
-              {config.copilot.action}
-            </button>
-            <div className="mt-2.5 text-[10.5px] leading-snug text-reco-t5">
-              Suggestion only, built from graph facts. Nothing runs until you
-              press it.
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
