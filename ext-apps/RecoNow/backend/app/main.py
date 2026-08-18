@@ -1625,3 +1625,89 @@ async def list_imports(client_id: str, period_id: str):
         }
         for r in rows
     ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/crossperiod")
+async def cross_period(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        periods = await conn.fetch(
+            "SELECT id, month, year FROM period WHERE client_id = $1 ORDER BY year, month",
+            client_id,
+        )
+        if len(periods) < 2:
+            return []
+        results = []
+        for p in periods:
+            rows = await conn.fetch(
+                """
+                SELECT supplier_gstin, supplier_name,
+                       COUNT(*) as case_count,
+                       COALESCE(SUM(
+                           ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                       ), 0) as exposure
+                FROM case_record
+                WHERE client_id = $1 AND period_id = $2
+                  AND supplier_gstin IS NOT NULL
+                GROUP BY supplier_gstin, supplier_name
+                """,
+                client_id,
+                str(p["id"]),
+            )
+            for r in rows:
+                results.append({
+                    "period": f"{p['month']} {p['year']}",
+                    "period_id": str(p["id"]),
+                    "gstin": r["supplier_gstin"],
+                    "name": r["supplier_name"],
+                    "case_count": r["case_count"],
+                    "exposure": float(r["exposure"]),
+                })
+        return results
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/eligibility")
+async def eligibility(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                supplier_gstin,
+                supplier_name,
+                invoice_no,
+                books_amount,
+                portal_amount,
+                CASE 
+                    WHEN portal_amount IS NULL THEN 'missing_portal'
+                    WHEN books_amount IS NULL THEN 'missing_books'
+                    WHEN ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, 0)) > 1 THEN 'amount_mismatch'
+                    ELSE 'eligible'
+                END as eligibility,
+                COALESCE(books_amount, 0) as books,
+                COALESCE(portal_amount, 0) as portal
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+            ORDER BY 
+                CASE 
+                    WHEN portal_amount IS NULL THEN 0
+                    WHEN books_amount IS NULL THEN 1
+                    WHEN ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, 0)) > 1 THEN 2
+                    ELSE 3
+                END,
+                supplier_gstin
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "gstin": r["supplier_gstin"],
+            "name": r["supplier_name"],
+            "invoice_no": r["invoice_no"],
+            "books_amount": float(r["books"]),
+            "portal_amount": float(r["portal"]),
+            "eligibility": r["eligibility"],
+        }
+        for r in rows
+    ]

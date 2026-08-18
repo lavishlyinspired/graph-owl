@@ -408,3 +408,33 @@ export interface User {
 export function fetchUsers(): Promise<readonly User[]> {
   return apiFetch<User[]>("/api/users");
 }
+
+export interface CrossPeriodRow {
+  readonly period: string;
+  readonly period_id: string;
+  readonly gstin: string;
+  readonly name: string | null;
+  readonly case_count: number;
+  readonly exposure: number;
+}
+
+export function fetchCrossPeriod(clientId: string, periodId: string): Promise<readonly CrossPeriodRow[]> {
+  return apiFetch<CrossPeriodRow[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/crossperiod`,
+  );
+}
+
+export interface EligibilityRow {
+  readonly gstin: string;
+  readonly name: string | null;
+  readonly invoice_no: string;
+  readonly books_amount: number;
+  readonly portal_amount: number;
+  readonly eligibility: string;
+}
+
+export function fetchEligibility(clientId: string, periodId: string): Promise<readonly EligibilityRow[]> {
+  return apiFetch<EligibilityRow[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/eligibility`,
+  );
+}
