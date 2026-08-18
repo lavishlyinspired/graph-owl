@@ -1,0 +1,242 @@
+[
+    {
+        "id": "2ee3582d-6c88-481a-a4bd-aad5fb35657c",
+        "pack": "gst",
+        "label": "gst:TaxHeadMismatch",
+        "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+        "summary": "The invoice matches on every total, and the tax is split across different heads than the supplier filed",
+        "governedBy": "gst:Section16-2-aa",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:supplierGstin",
+                "value": "27AABCS1429B1Z8",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-011",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:igst",
+                "value": "32400",
+                "var": "bookedIgst"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:igst",
+                "value": "32490",
+                "var": "filedIgst"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.761342Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 1,
+        "subjectLabel": null
+    },
+    {
+        "id": "595216b0-960e-4bfb-adbc-47c3121816c1",
+        "pack": "gst",
+        "label": "gst:SupplierNotFiled",
+        "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+        "summary": "An invoice claimed in the purchase register that the supplier has not reported in any GSTR-1/IFF filing",
+        "governedBy": "gst:Section16-2-aa",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:supplierGstin",
+                "value": "22AABCX8888B1ZQ",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-014",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:taxAmount",
+                "value": "8640.0",
+                "var": "taxAmount"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:invoiceDate",
+                "value": "2026-03-29",
+                "var": "invoiceDate"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.760816Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 2,
+        "subjectLabel": null
+    },
+    {
+        "id": "9329e9b3-d144-437e-bfdd-b6c1525917fd",
+        "pack": "gst",
+        "label": "gst:SupplierNotFiled",
+        "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+        "summary": "An invoice claimed in the purchase register that the supplier has not reported in any GSTR-1/IFF filing",
+        "governedBy": "gst:Section16-2-aa",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:supplierGstin",
+                "value": "11AABCZ9999A1Z1",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-013",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:taxAmount",
+                "value": "17100.0",
+                "var": "taxAmount"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:invoiceDate",
+                "value": "2026-03-27",
+                "var": "invoiceDate"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.760312Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 2,
+        "subjectLabel": null
+    },
+    {
+        "id": "0a0f2fbb-68c0-4f0b-9bfe-f4102d91e2aa",
+        "pack": "gst",
+        "label": "gst:PotentialMismatch",
+        "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+        "summary": "An invoice claimed in the purchase register that has not reached GSTR-2B (no GSTR-1 data loaded to say why)",
+        "governedBy": "gst:Section16-2-aa",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:supplierGstin",
+                "value": "22AABCX8888B1ZQ",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-014",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-22AABCX8888B1ZQ-INV-MAR-014",
+                "predicate": "gst:taxAmount",
+                "value": "8640.0",
+                "var": "taxAmount"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.759707Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 2,
+        "subjectLabel": null
+    },
+    {
+        "id": "04015473-1740-4670-a9a7-31319c355d02",
+        "pack": "gst",
+        "label": "gst:PotentialMismatch",
+        "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+        "summary": "An invoice claimed in the purchase register that has not reached GSTR-2B (no GSTR-1 data loaded to say why)",
+        "governedBy": "gst:Section16-2-aa",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:supplierGstin",
+                "value": "11AABCZ9999A1Z1",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-013",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-11AABCZ9999A1Z1-INV-MAR-013",
+                "predicate": "gst:taxAmount",
+                "value": "17100.0",
+                "var": "taxAmount"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.758790Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 2,
+        "subjectLabel": null
+    },
+    {
+        "id": "044832f7-6077-4217-ad87-f055eb7b5896",
+        "pack": "gst",
+        "label": "gst:AmountMismatch",
+        "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+        "summary": "Both sides report the invoice, and the values differ by more than the cap then in force allowed",
+        "governedBy": "gst:Rule36-4",
+        "evidence": [
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:supplierGstin",
+                "value": "27AABCS1429B1Z8",
+                "var": "gstin"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:invoiceNumber",
+                "value": "INV-MAR-011",
+                "var": "number"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:taxableValue",
+                "value": "180000.0",
+                "var": "claimed"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:taxableValue",
+                "value": "180500",
+                "var": "filed"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:capPercent",
+                "value": "0",
+                "var": "capPercent"
+            },
+            {
+                "subject": "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011",
+                "predicate": "gst:citation",
+                "value": "Notification 40/2021-CT",
+                "var": "citation"
+            }
+        ],
+        "status": "pending",
+        "detectedAt": "2026-08-18T12:15:42.737876Z",
+        "decidedBy": null,
+        "reason": null,
+        "priority": 1,
+        "subjectLabel": null
+    }
+]

@@ -1,0 +1,15 @@
+-- A mapping template is a memory of "for this client's books export, column 3
+-- is the invoice number". It was being applied to any later file for the same
+-- client and kind without checking that the later file's columns still look
+-- like the file the template was learned from.
+--
+-- Uploading a file whose columns sit in a different order therefore silently
+-- mapped invoice_no onto the GSTIN column, and reconciliation compared GSTINs
+-- as invoice numbers — wrong tax figures, reported confidently, with the
+-- mapping screen showing the wrong pairing as if it were a considered default.
+--
+-- Recording the headers the template was learned from lets the template be
+-- applied only when it still fits. Nullable because rows written before this
+-- migration have no recorded headers; those are treated as not fitting, which
+-- fails safe to the auto-mapper.
+ALTER TABLE mapping_template ADD COLUMN source_headers JSONB;

@@ -73,11 +73,17 @@ export function fetchApprovals(clientId: string, periodId: string, status = "pen
 
 export interface DatasetUploadResult {
   readonly kind: string;
+  readonly name?: string;
   readonly headers: readonly string[];
   readonly preview: readonly Record<string, unknown>[];
+  /** The file's own rows, capped by `row_limit`. Present when a stored
+   *  dataset is reopened; the upload response carries `preview` only. */
+  readonly rows?: readonly Record<string, unknown>[];
+  readonly row_limit?: number;
   readonly total_rows: number;
   readonly mapping: Record<string, number | null>;
   readonly from_template: boolean;
+  readonly confirmed?: boolean;
 }
 
 export function uploadDataset(
@@ -107,6 +113,19 @@ export function confirmDatasetMapping(
   return apiPost(
     `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/datasets/${kind}/mapping`,
     { mapping, tolerance },
+  );
+}
+
+/** Reopen a file uploaded earlier in this period, with its mapping as it
+ *  now stands. Without this, navigating away from Upload & map and back
+ *  showed an empty prompt even though the file was still there. */
+export function fetchDataset(
+  clientId: string,
+  periodId: string,
+  kind: string,
+): Promise<DatasetUploadResult> {
+  return apiFetch<DatasetUploadResult>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/datasets/${kind}`,
   );
 }
 

@@ -226,25 +226,62 @@ async def list_deliverables(conn: asyncpg.Connection, *, client_id: str, period_
 
 
 async def upsert_mapping_template(
-    conn: asyncpg.Connection, *, client_id: str, dataset_kind: str, mapping: dict[str, Any], tolerance: float
+    conn: asyncpg.Connection,
+    *,
+    client_id: str,
+    dataset_kind: str,
+    mapping: dict[str, Any],
+    tolerance: float,
+    source_headers: list[str] | None = None,
 ) -> None:
+    """`source_headers` records the column layout this mapping was learned
+    from, so a later upload can check the template still fits before reusing
+    it — see `template_fits` and migration 0004."""
     await conn.execute(
-        "INSERT INTO mapping_template (client_id, dataset_kind, mapping, tolerance, updated_at) "
-        "VALUES ($1, $2, $3::jsonb, $4, now()) "
+        "INSERT INTO mapping_template (client_id, dataset_kind, mapping, tolerance, source_headers, updated_at) "
+        "VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, now()) "
         "ON CONFLICT (client_id, dataset_kind) DO UPDATE "
-        "SET mapping = EXCLUDED.mapping, tolerance = EXCLUDED.tolerance, updated_at = now()",
+        "SET mapping = EXCLUDED.mapping, tolerance = EXCLUDED.tolerance, "
+        "    source_headers = EXCLUDED.source_headers, updated_at = now()",
         client_id, dataset_kind, json.dumps(mapping), tolerance,
+        None if source_headers is None else json.dumps(source_headers),
     )
 
 
 async def get_mapping_template(conn: asyncpg.Connection, *, client_id: str, dataset_kind: str) -> dict[str, Any] | None:
     row = await conn.fetchrow(
-        "SELECT mapping, tolerance FROM mapping_template WHERE client_id = $1 AND dataset_kind = $2",
+        "SELECT mapping, tolerance, source_headers FROM mapping_template "
+        "WHERE client_id = $1 AND dataset_kind = $2",
         client_id, dataset_kind,
     )
     if row is None:
         return None
-    return {"mapping": json.loads(row["mapping"]), "tolerance": row["tolerance"]}
+    raw_headers = row["source_headers"]
+    return {
+        "mapping": json.loads(row["mapping"]),
+        "tolerance": row["tolerance"],
+        "source_headers": None if raw_headers is None else json.loads(raw_headers),
+    }
+
+
+def template_fits(template: dict[str, Any], headers: list[str]) -> bool:
+    """Whether a stored template describes the file being uploaded.
+
+    A template says "column 3 is the invoice number". That is only true of the
+    layout it was learned from. Applied to a file whose columns sit in a
+    different order it silently maps `invoice_no` onto whatever now occupies
+    that position — observed live, mapping invoice numbers onto GSTINs, which
+    would have made reconciliation compare the wrong fields and report wrong
+    tax figures with no visible sign of trouble.
+
+    A template with no recorded headers predates this check. There is no way to
+    tell whether it fits, so it does not: failing safe costs one re-mapping,
+    trusting it wrongly costs a wrong return.
+    """
+    recorded = template.get("source_headers")
+    if not recorded:
+        return False
+    return list(recorded) == list(headers)
 
 
 async def create_user(conn: asyncpg.Connection, *, name: str, email: str, role: str) -> str:
@@ -258,3 +295,83 @@ async def create_user(conn: asyncpg.Connection, *, name: str, email: str, role: 
 async def list_users(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     rows = await conn.fetch("SELECT id, name, email, role, created_at FROM app_user ORDER BY created_at")
     return [dict(row) for row in rows]
+
+
+async def upsert_dataset_upload(
+    conn: asyncpg.Connection,
+    *,
+    client_id: str,
+    period_id: str,
+    kind: str,
+    name: str,
+    headers: list[str],
+    rows: list[dict[str, Any]],
+    total_rows: int,
+    mapping: dict[str, Any],
+    confirmed: bool = False,
+) -> None:
+    """Store an uploaded file so it survives a restart and can be reopened.
+
+    Re-uploading the same kind for the same period replaces it — one current
+    file per kind is what the Upload & map screen shows, and keeping older
+    ones would make "which file did this reconciliation use" ambiguous.
+    """
+    await conn.execute(
+        "INSERT INTO dataset_upload "
+        "  (client_id, period_id, kind, name, headers, rows, total_rows, mapping, confirmed) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9) "
+        "ON CONFLICT (client_id, period_id, kind) DO UPDATE SET "
+        "  name = EXCLUDED.name, headers = EXCLUDED.headers, rows = EXCLUDED.rows, "
+        "  total_rows = EXCLUDED.total_rows, mapping = EXCLUDED.mapping, "
+        "  confirmed = EXCLUDED.confirmed, uploaded_at = now()",
+        client_id, period_id, kind, name,
+        json.dumps(headers), json.dumps(rows), total_rows, json.dumps(mapping), confirmed,
+    )
+
+
+async def set_dataset_mapping(
+    conn: asyncpg.Connection, *, client_id: str, period_id: str, kind: str,
+    mapping: dict[str, Any], confirmed: bool,
+) -> bool:
+    """Returns False when there is no such upload, so the caller can 404
+    rather than silently confirming a mapping for a file that is not there."""
+    result = await conn.execute(
+        "UPDATE dataset_upload SET mapping = $4::jsonb, confirmed = $5 "
+        "WHERE client_id = $1 AND period_id = $2 AND kind = $3",
+        client_id, period_id, kind, json.dumps(mapping), confirmed,
+    )
+    return result.rsplit(" ", 1)[-1] != "0"
+
+
+def _dataset_row(row: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "kind": row["kind"],
+        "name": row["name"],
+        "headers": json.loads(row["headers"]),
+        "rows": json.loads(row["rows"]),
+        "total_rows": row["total_rows"],
+        "mapping": json.loads(row["mapping"]),
+        "confirmed": row["confirmed"],
+    }
+
+
+async def list_dataset_uploads(
+    conn: asyncpg.Connection, *, client_id: str, period_id: str
+) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        "SELECT kind, name, headers, rows, total_rows, mapping, confirmed FROM dataset_upload "
+        "WHERE client_id = $1 AND period_id = $2 ORDER BY uploaded_at",
+        client_id, period_id,
+    )
+    return [_dataset_row(r) for r in rows]
+
+
+async def get_dataset_upload(
+    conn: asyncpg.Connection, *, client_id: str, period_id: str, kind: str
+) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "SELECT kind, name, headers, rows, total_rows, mapping, confirmed FROM dataset_upload "
+        "WHERE client_id = $1 AND period_id = $2 AND kind = $3",
+        client_id, period_id, kind,
+    )
+    return None if row is None else _dataset_row(row)

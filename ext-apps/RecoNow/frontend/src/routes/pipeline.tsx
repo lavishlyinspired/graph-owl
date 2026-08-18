@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import {
   confirmDatasetMapping,
+  fetchDataset,
   fetchDatasets,
   runReconcile,
   uploadDataset,
@@ -23,6 +24,7 @@ export default function PipelineRoute() {
   const [upload, setUpload] = useState<DatasetUploadResult | null>(null);
   const [reconcileMessage, setReconcileMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<"mapping" | "data">("mapping");
 
   const refreshDatasets = () => {
     if (!clientId || !periodId) return;
@@ -32,6 +34,26 @@ export default function PipelineRoute() {
   };
 
   useEffect(refreshDatasets, [clientId, periodId]);
+
+  // Uploads are persisted, so the file the user is looking at is whatever
+  // `activeKind` names — not merely the one uploaded in this page visit.
+  // Reloading it on every switch is what makes a file reviewable again after
+  // navigating away and coming back.
+  useEffect(() => {
+    if (!clientId || !periodId || !activeKind) return;
+    let cancelled = false;
+    fetchDataset(clientId, periodId, activeKind)
+      .then((d) => {
+        if (!cancelled) setUpload(d);
+      })
+      .catch(() => {
+        // 404 simply means this kind has not been uploaded for this period.
+        if (!cancelled) setUpload(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId, periodId, activeKind]);
 
   if (!clientId || !periodId) {
     return <div className="p-8 text-[13px] text-reco-t4">Select a client and a period first.</div>;
@@ -140,7 +162,39 @@ export default function PipelineRoute() {
         </div>
 
         <div>
-          {upload && activeKind && upload.kind === activeKind ? (
+          {upload && activeKind && upload.kind === activeKind && (
+            <div className="mb-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setView("mapping")}
+                className={`rounded-md border px-2.5 py-1 text-[11.5px] ${
+                  view === "mapping"
+                    ? "border-reco-accent-border bg-reco-accent-bg text-reco-accent-hi"
+                    : "border-reco-line bg-white text-reco-t2"
+                }`}
+              >
+                Mapping
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("data")}
+                className={`rounded-md border px-2.5 py-1 text-[11.5px] ${
+                  view === "data"
+                    ? "border-reco-accent-border bg-reco-accent-bg text-reco-accent-hi"
+                    : "border-reco-line bg-white text-reco-t2"
+                }`}
+              >
+                Data
+              </button>
+              <span className="ml-1 font-mono text-[10.5px] text-reco-t5">
+                {upload.name ?? activeKind} · {upload.total_rows} rows
+              </span>
+            </div>
+          )}
+
+          {upload && activeKind && upload.kind === activeKind && view === "data" ? (
+            <DataTable upload={upload} />
+          ) : upload && activeKind && upload.kind === activeKind ? (
             <div className="rounded-lg border border-reco-line bg-reco-panel">
               <div className="grid grid-cols-[1.2fr_1.2fr_96px] gap-3 border-b border-reco-line bg-reco-panel-2 px-4.5 py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t5">
                 <span>FIELD</span>
@@ -188,6 +242,79 @@ export default function PipelineRoute() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The uploaded file as it actually is — one column per header, one row per
+ *  record. The mapping view answers "what does this column mean"; this
+ *  answers "what is in the file", which is the question you have when a
+ *  reconciliation result looks wrong.
+ *
+ *  Horizontally scrollable in its own container: a GST purchase register has
+ *  17 columns and the page itself must never scroll sideways. */
+function DataTable({ upload }: { readonly upload: DatasetUploadResult }) {
+  const rows = upload.rows ?? upload.preview;
+  const limit = upload.row_limit ?? rows.length;
+  const truncated = upload.total_rows > rows.length;
+
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-lg border border-reco-line bg-reco-panel px-4.5 py-9 text-center text-[12.5px] text-reco-t4">
+        This file has no rows.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-reco-line bg-reco-panel">
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-left">
+          <thead>
+            <tr className="border-b border-reco-line bg-reco-panel-2">
+              <th className="px-3 py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t5">#</th>
+              {upload.headers.map((h) => (
+                <th
+                  key={h}
+                  className="whitespace-nowrap px-3 py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t5"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} className="border-b border-reco-line-2 last:border-b-0 hover:bg-reco-panel-2">
+                <td className="px-3 py-2 font-mono text-[10.5px] text-reco-t5">{i + 1}</td>
+                {upload.headers.map((h) => {
+                  const value = row[h];
+                  // An empty cell is genuinely empty in the source file, and
+                  // showing "—" says so rather than leaving a blank a reader
+                  // could mistake for a rendering fault.
+                  const text =
+                    value === null || value === undefined || value === "" ? "—" : String(value);
+                  return (
+                    <td
+                      key={h}
+                      className={`whitespace-nowrap px-3 py-2 text-[11.5px] ${
+                        text === "—" ? "text-reco-t5" : "text-reco-t1"
+                      }`}
+                    >
+                      {text}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {truncated && (
+        <div className="border-t border-reco-line px-4.5 py-2.5 font-mono text-[10.5px] text-reco-t5">
+          Showing the first {limit} of {upload.total_rows} rows. Reconciliation reads every row.
+        </div>
+      )}
     </div>
   );
 }

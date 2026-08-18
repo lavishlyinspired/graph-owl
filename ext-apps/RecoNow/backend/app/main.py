@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import threading
 import hashlib
@@ -192,9 +193,33 @@ def _parse_upload(raw: bytes, filename: str) -> list[dict]:
     raise ValueError(f"Unsupported file type: {filename}")
 
 
+# How many rows the Upload & map screen will render at once. A GST period's
+# purchase register is routinely thousands of rows; the browser does not need
+# them all to let someone check that a file landed and its columns read
+# correctly, and `total_rows` still reports the real count beside the table.
+_MAX_TABLE_ROWS = 500
+
+
+def _blank_to_none(value: object) -> object:
+    """pandas represents an empty cell as float NaN.
+
+    That is not JSON: `json.dumps` writes a bare `NaN` token, which Postgres
+    rejects outright ("invalid input syntax for type json") and strict parsers
+    elsewhere reject too. It surfaced the moment uploads began being stored
+    rather than held in memory, on the government purchase register's own
+    empty `Note Type` and `Original Invoice No` columns.
+
+    An empty cell means "this file says nothing here", which is None — not a
+    number that happens to be un-representable.
+    """
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    return value
+
+
 def _build_dataset(payload: list[dict], name: str, kind: str) -> dict:
     headers = list(payload[0].keys()) if payload else []
-    rows = payload
+    rows = [{k: _blank_to_none(v) for k, v in row.items()} for row in payload]
     return {
         "id": kind,
         "name": name,
@@ -504,23 +529,66 @@ async def upload_dataset_route(client_id: str, period_id: str, kind: str, file: 
 
     async with pool.acquire() as conn:
         template = await repo.get_mapping_template(conn, client_id=client_id, dataset_kind=kind)
-    if template is not None:
+    # A template is only reused when it still describes this file's columns.
+    # Reusing one across a different layout mapped invoice numbers onto GSTINs
+    # — see repo.template_fits.
+    if template is not None and repo.template_fits(template, dataset["headers"]):
         mapping = template["mapping"]
         from_template = True
     else:
         mapping = _auto_map(dataset["headers"])
         from_template = False
 
-    workspace = _workspace(client_id, period_id)
-    workspace["datasets"][kind] = {"dataset": dataset, "mapping": mapping, "confirmed": False}
+    async with pool.acquire() as conn:
+        await repo.upsert_dataset_upload(
+            conn, client_id=client_id, period_id=period_id, kind=kind,
+            name=dataset["name"], headers=dataset["headers"], rows=dataset["rows"],
+            total_rows=dataset["total_rows"], mapping=mapping, confirmed=False,
+        )
 
     return {
         "kind": kind,
+        "name": dataset["name"],
         "headers": dataset["headers"],
         "preview": dataset["rows"][:5],
         "total_rows": dataset["total_rows"],
         "mapping": mapping,
         "from_template": from_template,
+        "confirmed": False,
+    }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/datasets/{kind}")
+async def get_dataset_route(client_id: str, period_id: str, kind: str) -> dict:
+    """Reopen a file uploaded earlier, with the mapping as it now stands.
+
+    Without this the mapping table could only ever show the file just picked,
+    so switching screens and coming back looked like nothing had been
+    uploaded.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        entry = await repo.get_dataset_upload(
+            conn, client_id=client_id, period_id=period_id, kind=kind
+        )
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"no {kind} dataset uploaded for this period yet")
+    return {
+        "kind": entry["kind"],
+        "name": entry["name"],
+        "headers": entry["headers"],
+        "preview": entry["rows"][:5],
+        # The file's own rows, so the console can show what was actually
+        # uploaded rather than only how its columns were mapped. Capped
+        # because this is a screen, not an export — `total_rows` still
+        # reports the true count, so a truncated view is visible as one
+        # rather than looking like a short file.
+        "rows": entry["rows"][:_MAX_TABLE_ROWS],
+        "row_limit": _MAX_TABLE_ROWS,
+        "total_rows": entry["total_rows"],
+        "mapping": entry["mapping"],
+        "from_template": False,
+        "confirmed": entry["confirmed"],
     }
 
 
@@ -532,30 +600,43 @@ async def confirm_dataset_mapping_route(client_id: str, period_id: str, kind: st
     if not mapping:
         raise HTTPException(status_code=400, detail="mapping is required")
 
-    workspace = _workspace(client_id, period_id)
-    entry = workspace["datasets"].get(kind)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"no {kind} dataset uploaded for this period yet")
-    entry["mapping"] = mapping
-    entry["confirmed"] = True
-
     async with pool.acquire() as conn:
-        await repo.upsert_mapping_template(conn, client_id=client_id, dataset_kind=kind, mapping=mapping, tolerance=tolerance)
+        entry = await repo.get_dataset_upload(
+            conn, client_id=client_id, period_id=period_id, kind=kind
+        )
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"no {kind} dataset uploaded for this period yet")
+        await repo.set_dataset_mapping(
+            conn, client_id=client_id, period_id=period_id, kind=kind,
+            mapping=mapping, confirmed=True,
+        )
+        await repo.upsert_mapping_template(
+            conn,
+            client_id=client_id,
+            dataset_kind=kind,
+            mapping=mapping,
+            tolerance=tolerance,
+            # Record the layout this mapping describes, so a later upload can
+            # tell whether the template still applies to it.
+            source_headers=entry["headers"],
+        )
 
     return {"kind": kind, "confirmed": True}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/datasets")
 async def list_datasets_route(client_id: str, period_id: str) -> list[dict]:
-    workspace = _workspace(client_id, period_id)
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        entries = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
     return [
         {
-            "kind": kind,
-            "name": entry["dataset"]["name"],
-            "total_rows": entry["dataset"]["total_rows"],
-            "confirmed": entry["confirmed"],
+            "kind": e["kind"],
+            "name": e["name"],
+            "total_rows": e["total_rows"],
+            "confirmed": e["confirmed"],
         }
-        for kind, entry in workspace["datasets"].items()
+        for e in entries
     ]
 
 
@@ -597,8 +678,21 @@ def _ingest_scoped_to_graphowl(client_id: str, period_id: str, kind: str, datase
 @app.post("/api/clients/{client_id}/periods/{period_id}/reconcile")
 async def reconcile_route(client_id: str, period_id: str) -> dict:
     pool = _require_db_pool()
-    workspace = _workspace(client_id, period_id)
-    datasets = workspace["datasets"]
+    async with pool.acquire() as conn:
+        stored = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
+    # Shape kept as {kind: {"dataset": ..., "mapping": ...}} so `_supplier_names`
+    # and `_ingest_scoped_to_graphowl` read the same structure they always did.
+    datasets = {
+        e["kind"]: {
+            "dataset": {
+                "name": e["name"], "headers": e["headers"],
+                "rows": e["rows"], "total_rows": e["total_rows"],
+            },
+            "mapping": e["mapping"],
+            "confirmed": e["confirmed"],
+        }
+        for e in stored
+    }
     if not datasets:
         raise HTTPException(status_code=409, detail="upload at least one dataset first")
     unconfirmed = [kind for kind, entry in datasets.items() if not entry["confirmed"]]
@@ -625,38 +719,32 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
         # A re-run must not duplicate cases for the same invoice — the
         # register (B4) reads case_record directly, and reconcile is meant
         # to be safely re-runnable (a re-upload, a corrected mapping).
-        existing = {c["invoice_no"] for c in await repo.list_cases(conn, client_id=client_id, period_id=period_id)}
+        existing = {
+            (c["invoice_no"], c["reason_code"])
+            for c in await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+        }
+        # The rules bind a supplier GSTIN but not a trading name — the name
+        # lives in the uploaded file, so resolve it from there rather than
+        # leaving every case showing a bare GSTIN.
+        names_by_gstin = _supplier_names(datasets)
         for finding in findings:
-            # Field names match graph-owl-core's real `Finding` struct
-            # (crates/graph-owl-core/src/finding.rs) — an earlier version
-            # of this bridge read `finding["rule"]`, which is not a field
-            # that struct has, and would have silently landed every real
-            # case with reason_code=None. `label` is the rule kind;
-            # `governed_by` and `evidence` are "never absent"/"never
-            # empty" per that struct's own doc comments, so both are safe
-            # to read without a default meaning something real is missing.
-            subject_uri = str(finding.get("subject") or finding.get("id") or "unknown")
-            # Evidence carries the real invoice_number and supplier_gstin as
-            # named bindings — extract them so the case is human-readable
-            # instead of showing a raw URI.
-            evidence = finding.get("evidence") or []
-            ev = {e["var"]: e["value"] for e in evidence if "var" in e and "value" in e}
-            invoice_no = ev.get("number") or subject_uri
-            supplier_gstin = ev.get("gstin")
-            supplier_name = None
-            if invoice_no in existing:
+            case = case_from_finding(finding)
+            if case["dedup_key"] in existing:
                 continue
             await repo.create_case(
-                conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
-                reason_code=finding.get("label"),
-                subject=subject_uri,
-                summary=finding.get("summary"),
-                governed_by=finding.get("governed_by"),
-                evidence_count=len(evidence),
-                supplier_gstin=supplier_gstin,
-                supplier_name=supplier_name,
+                conn, client_id=client_id, period_id=period_id,
+                invoice_no=case["invoice_no"],
+                reason_code=case["reason_code"],
+                subject=case["subject"],
+                summary=case["summary"],
+                governed_by=case["governed_by"],
+                evidence_count=case["evidence_count"],
+                supplier_gstin=case["supplier_gstin"],
+                supplier_name=names_by_gstin.get(case["supplier_gstin"] or ""),
+                books_amount=case["books_amount"],
+                portal_amount=case["portal_amount"],
             )
-            existing.add(invoice_no)
+            existing.add(case["dedup_key"])
             created += 1
 
     return {
@@ -668,11 +756,141 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
     }
 
 
+# How a rule's own evidence bindings name the two sides of a comparison.
+#
+# These are not tuning constants — they are the variable names the pack's
+# SPARQL rules bind (`packs/gst/queries/*.sparql`), read off real finding
+# output rather than assumed. Keying on the bindings instead of on the rule
+# label means a new rule that binds `claimed`/`filed` works without a change
+# here, and one that binds something else reports no amount rather than a
+# wrong one.
+_AMOUNT_PAIRS: tuple[tuple[str, str], ...] = (
+    ("claimed", "filed"),          # gst:AmountMismatch — books vs portal taxable value
+    ("bookedIgst", "filedIgst"),   # gst:TaxHeadMismatch — same invoice, tax split differs
+)
+
+# Bindings that describe a one-sided exposure: the books recorded tax the
+# portal has no counterpart for (gst:SupplierNotFiled, gst:PotentialMismatch).
+# There is no portal figure to compare against, so the portal side stays None
+# — which `_case_exposure` reads as "all of it is at risk", not "zero".
+_SINGLE_SIDED: tuple[str, ...] = ("taxAmount",)
+
+
+def _to_float(value: object) -> float | None:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _supplier_names(datasets: dict) -> dict[str, str]:
+    """GSTIN → trading name, read from whatever the user uploaded.
+
+    The pack's rules bind `gstin` because that is the identifier the statute
+    keys on, but a register showing only GSTINs is unreadable. Every uploaded
+    dataset is scanned, not just books, so a name present in only one file
+    still resolves.
+    """
+    names: dict[str, str] = {}
+    for entry in datasets.values():
+        dataset, mapping = entry["dataset"], entry["mapping"]
+        gstin_col, name_col = mapping.get("supplier_gstin"), mapping.get("supplier_name")
+        if gstin_col is None or name_col is None:
+            continue
+        headers = dataset["headers"]
+        if not (0 <= gstin_col < len(headers) and 0 <= name_col < len(headers)):
+            continue
+        for row in dataset["rows"]:
+            gstin = str(row.get(headers[gstin_col], "")).strip()
+            name = str(row.get(headers[name_col], "")).strip()
+            if gstin and name and gstin not in names:
+                names[gstin] = name
+    return names
+
+
+def case_from_finding(finding: dict) -> dict:
+    """Everything a Reco Now case takes from one graph-owl finding.
+
+    Kept a pure function of the finding so it can be tested against real
+    captured rule output without a database or a running graph-owl — the
+    reconcile loop below is then just persistence.
+
+    Note `governedBy`: the wire shape is camelCase (graph-owl serialises
+    `Finding` that way). Reading `governed_by` here silently recorded no rule
+    reference on every case, which is the same defect as the earlier
+    `finding["rule"]`/`label` one and equally invisible, since a missing rule
+    reference looks exactly like a rule that has none.
+    """
+    evidence = finding.get("evidence") or []
+    ev = {e["var"]: e["value"] for e in evidence if "var" in e and "value" in e}
+    subject_uri = str(finding.get("subject") or finding.get("id") or "unknown")
+
+    books_amount: float | None = None
+    portal_amount: float | None = None
+    for books_var, portal_var in _AMOUNT_PAIRS:
+        if books_var in ev or portal_var in ev:
+            books_amount = _to_float(ev.get(books_var))
+            portal_amount = _to_float(ev.get(portal_var))
+            break
+    else:
+        for single in _SINGLE_SIDED:
+            if single in ev:
+                books_amount = _to_float(ev.get(single))
+                break
+
+    reason_code = finding.get("label")
+    invoice_no = ev.get("number") or subject_uri
+    return {
+        "invoice_no": invoice_no,
+        "reason_code": reason_code,
+        "subject": subject_uri,
+        "summary": finding.get("summary"),
+        # camelCase on the wire — see the docstring.
+        "governed_by": finding.get("governedBy"),
+        "evidence_count": len(evidence),
+        "supplier_gstin": ev.get("gstin"),
+        "books_amount": books_amount,
+        "portal_amount": portal_amount,
+        # One invoice can genuinely have two different problems — INV-MAR-011
+        # has both a tax-head mismatch and an amount mismatch. Keying dedup on
+        # the invoice alone dropped whichever arrived second, which happened to
+        # be the one carrying the money.
+        "dedup_key": (invoice_no, reason_code),
+    }
+
+
+def _amount(value: object) -> float | None:
+    """Postgres NUMERIC arrives as Decimal, which FastAPI serialises as a JSON
+    *string* — `"17100"`, and `"1.8E+5"` for 180000. Every amount therefore
+    crosses the wire as a float, or the console renders scientific notation to
+    someone reading a tax position."""
+    return None if value is None else float(value)
+
+
 def _case_exposure(case: dict) -> float:
     books = float(case["books_amount"]) if case["books_amount"] is not None else 0.0
     if case["portal_amount"] is None:
         return books
     return abs(books - float(case["portal_amount"]))
+
+
+def period_exposure(cases: list[dict]) -> float:
+    """Money at risk across a set of cases, counting each invoice once.
+
+    Two rules can flag the same invoice: `gst:SupplierNotFiled` and
+    `gst:PotentialMismatch` both fired on INV-MAR-013 for the same ₹17,100.
+    Summing per case reported ₹52,070 at risk for March 2026 where ₹26,240 is
+    — the same rupees counted twice because two rules noticed them.
+
+    Where rules disagree about how much of one invoice is at risk, the largest
+    is taken. That states the strongest claim the rules actually make about
+    that invoice; adding them would invent a total no rule computed.
+    """
+    worst: dict[str, float] = {}
+    for case in cases:
+        invoice = case["invoice_no"]
+        worst[invoice] = max(worst.get(invoice, 0.0), _case_exposure(case))
+    return sum(worst.values())
 
 
 def _case_row(case: dict) -> dict:
@@ -683,8 +901,8 @@ def _case_row(case: dict) -> dict:
         "status": case["status"],
         "supplier_name": case["supplier_name"],
         "supplier_gstin": case["supplier_gstin"],
-        "books_amount": case["books_amount"],
-        "portal_amount": case["portal_amount"],
+        "books_amount": _amount(case["books_amount"]),
+        "portal_amount": _amount(case["portal_amount"]),
         "exposure": _case_exposure(case),
     }
 
@@ -701,7 +919,9 @@ async def register_route(client_id: str, period_id: str, reason_code: str | None
     if reason_code is not None:
         cases = [c for c in cases if c["reason_code"] == reason_code]
     rows = sorted((_case_row(c) for c in cases), key=lambda r: r["exposure"], reverse=True)
-    return {"rows": rows, "total_exposure": sum(r["exposure"] for r in rows)}
+    # Not `sum(r["exposure"] ...)`: two rules flagging one invoice would count
+    # the same rupees twice. See `period_exposure`.
+    return {"rows": rows, "total_exposure": period_exposure(cases)}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/exceptions")
@@ -717,9 +937,12 @@ async def exceptions_route(client_id: str, period_id: str) -> list[dict]:
         {
             "reason_code": reason,
             "count": len(members),
-            "total_exposure": sum(_case_exposure(c) for c in members),
+            # Within one reason code an invoice appears once, but the same
+            # helper is used so a group total can never be computed a
+            # different way from the period total.
+            "total_exposure": period_exposure(members),
         }
-        for reason, members in sorted(groups.items(), key=lambda kv: sum(_case_exposure(c) for c in kv[1]), reverse=True)
+        for reason, members in sorted(groups.items(), key=lambda kv: period_exposure(kv[1]), reverse=True)
     ]
 
 
@@ -808,7 +1031,9 @@ async def dashboard_route(client_id: str, period_id: str) -> dict:
 
     return {
         "case_count": len(cases),
-        "total_exposure": sum(row["exposure"] for row in scored),
+        # Must equal the register's total to the rupee — same helper, so they
+        # cannot drift apart.
+        "total_exposure": period_exposure(cases),
         "needs_decision": scored,
         "pending_approvals": len(approvals),
     }

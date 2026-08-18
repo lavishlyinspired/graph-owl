@@ -47,7 +47,9 @@ export default function GenericScreen({
   const navigate = useNavigate();
 
   const handleRelated = (route: string) => {
-    navigate(`/r/${route}`);
+    // Routes are mounted at `/${route}` by router.tsx, not under an `/r/`
+    // prefix — every "NEXT" link used to 404.
+    navigate(`/${route}`);
   };
 
   return (
