@@ -63,6 +63,13 @@
 /graphowl-app/tsconfig.tsbuildinfo
 /graphowl-app/src/generated/api.d.ts
 
+# ext-apps/RecoNow/frontend/ (Plan 122b): same reasoning as graphowl-app/
+# above — build output and generated client, not source.
+/ext-apps/RecoNow/frontend/node_modules/
+/ext-apps/RecoNow/frontend/dist/
+/ext-apps/RecoNow/frontend/tsconfig.tsbuildinfo
+/ext-apps/RecoNow/frontend/src/generated/
+
 # Generated SDK artifacts. The client types are derived from `openapi.json`, and
 # a committed copy is a second thing to keep in step with the first — the same
 # reasoning as `scripts/verify-generated-client.sh`.

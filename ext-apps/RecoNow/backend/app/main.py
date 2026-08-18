@@ -11,13 +11,13 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, exporters, graphowl_client, native_findings, reconciliation as rc, sample_data
+from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data
 
 app = FastAPI(title="RecoNow — Intelligence for Indirect Tax", version="1.0.0")
 
@@ -219,9 +219,42 @@ def _normalize(dataset: dict, mapping: dict[str, int | None]) -> list[dict]:
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     _reset()
     _install_graphowl_pack()
+    await _connect_db()
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    if app.state.db_pool is not None:
+        await app.state.db_pool.close()
+
+
+async def _connect_db() -> None:
+    """B0's persistence layer, connected here rather than assumed —
+    best-effort the same way `_install_graphowl_pack` is: a laptop with no
+    Postgres up must still serve the pre-B0 SESSION-based screens. Routes
+    that need `app.state.db_pool` (client/period, and everything B1+ layers
+    on repo.py) return 503 when it is None rather than crashing the whole
+    app at startup."""
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        app.state.db_pool = None
+        print("[db] DATABASE_URL not set — client/period routes will 503")
+        return
+    try:
+        app.state.db_pool = await db.create_pool(dsn)
+    except OSError as exc:
+        app.state.db_pool = None
+        print(f"[db] connection skipped — {exc}")
+
+
+def _require_db_pool():
+    pool = getattr(app.state, "db_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="database not configured — set DATABASE_URL")
+    return pool
 
 
 def _install_graphowl_pack() -> None:
@@ -331,6 +364,146 @@ def health() -> dict:
         "service": "matcha-backend",
         "ai": {"available": ai.is_available(), "model": ai.MODEL},
     }
+
+
+# ---------------------------------------------------------------- Plan 122b B1
+# Clients and periods — the first HTTP surface built directly on B0's
+# repository layer. Everything below this point that reads workflow state
+# (cases, follow-ups, approvals, ...) takes client_id, and period_id where
+# the table has one, as a required path parameter — never a query-string
+# option, so a route simply cannot be called without naming its scope.
+
+
+@app.post("/api/clients", status_code=201)
+async def create_client(payload: dict) -> dict:
+    pool = _require_db_pool()
+    name = payload.get("name")
+    gstin = payload.get("gstin")
+    state = payload.get("state")
+    if not name or not gstin or not state:
+        raise HTTPException(status_code=400, detail="name, gstin and state are all required")
+    async with pool.acquire() as conn:
+        client_id = await repo.create_client(conn, name=name, gstin=gstin, state=state)
+    return {"id": client_id, "name": name, "gstin": gstin, "state": state}
+
+
+@app.get("/api/clients")
+async def list_clients_route() -> list[dict]:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        clients = await repo.list_clients(conn)
+    return [
+        {"id": str(c["id"]), "name": c["name"], "gstin": c["gstin"], "state": c["state"]} for c in clients
+    ]
+
+
+@app.post("/api/clients/{client_id}/periods", status_code=201)
+async def create_period_route(client_id: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    month = payload.get("month")
+    year = payload.get("year")
+    if not month or not year:
+        raise HTTPException(status_code=400, detail="month and year are both required")
+    async with pool.acquire() as conn:
+        period_id = await repo.create_period(conn, client_id=client_id, month=month, year=int(year))
+    return {"id": period_id, "month": month, "year": int(year)}
+
+
+@app.get("/api/clients/{client_id}/periods")
+async def list_periods_route(client_id: str) -> list[dict]:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        periods = await repo.list_periods(conn, client_id=client_id)
+    return [
+        {"id": str(p["id"]), "month": p["month"], "year": p["year"], "status": p["status"]} for p in periods
+    ]
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/cases", status_code=201)
+async def create_case_route(client_id: str, period_id: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    invoice_no = payload.get("invoice_no")
+    if not invoice_no:
+        raise HTTPException(status_code=400, detail="invoice_no is required")
+    async with pool.acquire() as conn:
+        case_id = await repo.create_case(
+            conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
+            reason_code=payload.get("reason_code"),
+        )
+    return {"id": case_id, "invoice_no": invoice_no, "reason_code": payload.get("reason_code")}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/cases")
+async def list_cases_route(client_id: str, period_id: str) -> list[dict]:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+    return [
+        {"id": str(c["id"]), "invoice_no": c["invoice_no"], "reason_code": c["reason_code"], "status": c["status"]}
+        for c in cases
+    ]
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/ask")
+async def ask_route(client_id: str, period_id: str, payload: dict) -> dict:
+    """Plan 122b B1's own RED: grounded or refused, never an uncited
+    sentence. A deterministic keyword match over this client+period's own
+    `case_record` rows — not an LLM call — so "grounded" here means
+    exactly what it says: every word of the answer traces to a cited row.
+    """
+    pool = _require_db_pool()
+    question = (payload.get("question") or "").lower()
+    async with pool.acquire() as conn:
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+
+    matched = [
+        c for c in cases
+        if c["invoice_no"].lower() in question or (c["reason_code"] or "").lower() in question
+    ]
+    if not matched:
+        return {"grounded": False, "answer": "Not enough evidence to answer that from what's in this period.", "citations": []}
+
+    citations = [f"case {c['invoice_no']} · {c['reason_code'] or 'no reason code yet'}" for c in matched]
+    answer = f"Found {len(matched)} matching case(s): " + ", ".join(c["invoice_no"] for c in matched) + "."
+    return {"grounded": True, "answer": answer, "citations": citations}
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/approvals", status_code=201)
+async def create_approval_route(client_id: str, period_id: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    decision_type = payload.get("decision_type")
+    if not decision_type:
+        raise HTTPException(status_code=400, detail="decision_type is required")
+    async with pool.acquire() as conn:
+        approval_id = await repo.create_approval(
+            conn, client_id=client_id, period_id=period_id, decision_type=decision_type,
+            amount=payload.get("amount"), requested_by=None,
+        )
+    return {"id": approval_id, "decision_type": decision_type, "amount": payload.get("amount"), "status": "pending"}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/approvals")
+async def list_approvals_route(client_id: str, period_id: str, status: str | None = None) -> list[dict]:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        approvals = await repo.list_approvals(conn, client_id=client_id, period_id=period_id, status=status)
+    return [
+        {"id": str(a["id"]), "decision_type": a["decision_type"], "amount": a["amount"], "status": a["status"]}
+        for a in approvals
+    ]
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/approvals/{approval_id}/decide")
+async def decide_approval_route(client_id: str, period_id: str, approval_id: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    status = payload.get("status")
+    if status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail='status must be "approved" or "rejected"')
+    async with pool.acquire() as conn:
+        decided = await repo.decide_approval(conn, client_id=client_id, approval_id=approval_id, status=status)
+    if decided is None:
+        raise HTTPException(status_code=404, detail="approval not found for this client")
+    return {"id": str(decided["id"]), "status": decided["status"]}
 
 
 def _start_ai_job(total: int, runner) -> str:

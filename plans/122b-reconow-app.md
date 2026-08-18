@@ -224,6 +224,63 @@ than an uncited sentence — assert the refusal path explicitly. Switching
 client clears the case list rather than showing stale rows. *Mutators*: the
 grounding check inverted; the switcher updating the label but not the query.
 
+**Shipped** — `ext-apps/RecoNow/frontend/` (Vite, React 19, TS strict,
+Tailwind 4), same proven tooling `graphowl-app` already validated, Reco's
+own token set (`theme.css`, warm paper `#f4f2ee`, indigo `#5b6bb5`, Public
+Sans + IBM Plex Mono) read directly off the mockup's own hex values, not
+approximated. `lib/routes.ts`/`lib/nav.ts` mirror the mockup's real `nav`
+array verbatim — 28 destinations, 9 groups, checked by
+`nav.test.ts`/`router.structural.test.ts` (`ROUTES.length === 28`,
+asserted, not just believed). 6 bespoke screens
+(home/pipeline/register/case/agents/analytics) vs. 22 sharing the mockup's
+own "generic" config-driven template — noted here for B2–B10: build the one
+shared component once, not 22 bespoke pages.
+
+`app/main.py` gained its first routes built directly on B0's `repo.py`:
+client/period CRUD, case create/list, and `POST .../ask` — a deterministic
+keyword match over the current client+period's own `case_record` rows, not
+an LLM call, so "grounded" means exactly what it says: every citation
+traces to a row the caller can also see. `app.state.db_pool`, connected at
+startup from `DATABASE_URL`, best-effort the same way
+`_install_graphowl_pack` already is — routes that need it return 503 rather
+than the app failing to start on a laptop with no Postgres running.
+
+**RED proven live, not only in the suite**: stood up a real backend against
+a real Postgres database and the Vite dev server, then drove the actual
+browser — created a real client and period through the UI, asked about a
+real case (`INV-1025`) and got back a grounded answer citing it, then asked
+about one that doesn't exist and got the refusal copy verbatim, never a
+fabricated sentence. `POST .../cases` and `POST .../ask` both re-checked
+for cross-client isolation through the HTTP layer (`test_ask.py`'s third
+test), not just at the repo layer B0 already proved.
+
+**Two real bugs found live, not by a test, and fixed same-session**: (1)
+neither `ClientSwitcher` nor `PeriodPicker` closed on an outside click —
+only their own trigger toggled them — so a stray click could land inside a
+still-open dropdown instead of the element underneath; a click meant for
+the Ask input once landed in a leftover "Month" field, typing the question
+into the wrong place entirely. Fixed with a small `useClickOutside` hook,
+wired to both. (2) Approving or rejecting an inbox item refreshed the
+drawer's own list but not the TopBar's pending-count badge, which only
+refetched on open/close — so the badge stayed stale immediately after a
+real decision. Fixed by having `InboxDrawer` notify `AppShell` on decide,
+added to the badge effect's own dependency list.
+
+`workspace.ts`'s `selectClient` (client switch clears the selected period,
+the actual mechanism behind "no stale rows" — every period-scoped fetch
+depends on `periodId`) was manually mutated to drop the reset and confirmed
+to fail its own test before being reverted, matching B0's own mutation
+discipline.
+
+**Scope note**: the inbox is wired to real `approval` rows (B0's own
+table), not yet populated by anything — nothing in B1 generates an
+approval. The queue itself, and the decide mechanism, are real and tested
+live above; what creates approvals in the first place is B4's (cases) and
+B7's (operate) job. axe was not run against this shell yet — deferred
+alongside the rest of the automated a11y pass to whichever slice finishes
+enough real screens to make a meaningful smoke suite, matching
+`graphowl-app`'s own `first-run.spec.ts` precedent.
+
 ---
 
 ### B2 · Dashboard

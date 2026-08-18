@@ -1,0 +1,28 @@
+/** UI copy, kept out of JSX per the same discipline `graphowl-app/src/lib/strings.ts`
+ *  established — copy lives in one place, components reference it. */
+export const strings = {
+  brand: "Reco Now",
+  clientIsolationCopy: "Cases, ITC and follow-ups never cross clients.",
+  clientPickerHint: "CLIENT · OWN BOOKS, OWN FILING CALENDAR",
+  askPlaceholder: "Ask about this period, or find an invoice",
+  askShortcut: "⌘K",
+  askNotEnoughEvidence: "Not enough evidence to answer that from what's in this period.",
+  askAnsweredFrom: "ANSWERED FROM",
+  askCloseLabel: "Close",
+  inboxTitle: "Waiting on you",
+  inboxSubtitle: "assistants queue here; nothing sends itself",
+  inboxEmpty: "Nothing waiting on you right now.",
+  inboxFooter:
+    "Automatic assistants never appear here — they only write text. Anything that leaves Reco Now or changes a number needs this queue.",
+  inboxReview: "Review",
+  inboxReject: "Reject",
+  inboxApprove: "Approve",
+  itcAtRiskLabel: "ITC AT RISK",
+  addClient: "Add client",
+  newClientName: "Client name",
+  newClientGstin: "GSTIN",
+  newClientState: "State",
+  newPeriodMonth: "Month",
+  newPeriodYear: "Year",
+  addPeriod: "Add period",
+} as const;

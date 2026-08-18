@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/* Tokens lifted directly from the delivered mockup's own inline styles
+ * (`samples/GraphOWL and Reco Now UI Mockups3/Reco Now.dc.html`) — warm
+ * paper background, indigo accent, Public Sans + IBM Plex Mono, light only.
+ * Plan 122b B1 / the parent plan's §1.2: "the two apps have deliberately
+ * different design languages" — this is not graphowl-app's tokens
+ * reused, it is Reco's own, read straight off the mockup's own hex
+ * values rather than approximated. */
+
+@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  --reco-bg: #f4f2ee;
+  --reco-panel: #ffffff;
+  --reco-panel-2: #faf9f6;
+  --reco-input: #faf9f6;
+  --reco-row: #f2efe9;
+
+  --reco-line: #e3e0d9;
+  --reco-line-2: #eeebe4;
+  --reco-line-3: #d8d4cb;
+
+  --reco-t0: #1c1b18;
+  --reco-t1: #1c1b18;
+  --reco-t2: #3d3a34;
+  --reco-t3: #54504a;
+  --reco-t4: #6f6b62;
+  --reco-t5: #a29d93;
+  --reco-t6: #c3bdb2;
+
+  --reco-accent: #5b6bb5;
+  --reco-accent-hi: #41508f;
+  --reco-accent-bg: #f4f6fb;
+  --reco-accent-border: #dfe3f2;
+  --reco-accent-deep: #eef0f8;
+
+  --reco-purple: #6b4fa8;
+  --reco-purple-bg: #f5f0ff;
+  --reco-purple-border: #e6dcf7;
+
+  --reco-amber: #a86a2c;
+  --reco-amber-bg: #fdf3e7;
+  --reco-amber-border: #f0dcc2;
+
+  --reco-ok: #2f6b4d;
+  --reco-ok-bg: #f3f8f4;
+  --reco-ok-border: #cfe0d5;
+
+  --reco-bad: #a13f28;
+  --reco-bad-bg: #fdf5f3;
+  --reco-bad-border: #eed7d1;
+
+  --reco-shadow-color: rgba(28, 27, 24, 0.16);
+}
+
+body {
+  margin: 0;
+  background: var(--reco-bg);
+  color: var(--reco-t1);
+  font-family: "Public Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+.font-mono {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+@theme {
+  --color-reco-bg: var(--reco-bg);
+  --color-reco-panel: var(--reco-panel);
+  --color-reco-panel-2: var(--reco-panel-2);
+  --color-reco-input: var(--reco-input);
+  --color-reco-row: var(--reco-row);
+  --color-reco-line: var(--reco-line);
+  --color-reco-line-2: var(--reco-line-2);
+  --color-reco-line-3: var(--reco-line-3);
+  --color-reco-t0: var(--reco-t0);
+  --color-reco-t1: var(--reco-t1);
+  --color-reco-t2: var(--reco-t2);
+  --color-reco-t3: var(--reco-t3);
+  --color-reco-t4: var(--reco-t4);
+  --color-reco-t5: var(--reco-t5);
+  --color-reco-t6: var(--reco-t6);
+  --color-reco-accent: var(--reco-accent);
+  --color-reco-accent-hi: var(--reco-accent-hi);
+  --color-reco-accent-bg: var(--reco-accent-bg);
+  --color-reco-accent-border: var(--reco-accent-border);
+  --color-reco-purple: var(--reco-purple);
+  --color-reco-purple-bg: var(--reco-purple-bg);
+  --color-reco-purple-border: var(--reco-purple-border);
+  --color-reco-amber: var(--reco-amber);
+  --color-reco-amber-bg: var(--reco-amber-bg);
+  --color-reco-amber-border: var(--reco-amber-border);
+  --color-reco-ok: var(--reco-ok);
+  --color-reco-ok-bg: var(--reco-ok-bg);
+  --color-reco-ok-border: var(--reco-ok-border);
+  --color-reco-bad: var(--reco-bad);
+  --color-reco-bad-bg: var(--reco-bad-bg);
+  --color-reco-bad-border: var(--reco-bad-border);
+}

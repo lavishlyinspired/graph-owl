@@ -125,13 +125,31 @@ async def create_approval(
     return str(row["id"])
 
 
-async def list_approvals(conn: asyncpg.Connection, *, client_id: str, period_id: str) -> list[dict[str, Any]]:
-    rows = await conn.fetch(
-        "SELECT id, decision_type, amount, requested_by, status, decided_by, decided_at, created_at "
-        "FROM approval WHERE client_id = $1 AND period_id = $2 ORDER BY created_at",
-        client_id, period_id,
-    )
+async def list_approvals(
+    conn: asyncpg.Connection, *, client_id: str, period_id: str, status: str | None = None
+) -> list[dict[str, Any]]:
+    if status is None:
+        rows = await conn.fetch(
+            "SELECT id, decision_type, amount, requested_by, status, decided_by, decided_at, created_at "
+            "FROM approval WHERE client_id = $1 AND period_id = $2 ORDER BY created_at",
+            client_id, period_id,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT id, decision_type, amount, requested_by, status, decided_by, decided_at, created_at "
+            "FROM approval WHERE client_id = $1 AND period_id = $2 AND status = $3 ORDER BY created_at",
+            client_id, period_id, status,
+        )
     return [dict(row) for row in rows]
+
+
+async def decide_approval(conn: asyncpg.Connection, *, client_id: str, approval_id: str, status: str) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "UPDATE approval SET status = $1, decided_at = now() WHERE id = $2 AND client_id = $3 "
+        "RETURNING id, decision_type, amount, status, decided_at",
+        status, approval_id, client_id,
+    )
+    return dict(row) if row is not None else None
 
 
 async def create_note(
