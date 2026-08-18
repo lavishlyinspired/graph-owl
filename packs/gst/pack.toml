@@ -150,6 +150,25 @@ name = "filedDate"
 [[predicates]]
 name = "pulledOn"
 
+# GSTR-3B Table 4 — literal figures on the period's own return subject.
+[[predicates]]
+name = "itcAvailable4A"
+
+[[predicates]]
+name = "itcReversed4B1"
+
+[[predicates]]
+name = "itcReversed4B2"
+
+[[predicates]]
+name = "itcNet4C"
+
+[[predicates]]
+name = "itcReclaimed4D1"
+
+[[predicates]]
+name = "itcUnavailable4D2"
+
 [[predicates]]
 name = "supplierName"
 

@@ -474,6 +474,84 @@ never given. Closed with 9 tests, negative cases included, and mutation-tested:
 it is that an epic-end fast loop must include `cargo test -p <crate> --lib` for
 every crate whose *signatures* changed, not only the crate whose behaviour did.
 
+### GSTR-3B — the summary return, and a correction to Slice C
+
+**Added 19 August 2026 after a direct challenge: "gstr1 and gstr2a are the
+same thing, isn't it?"** Checked against sources rather than recalled, and the
+answer is worth writing down because it has now been got wrong once here.
+
+They are **not** the same, and the relationship is asymmetric. GSTR-1 is what
+a **supplier** files — their outward supplies. GSTR-2A is auto-populated **for
+the recipient** from those GSTR-1s, plus GSTR-5/6/7/8. Two sides of one flow,
+and critically: *a recipient cannot download a supplier's GSTR-1.* They only
+ever see its effect in their own 2A.
+
+**The correction that follows**: in this product's ITC context the
+pre-existing `gstr1` kind was already 2A data. All three of its rules
+(`missing-in-books`, `gstr1-not-in-2b`, `books-gstr1-mismatch`) are inward —
+"what the supplier declared about me", which is 2A's definition. Slice C's
+split was right on the temporal axis (2A has a pull date, a filing does not)
+but it added a kind beside one that already meant the same thing, rather than
+noticing the existing one was mislabelled. `gstr1` is kept for the narrow real
+case — supplier filing data obtained directly, as in an intra-group
+reconciliation — and the UI now says which authority each represents instead
+of the old conflated "GSTR-2A / GSTR-1" label.
+
+**What was actually missing was GSTR-3B**, which §4 already names *the
+deliverable* ("Net ITC for GSTR-3B Table 4, with gross → reversals → net").
+
+Table 4's structure, current format:
+
+| row | holds |
+|---|---|
+| 4A | gross ITC, **auto-populated from GSTR-2B** — eligible and ineligible both |
+| 4B(1) | permanent reversals — Rule 38, Rules 42/43, s.17(5). Not reclaimable. |
+| 4B(2) | reclaimable reversals — Rule 37, s.16(2)(b)/(c) |
+| 4C | net ITC to the credit ledger. 4A − 4B. |
+| 4D(1) | ITC reclaimed that an earlier period reversed |
+| 4D(2) | ITC unavailable by law — s.16(4), place of supply |
+
+**4A being auto-populated from 2B is the whole basis of the reconciliation.**
+The portal states what it made available and the taxpayer states what they
+took; the two are meant to be the same number, and where they are not the
+taxpayer usually learns it from a notice.
+
+Three design decisions, each with a failure mode:
+
+- **A summary is not a document.** Every other kind is line-level, keyed by
+  invoice and GSTIN. A 3B has neither, so it gets its own ingestion path
+  (`SUMMARY_KINDS`) and neither credit-note netting nor rate-line aggregation
+  is applied — both would run against a figure the filer already totalled.
+  A period is **mandatory** here, unlike every other field in the client: a 3B
+  naming no period is not a partial answer, it is an unplaceable one.
+- **The two directions are never one signed number.** Claiming more than 2B
+  supports is an excess claim — interest under s.50, demand under s.73/74.
+  Claiming less is credit left unclaimed, recoverable until s.16(4) closes.
+  Opposite situations with opposite remedies, and a sign is the easiest thing
+  on a screen to misread, so the direction is named in words and the magnitude
+  is always unsigned.
+- **4A is compared, not 4C.** 4A is the row 2B populates. 4C is 4A minus
+  reversals the taxpayer made deliberately, so comparing *that* against 2B
+  would report every legitimate s.17(5) reversal as an under-claim — turning
+  correct compliance into a finding. This is the mutation that killed four
+  tests when tried.
+
+**Two things this unlocks that nothing else could.** GSTR-9 Table 8B, which
+this codebase reported as uncomputable a commit earlier, is now derived from
+4C summed across the year (the strict definition is Table 6(B)+6(H); the two
+can differ where a 6(H) reclaim straddles the year end, and that is stated
+rather than glossed). And **Rule 37 closes**: the engine already finds
+invoices unpaid past 180 days and had no way to know whether the reversal was
+made. 4B(2) is where a Rule 37 reversal is reported, so an unreversed overdue
+credit is now visible as an exposure sitting in a *filed* return rather than
+an item on a to-do list. Absence stays absence — no 3B, or a blank 4B(2),
+reports not-evaluated, because neither is evidence a reversal was skipped and
+reporting it as failure accuses a taxpayer on the strength of missing data.
+
+Computed in `app/itc_3b.py` rather than as pack rules, deliberately: both
+compare a period **total** against a summary figure, which is aggregation
+rather than a join over invoices. `app/gstr9.py` already sets that precedent.
+
 ### C0, continued — the rule panel says what it checked
 
 Two gaps named directly in a live session, both about a screen that reports

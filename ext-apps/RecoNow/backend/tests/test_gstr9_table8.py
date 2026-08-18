@@ -120,6 +120,61 @@ class TestRowsTheDataCannotSupport:
                 assert row["needs"], f"{label} is uncomputable with no reason given"
 
 
+class TestTable8BFromGstr3b:
+    """**Closes a row this module used to report as uncomputable.** 8B is ITC
+    availed per GSTR-3B; with 3B ingested it is derivable, and the honest
+    thing is to compute it rather than keep saying it cannot be.
+
+    The strict definition is Table 6(B) + 6(H) of GSTR-9, which breaks down
+    what was availed. This uses **4C summed across the year's returns** — the
+    net ITC that actually reached the credit ledger — which is the same
+    quantity reached from the monthly returns rather than the annual
+    breakdown. Stated here rather than left for a reader to discover, because
+    the two can differ where a 6(H) reclaim straddles the year end.
+    """
+
+    def test_8b_totals_the_net_itc_claimed_across_the_years_returns(self):
+        result = table8(
+            gstr2a=[_line("300000")],
+            availed=[],
+            returns=[{"itc_net_4c": Decimal("120000")}, {"itc_net_4c": Decimal("145000")}],
+        )
+
+        assert result["8B"]["computed"] is True
+        assert result["8B"]["value"] == Decimal("265000")
+
+    def test_8d_is_computed_from_8b_once_3b_is_present(self):
+        """The point of closing 8B: the difference row it feeds becomes real."""
+        result = table8(
+            gstr2a=[_line("300000")],
+            availed=[],
+            returns=[{"itc_net_4c": Decimal("265000")}],
+        )
+
+        assert result["8D"]["computed"] is True
+        assert result["8D"]["value"] == Decimal("35000")
+
+    def test_without_returns_8b_is_still_uncomputed(self):
+        """The old behaviour has to survive. A deployment with no 3B must not
+        start reporting a fabricated 8B."""
+        result = table8(gstr2a=[_line("300000")], availed=[])
+
+        assert result["8B"]["computed"] is False
+        assert result["8B"]["value"] is None
+
+    def test_a_return_missing_its_4c_does_not_silently_count_as_zero(self):
+        """One unparseable return among twelve would otherwise understate the
+        year's claim by a month and overstate 8D by the same amount."""
+        result = table8(
+            gstr2a=[_line("300000")],
+            availed=[],
+            returns=[{"itc_net_4c": Decimal("120000")}, {"itc_net_4c": None}],
+        )
+
+        assert result["8B"]["computed"] is False
+        assert "4C" in result["8B"]["needs"]
+
+
 class TestDifferences:
     def test_8d_is_the_difference_between_available_and_availed(self):
         result = table8(gstr2a=[_line("20000")], availed=[{"tax_amount": Decimal("15000")}])

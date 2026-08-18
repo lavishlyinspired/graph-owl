@@ -24,6 +24,12 @@ const DATASET_KINDS = [
     optional: true,
     enables: "late filings and amendments after your 2B froze",
   },
+  {
+    kind: "gstr3b",
+    label: "GSTR-3B (summary)",
+    optional: true,
+    enables: "what you claimed against what the portal gave you",
+  },
   { kind: "payments", label: "Payment ledger", optional: true, enables: "Rule 37 — 180-day reversal" },
   { kind: "grn", label: "Goods receipt (GRN)", optional: true, enables: "s.16(2)(b) — goods received" },
 ] as const;

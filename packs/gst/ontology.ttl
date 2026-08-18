@@ -61,6 +61,13 @@ gst:Gstr2aInvoice   rdf:type gst:Class ; gst:label "GSTR-2A line (portal, as obs
 # history that makes drift computable at all.
 gst:Gstr2aSnapshot  rdf:type gst:Class ; gst:label "GSTR-2A snapshot (one per period, per pull)" .
 
+# **The summary return — one per period, and the only class here that carries
+# no invoices.** Every other document class is line-level. GSTR-3B is totals:
+# Table 4A is auto-populated from GSTR-2B, and 4C is what actually reached the
+# credit ledger. That auto-population is what makes 4A and the 2B comparable
+# at all, and the gap between them is what a notice is written about.
+gst:Gstr3bReturn    rdf:type gst:Class ; gst:label "GSTR-3B summary return (one per period)" .
+
 # **The taxpayer this deployment represents — a single-tenant pack context
 # anchor, not a globally reusable identity.** Exactly one instance exists,
 # `gst:recipient-self`, and every `Gstr2bStatement` points at it. Must not
@@ -144,6 +151,17 @@ gst:filedDate     rdf:type gst:Property ; gst:label "date the supplier filed the
 # The date a 2A snapshot was pulled from the portal. Distinct from `filedDate`
 # — that is when the supplier acted, this is when we looked.
 gst:pulledOn      rdf:type gst:Property ; gst:label "date this GSTR-2A snapshot was pulled from the portal" .
+
+# GSTR-3B Table 4, row by row rather than one net figure — the working paper
+# has to show gross -> reversals -> net, and a single total makes every step of
+# that chain untraceable. Row numbers are kept in the names because they are
+# what a preparer reads off the return itself.
+gst:itcAvailable4A   rdf:type gst:Property ; gst:label "Table 4A — gross ITC available, auto-populated from GSTR-2B" .
+gst:itcReversed4B1   rdf:type gst:Property ; gst:label "Table 4B(1) — permanent reversal (Rule 38, Rules 42/43, s.17(5))" .
+gst:itcReversed4B2   rdf:type gst:Property ; gst:label "Table 4B(2) — reclaimable reversal (Rule 37, s.16(2)(b)/(c))" .
+gst:itcNet4C         rdf:type gst:Property ; gst:label "Table 4C — net ITC to the credit ledger (4A minus 4B)" .
+gst:itcReclaimed4D1  rdf:type gst:Property ; gst:label "Table 4D(1) — ITC reclaimed that an earlier period reversed" .
+gst:itcUnavailable4D2 rdf:type gst:Property ; gst:label "Table 4D(2) — ITC unavailable by law (s.16(4), place of supply)" .
 gst:reverseCharge rdf:type gst:Property ; gst:label "reverse-charge flag (as reported in GSTR-2B)" .
 gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .
 

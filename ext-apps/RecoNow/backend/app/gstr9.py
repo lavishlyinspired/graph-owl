@@ -28,7 +28,6 @@ from typing import Any
 #: source is one edit — and so the list of what is *missing* is readable on its
 #: own, which is the thing a preparer actually asks for.
 UNSUPPORTED: dict[str, str] = {
-    "8B": "GSTR-3B — ITC availed as filed, which this product does not ingest",
     "8C": "GSTR-3B for the following April–September, for credit availed next year",
     "8G": "customs data — IGST paid on import of goods",
     "8H": "customs data — IGST credit availed on import",
@@ -61,7 +60,35 @@ def _is_eligible(line: dict) -> bool:
     return flag is None or str(flag).strip().upper() != "N"
 
 
-def table8(*, gstr2a: list[dict], availed: list[dict]) -> dict[str, dict[str, Any]]:
+def _net_claimed(returns: list[dict]) -> Decimal | None:
+    """The year's net ITC per GSTR-3B — Table 4C summed across its returns.
+
+    **`None` if any single return is missing its 4C**, rather than treating
+    that return as zero. One unparseable month among twelve would otherwise
+    understate the year's claim by a month and overstate 8D by exactly the
+    same amount — a difference a preparer would then go looking for in the
+    data rather than in the arithmetic.
+
+    The strict GSTR-9 definition of 8B is Table 6(B) + 6(H). 4C reaches the
+    same quantity from the monthly returns instead of the annual breakdown;
+    the two can differ where a 6(H) reclaim straddles the year end, which is
+    why this is said out loud rather than presented as identical.
+    """
+    total = Decimal("0")
+    for filed in returns:
+        value = filed.get("itc_net_4c")
+        if value is None or value == "":
+            return None
+        total += Decimal(str(value))
+    return total
+
+
+def table8(
+    *,
+    gstr2a: list[dict],
+    availed: list[dict],
+    returns: list[dict] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Table 8, row by row, each carrying whether it could be computed at all.
 
     `gstr2a` is every 2A line for the year — the portal's own record.
@@ -77,6 +104,30 @@ def table8(*, gstr2a: list[dict], availed: list[dict]) -> dict[str, dict[str, An
         "8A": _computed(available),
         **{label: _uncomputed(needs) for label, needs in UNSUPPORTED.items()},
     }
+
+    # 8B — ITC availed per GSTR-3B. Uncomputable until a 3B is ingested, which
+    # is why it lived in `UNSUPPORTED` before this product read one.
+    claimed_per_3b = _net_claimed(returns) if returns else None
+    if returns and claimed_per_3b is None:
+        rows["8B"] = _uncomputed(
+            "Table 4C on every GSTR-3B for the year — one of the supplied "
+            "returns does not carry it"
+        )
+    elif claimed_per_3b is None:
+        rows["8B"] = _uncomputed(
+            "GSTR-3B — ITC availed as filed; no return was supplied"
+        )
+    else:
+        rows["8B"] = _computed(claimed_per_3b)
+
+    # With 8B real, 8D is real: the difference the annual return actually
+    # asks about, rather than one derived from a books figure standing in for
+    # a filed one.
+    if claimed_per_3b is not None:
+        rows["8D"] = _computed(available - claimed_per_3b)
+        rows["8F"] = _computed(ineligible)
+        rows["8E"] = _computed(available - claimed_per_3b - ineligible)
+        return rows
 
     if not availed:
         no_figure = "a books ITC figure for the year — none was supplied"

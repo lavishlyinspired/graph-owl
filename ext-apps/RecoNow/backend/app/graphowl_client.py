@@ -82,6 +82,7 @@ CLASS_BY_KIND = {
     "gstr2b": "gst:Gstr2bInvoice",
     "gstr1": "gst:Gstr1Invoice",
     "gstr2a": "gst:Gstr2aInvoice",
+    "gstr3b": "gst:Gstr3bReturn",
 }
 
 #: The canonical-subject edge each kind's upload asserts — the half it
@@ -124,6 +125,35 @@ KINDS_NEEDING_TAX_AMOUNT = {"books", "gstr1", "gstr2a"}
 #: invoice subject, which is what `payment-overdue.sparql` and
 #: `goods-receipt-timing.sparql` join on — not at the canonical subject.
 EVENT_KINDS = {"payments", "grn"}
+
+#: **A summary return is not a document either, and is unlike an event too.**
+#: Every other kind here is line-level — one row per invoice, keyed by invoice
+#: number and supplier GSTIN. GSTR-3B has neither: it is one figure per Table 4
+#: row, per period. It gets its own path for the same reason events do, and the
+#: consequence is stated in `rows_to_turtle`: netting and rate-line aggregation
+#: are meaningless on a figure that is already a total.
+SUMMARY_KINDS = {"gstr3b"}
+
+#: Row field -> `gst:` predicate, for the summary kinds. Named for the rows a
+#: preparer actually sees on the return rather than flattened to one "itc"
+#: figure — the working paper's gross -> reversals -> net chain is the thing
+#: being built, and a single total makes every step of it untraceable.
+#:
+#: Table 4's own structure (current format, August 2022 onward):
+#:   4A     gross ITC, auto-populated from GSTR-2B — eligible and ineligible
+#:   4B(1)  permanent reversals: Rule 38, Rules 42/43, s.17(5). Not reclaimable.
+#:   4B(2)  temporary reversals: Rule 37, s.16(2)(b)/(c). Reclaimable later.
+#:   4C     net ITC to the credit ledger, 4A - 4B
+#:   4D(1)  ITC reclaimed that an earlier period reversed
+#:   4D(2)  ITC unavailable by law — s.16(4) time bar, place of supply
+SUMMARY_PREDICATES: dict[str, str] = {
+    "itc_4a": "itcAvailable4A",
+    "itc_reversed_4b1": "itcReversed4B1",
+    "itc_reversed_4b2": "itcReversed4B2",
+    "itc_net_4c": "itcNet4C",
+    "itc_reclaimed_4d1": "itcReclaimed4D1",
+    "itc_unavailable_4d2": "itcUnavailable4D2",
+}
 EVENT_DATE_FIELD = {"payments": "payment_date", "grn": "receipt_date"}
 
 #: Row field (main.py's FIELD_LABELS keys) -> `gst:` predicate local
@@ -320,11 +350,16 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     # An event kind carries no money, so aggregating and netting it would be
     # meaningless — and summing two payments on one invoice would destroy the
     # very thing the 180-day test reads, which is *when* each happened.
-    if kind not in EVENT_KINDS:
+    # A summary kind is already a total; netting and rate-line aggregation
+    # would be applied to a figure that has had both done to it already, by
+    # the person who filed the return.
+    if kind not in EVENT_KINDS and kind not in SUMMARY_KINDS:
         rows = net_credit_notes(aggregate_invoice_lines(rows))
 
     lines = [f"@prefix gst: <{NAMESPACE}> .", ""]
 
+    if kind in SUMMARY_KINDS:
+        return _summary_to_turtle(rows, kind, lines)
     if kind in EVENT_KINDS:
         return _events_to_turtle(rows, kind, lines)
     seen_filings: set[str] = set()
@@ -721,6 +756,39 @@ def net_credit_notes(rows: list[dict]) -> list[dict]:
         absorbed.add(id(row))
 
     return [r for r in rows if id(r) not in absorbed]
+
+
+def _summary_to_turtle(rows: list[dict], kind: str, lines: list[str]) -> str:
+    """One `gst:Gstr3bReturn` per period — Plan 123, GSTR-3B.
+
+    **A period is mandatory here, unlike every other field in this module.**
+    Elsewhere an absent field is omitted and the row still lands, because a
+    partial invoice is still the best information available. A 3B with no
+    period is different in kind: it cannot be compared against the 2B it is
+    supposed to agree with, or placed on any timeline. It is not a partial
+    answer, it is an unplaceable one, so it is refused rather than landed
+    where it would silently never match.
+    """
+    for row in rows:
+        period_raw = row.get("period")
+        if not _is_present(period_raw):
+            raise ValueError(
+                f"a {kind} row needs a period — a summary return that names no "
+                "period cannot be compared against anything"
+            )
+        period = quote(str(period_raw).strip(), safe="")
+        subject = f"{NAMESPACE}{kind}-return-{period}"
+        triples = [f"a {CLASS_BY_KIND[kind]}", f"gst:period {_turtle_string(period_raw)}"]
+        for field, predicate in SUMMARY_PREDICATES.items():
+            value = row.get(field)
+            # `_is_present` treats 0 as present, which matters more here than
+            # anywhere else: 4D(1) is legitimately zero most months, and a
+            # reclaim of zero is a different statement from no reclaim figure.
+            if not _is_present(value):
+                continue
+            triples.append(f"gst:{predicate} {_turtle_string(value)}")
+        lines.append(f"<{subject}>\n    " + " ;\n    ".join(triples) + " .\n")
+    return "\n".join(lines)
 
 
 def _events_to_turtle(rows: list[dict], kind: str, lines: list[str]) -> str:

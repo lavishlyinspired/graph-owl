@@ -141,7 +141,17 @@ class TestOptionality:
         # different authorities and switch on different checks.
         assert "gst:MissingInBooks" in checks_disabled({"books", "gstr2b", "gstr2a"})
 
-        every_kind = {"books", "gstr2b", "payments", "grn", "gstr1", "gstr2a"}
+        # GSTR-3B switches on the two checks nothing else can answer: whether
+        # what was *claimed* matches what the portal gave, and whether the
+        # 180-day reversals actually reached the return.
+        assert "gst:ItcClaimedVsAvailable" in checks_disabled(
+            {"books", "gstr2b", "gstr1", "gstr2a"}
+        )
+        assert "gst:Rule37ReversalMade" in checks_disabled(
+            {"books", "gstr2b", "gstr1", "gstr2a"}
+        )
+
+        every_kind = {"books", "gstr2b", "payments", "grn", "gstr1", "gstr2a", "gstr3b"}
         assert checks_disabled(every_kind) == {}
 
     def test_every_disabled_check_says_why_it_matters(self):

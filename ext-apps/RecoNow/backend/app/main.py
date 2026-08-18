@@ -89,6 +89,16 @@ FIELD_LABELS = {
     # dynamic, so *when* it was read is part of what it says; without this
     # every pull is indistinguishable and drift cannot be computed.
     "pulled_on": "2A Pulled On",
+    # GSTR-3B Table 4 — a summary return, so these are period totals rather
+    # than per-invoice values. Named for the rows a preparer sees on the
+    # return: a single "ITC" figure would make the working paper's
+    # gross -> reversals -> net chain untraceable.
+    "itc_4a": "Table 4A — ITC Available (gross)",
+    "itc_reversed_4b1": "Table 4B(1) — Reversed, permanent",
+    "itc_reversed_4b2": "Table 4B(2) — Reversed, reclaimable",
+    "itc_net_4c": "Table 4C — Net ITC Available",
+    "itc_reclaimed_4d1": "Table 4D(1) — Reclaimed",
+    "itc_unavailable_4d2": "Table 4D(2) — Unavailable by law",
 }
 
 #: Which finding rules each optional dataset switches on. A firm that cannot
@@ -101,6 +111,11 @@ CHECKS_BY_KIND: dict[str, tuple[str, ...]] = {
     "grn": ("gst:GoodsReceiptTiming",),
     "gstr1": ("gst:MissingInBooks", "gst:Gstr1NotIn2b", "gst:BooksGstr1Mismatch"),
     "gstr2a": ("gst:FiledLateInGstr2a", "gst:AmendedAfterClaim"),
+    # 3B does not switch on a graph rule — the 2B/3B comparison and the Rule 37
+    # reversal check are computed in `app.itc_3b`, because both compare a
+    # period *total* against a summary figure rather than joining invoices.
+    # Named here so the product still says what is not being checked.
+    "gstr3b": ("gst:ItcClaimedVsAvailable", "gst:Rule37ReversalMade"),
 }
 
 #: Why a reviewer should care that each is off, in their own terms.
@@ -112,6 +127,8 @@ CHECK_REASONS: dict[str, str] = {
     "gst:BooksGstr1Mismatch": "the books and the supplier's GSTR-1 disagree",
     "gst:FiledLateInGstr2a": "the supplier filed after the 2B you claimed against was frozen",
     "gst:AmendedAfterClaim": "the portal's value has changed since the 2B you claimed against",
+    "gst:ItcClaimedVsAvailable": "whether Table 4A matches the 2B it is auto-populated from",
+    "gst:Rule37ReversalMade": "whether the 180-day reversals actually reached Table 4B(2)",
 }
 
 
@@ -208,6 +225,20 @@ _FIELD_KEYWORDS = [
     ("downloaded on", "pulled_on"),
     ("as on date", "pulled_on"),
     ("as on", "pulled_on"),
+    # GSTR-3B Table 4. A real 3B export labels these several ways; the row
+    # numbers are the one stable part, so they are matched first.
+    ("4a", "itc_4a"),
+    ("itc available", "itc_4a"),
+    ("4b(1)", "itc_reversed_4b1"),
+    ("4b1", "itc_reversed_4b1"),
+    ("4b(2)", "itc_reversed_4b2"),
+    ("4b2", "itc_reversed_4b2"),
+    ("4c", "itc_net_4c"),
+    ("net itc", "itc_net_4c"),
+    ("4d(1)", "itc_reclaimed_4d1"),
+    ("4d1", "itc_reclaimed_4d1"),
+    ("4d(2)", "itc_unavailable_4d2"),
+    ("4d2", "itc_unavailable_4d2"),
     ("return period", "period"),
     ("period", "period"),
 ]
@@ -1662,7 +1693,11 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
         # filename patterns overlap ("gstr-2a" contains neither "gstr1" nor
         # "2b", but a file named "gstr2a_and_2b_export" contains both). 2A is
         # the more specific claim, so it wins — Plan 123 Slice C.
-        if "2a" in lower or "gstr-2a" in lower:
+        # 3B first: it is the only summary return, and "gstr3b" contains no
+        # substring the others match on.
+        if "3b" in lower or "gstr-3b" in lower:
+            kind, name = "gstr3b", "GSTR-3B (summary return)"
+        elif "2a" in lower or "gstr-2a" in lower:
             kind, name = "gstr2a", "GSTR-2A (portal, dynamic)"
         elif "gstr1" in lower or "gstr-1" in lower or "iff" in lower:
             kind, name = "gstr1", "GSTR-1 / IFF (supplier declared)"
@@ -1675,7 +1710,7 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
     if not SESSION["datasets"]:
         return {"ok": False, "error": "No valid files uploaded."}
     SESSION["graphowl_ingest_threads"] = []
-    for kind in ("books", "gstr2b", "gstr1", "gstr2a"):
+    for kind in ("books", "gstr2b", "gstr1", "gstr2a", "gstr3b"):
         if kind in SESSION["datasets"]:
             SESSION["mapping"][kind] = _auto_map(SESSION["datasets"][kind]["headers"])
             thread = _ingest_to_graphowl(kind, SESSION["datasets"][kind], SESSION["mapping"][kind])
