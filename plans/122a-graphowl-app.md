@@ -409,24 +409,44 @@ story, and a "not enough evidence" path; it is not a vocabulary feature).
 ids, not prose. If a stage cannot cite the graph the pipeline halts there
 and the case stays unexplained rather than guessed."*
 
-**`A8.api`** — **needs its own plan.** Persisted agent-run records (input,
-output, cited fact ids, tools called, tokens, latency, trigger,
-destination), the grounding metric, and token/model/spend aggregation. This
-is storage and lifecycle, not an endpoint, and `plans/106-agent-trace-hygiene.md`
-(shipped) covers adjacent ground worth reading first. **Do not attempt it
-inside A8.**
+**Shipped, 2026-08-18**: checked before assuming the whole surface was
+blocked, and it wasn't — Epic 14/32's real, already-substantial agent-authz
+backend covers Agents and MCP fully, and most of what "Runs" needs:
+- **Agents**: `AgentGrant` (identity, capabilities, scope, rate limit,
+  expiry — real `/agents/grants`, `/agents/{id}/grant` PUT/DELETE) is the
+  real form of "guardrails" the AC asks for; `AgentActivity`
+  (`/agents/{id}/activity`) is a real per-action audit log (capability,
+  target, outcome, refusal reason). Grant/revoke both live-verified.
+- **MCP**: no REST tool-listing endpoint exists, so this calls the MCP
+  protocol's own `tools/list` JSON-RPC method against the real `/mcp`
+  transport rather than inventing a second listing surface — live-verified
+  returning all 13 real registered tools with their real descriptions.
+- **Runs**: `Proposal` (`/proposals`, accept/reject) turned out to be the
+  real trace of one run's *output* — proposedBy, target, capability, the
+  proposed change, rationale, confidence, status. Built the queue against
+  it, accept/reject live-verified. The queue states plainly what it is not
+  (see the gap note below), rather than presenting `rationale` as if it
+  were the tokens/citations telemetry the AC describes.
 
-**AC** — Agents: pipeline stages, agent table with trigger/runs/grounding,
-run trace with tools and citations, tokens by model, spend against budget,
-guardrails, MCP tools exposed. Runs: list, filter, detail with output +
-cited facts + tools. An uncited sentence is dropped before storage — and
-the UI states that, because it is true.
+**`A8.api` remainder — NOT shipped, still needs its own plan.** What
+`Proposal` does not carry, and nothing else in the backend does either:
+persisted per-run tokens/latency/model, cited fact ids, tools called, and
+the grounding metric (an uncited sentence rejected at write). This is
+storage and lifecycle, not an endpoint, and `plans/106-agent-trace-hygiene.md`
+(shipped) covers adjacent ground (MCP response diagnostics) worth reading
+first. **Do not attempt it inline** — it needs the same deliberate design
+pass as A6's mapping wizard or A7's qSKOS completion, not a bolt-on field.
 
-**RED** — a run whose output cites no fact is rejected at write, not
-filtered at read (assert storage refuses it). Read-only agents cannot reach
-the inbox; a run needing a graph change files a proposal instead — the
-central product promise, and the negative test that proves it.
-*Mutators*: the grounding ratio inverted; the read-only guard removed.
+**Original AC/RED, preserved for the sub-plan**: Agents: pipeline stages,
+agent table with trigger/runs/grounding, run trace with tools and
+citations, tokens by model, spend against budget, guardrails, MCP tools
+exposed. Runs: list, filter, detail with output + cited facts + tools. An
+uncited sentence is dropped before storage — and the UI states that,
+because it is true. RED: a run whose output cites no fact is rejected at
+write, not filtered at read (assert storage refuses it). Read-only agents
+cannot reach the inbox; a run needing a graph change files a proposal
+instead — the central product promise, and the negative test that proves
+it. *Mutators*: the grounding ratio inverted; the read-only guard removed.
 
 ---
 

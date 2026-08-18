@@ -871,3 +871,141 @@ export interface SparqlResult {
 export function runSparql(query: string, asOf?: string): Promise<SparqlResult> {
   return apiPost<SparqlResult>("/sparql", { query, asOf });
 }
+
+// ---- Agents, MCP, Runs (Plan 122a A8 — real subset; see plans/122a-graphowl-app.md's A8.api gap note) ----
+
+export type OwnerKind = "user" | "team";
+
+export interface EntityReference {
+  readonly id: string;
+  readonly kind: OwnerKind;
+  readonly displayName: string;
+  readonly inherited: boolean;
+}
+
+export type AgentCapability =
+  | "proposeDescription"
+  | "proposeTags"
+  | "proposeOwner"
+  | "applyDescription"
+  | "applyTags"
+  | "recordMemory"
+  | "recordInvestigation"
+  | "createGlossaryTerm"
+  | "createQualityTest"
+  | "linkLineage";
+
+export interface ScopeRef {
+  readonly fqnPrefix: string;
+}
+
+export interface RateLimit {
+  readonly maxWrites: number;
+  readonly windowSeconds: number;
+}
+
+export interface AgentGrant {
+  readonly id: string;
+  readonly agent: EntityReference;
+  readonly capabilities: readonly AgentCapability[];
+  readonly scope: ScopeRef | null;
+  readonly rateLimit: RateLimit;
+  readonly expiresAt: string | null;
+  readonly grantedBy: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export function fetchAgentGrants(): Promise<readonly AgentGrant[]> {
+  return apiFetch<readonly AgentGrant[]>("/agents/grants");
+}
+
+export function setAgentGrant(
+  agentId: string,
+  body: {
+    readonly capabilities: readonly AgentCapability[];
+    readonly scopeFqnPrefix?: string;
+    readonly maxWrites?: number;
+    readonly windowSeconds?: number;
+    readonly expiresAt?: string;
+  },
+): Promise<AgentGrant> {
+  return apiPut<AgentGrant>(`/agents/${encodeURIComponent(agentId)}/grant`, body);
+}
+
+export function revokeAgentGrant(agentId: string): Promise<void> {
+  return apiDelete(`/agents/${encodeURIComponent(agentId)}/grant`);
+}
+
+export type ActivityOutcome = "applied" | "proposed" | "refused";
+
+export interface AgentActivity {
+  readonly id: string;
+  readonly agentId: string;
+  readonly capability: AgentCapability;
+  readonly targetFqn: string;
+  readonly outcome: ActivityOutcome;
+  readonly refusal: string | null;
+  readonly at: string;
+}
+
+export function fetchAgentActivity(
+  agentId: string,
+  limit = 50,
+): Promise<{ readonly data: readonly AgentActivity[]; readonly paging: { readonly after: string | null } }> {
+  return apiFetch(`/agents/${encodeURIComponent(agentId)}/activity?limit=${limit}`);
+}
+
+export type ProposalStatus = "open" | "accepted" | "rejected" | "superseded";
+
+export interface Proposal {
+  readonly id: string;
+  readonly proposedBy: EntityReference;
+  readonly targetFqn: string;
+  readonly capability: AgentCapability;
+  readonly change: unknown;
+  readonly rationale: string;
+  readonly confidence: number;
+  readonly status: ProposalStatus;
+  readonly baseVersion: { readonly major: number; readonly minor: number };
+  readonly decidedBy: string | null;
+  readonly decidedAt: string | null;
+  readonly createdAt: string;
+}
+
+export function fetchProposals(
+  filters: { readonly agentId?: string; readonly status?: ProposalStatus; readonly limit?: number } = {},
+): Promise<{ readonly data: readonly Proposal[]; readonly paging: { readonly after: string | null } }> {
+  const params = new URLSearchParams();
+  if (filters.agentId) params.set("agentId", filters.agentId);
+  if (filters.status) params.set("status", filters.status);
+  params.set("limit", String(filters.limit ?? 200));
+  return apiFetch(`/proposals?${params.toString()}`);
+}
+
+export function acceptProposal(id: string): Promise<Proposal> {
+  return apiPost<Proposal>(`/proposals/${encodeURIComponent(id)}/accept`, {});
+}
+
+export function rejectProposal(id: string): Promise<void> {
+  return apiPost<void>(`/proposals/${encodeURIComponent(id)}/reject`, {});
+}
+
+export interface McpTool {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** No REST listing exists for MCP tools — `/mcp` is the raw JSON-RPC
+ *  transport (Epic 14 + 32), so this calls the protocol's own `tools/list`
+ *  method rather than inventing a second, non-standard listing endpoint. */
+export async function fetchMcpTools(): Promise<readonly McpTool[]> {
+  const response = await apiPost<{
+    readonly result?: { readonly tools: readonly McpTool[] };
+    readonly error?: { readonly message: string };
+  }>("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  return response.result?.tools ?? [];
+}
