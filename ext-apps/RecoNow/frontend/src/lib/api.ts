@@ -496,3 +496,22 @@ export interface GraphOwlStatus {
 export function fetchGraphOwlStatus(): Promise<GraphOwlStatus> {
   return apiFetch<GraphOwlStatus>("/api/graphowl/status");
 }
+
+export interface PeriodPoint {
+  readonly period_id: string;
+  readonly label: string;
+  readonly case_count: number;
+  readonly exposure: number;
+  readonly status: string;
+}
+
+export interface Analytics {
+  readonly periods: readonly PeriodPoint[];
+  /** False when there is one period or none. A single point is a number,
+   *  not a trend, and the screen must not draw a line through it. */
+  readonly has_trend: boolean;
+}
+
+export function fetchAnalytics(clientId: string): Promise<Analytics> {
+  return apiFetch<Analytics>(`/api/clients/${encodeURIComponent(clientId)}/analytics`);
+}

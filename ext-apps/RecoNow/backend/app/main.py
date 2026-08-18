@@ -1095,6 +1095,49 @@ async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, 
     return {"id": decision_id, "decision": decision}
 
 
+@app.get("/api/clients/{client_id}/analytics")
+async def analytics_route(client_id: str) -> dict:
+    """Exposure per period, for the periods this client actually has.
+
+    The Analytics screen drew a five-month Apr–Aug series and an insight
+    reading "Match rate improved 6 points since April" for a client whose
+    only reconciled period was March 2026. `has_trend` is the honest answer
+    to "can this be plotted over time": one period is a number, not a trend,
+    and the screen says so rather than inventing four more.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        periods = await repo.list_periods(conn, client_id=client_id)
+        rows = []
+        for period in periods:
+            pid = str(period["id"])
+            cases = await repo.list_cases(conn, client_id=client_id, period_id=pid)
+            rows.append(
+                {
+                    "period_id": pid,
+                    "label": f"{period['month']} {period['year']}",
+                    "year": period["year"],
+                    "month": period["month"],
+                    "status": period["status"],
+                    "case_count": len(cases),
+                    "exposure": period_exposure(cases),
+                }
+            )
+
+    rows.sort(key=lambda r: (r["year"], _MONTH_ORDER.get(r["month"], 0)))
+    return {"periods": rows, "has_trend": len(rows) > 1}
+
+
+_MONTH_ORDER = {
+    m: i
+    for i, m in enumerate(
+        ["January", "February", "March", "April", "May", "June",
+         "July", "August", "September", "October", "November", "December"],
+        start=1,
+    )
+}
+
+
 @app.get("/api/clients/{client_id}/periods/{period_id}/dashboard")
 async def dashboard_route(client_id: str, period_id: str) -> dict:
     """Plan 122b B2, scoped honestly: real totals computed directly from
