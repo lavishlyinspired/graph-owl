@@ -1009,3 +1009,138 @@ export async function fetchMcpTools(): Promise<readonly McpTool[]> {
   }
   return response.result?.tools ?? [];
 }
+
+// ---- PLATFORM — Workbench, Packs, Admin (Plan 122a A10) ----
+
+export function runCypher(query: string, asOf?: string): Promise<SparqlResult> {
+  return apiPost<SparqlResult>("/cypher", { query, asOf });
+}
+
+/** Already-installed packs are filtered out server-side
+ *  (`scan_available_packs`) — this list is genuinely "not yet installed",
+ *  so there is no `installed` field to carry. */
+export interface AvailablePack {
+  readonly id: string;
+  readonly description: string;
+}
+
+export function fetchAvailablePacks(): Promise<readonly AvailablePack[]> {
+  return apiFetch<readonly AvailablePack[]>("/packs/available");
+}
+
+/** A *different* id space from `AvailablePack.id`. `/packs/available` scans
+ *  `pack.toml` files on disk and returns string slugs ("gst"); terms,
+ *  overrides and upgrade all key off the installed pack *record*'s own
+ *  UUID (`GET /ontology-packs`) — found live when `/ontology-packs/{id}/terms`
+ *  400'd on a slug passed where a UUID was expected. */
+export interface InstalledPack {
+  readonly id: string;
+  readonly packId: string;
+  readonly version: string;
+  readonly licence: unknown;
+  readonly sourceUrl: string;
+  readonly glossaryId: string;
+  readonly termCount: number;
+  readonly importedAt: string;
+}
+
+export function fetchInstalledPacks(): Promise<readonly InstalledPack[]> {
+  return apiFetch<readonly InstalledPack[]>("/ontology-packs");
+}
+
+export function installPack(pack: string): Promise<{ readonly pack: string; readonly ok: boolean; readonly output: string }> {
+  return apiPost(`/packs/${encodeURIComponent(pack)}/install`, {});
+}
+
+export interface PackTermView {
+  readonly sourceIri: string;
+  readonly term: GlossaryTerm;
+  readonly effective: boolean;
+}
+
+export function fetchPackTerms(packId: string): Promise<readonly PackTermView[]> {
+  return apiFetch<readonly PackTermView[]>(`/ontology-packs/${encodeURIComponent(packId)}/terms`);
+}
+
+export type PackOverrideKind = "hide" | "relabel" | "reparent";
+
+export interface PackOverride {
+  readonly id: string;
+  readonly termPath: string;
+  readonly kind: PackOverrideKind;
+  readonly payload: unknown;
+}
+
+export function fetchPackOverrides(packId: string): Promise<readonly PackOverride[]> {
+  return apiFetch<readonly PackOverride[]>(`/ontology-packs/${encodeURIComponent(packId)}/overrides`);
+}
+
+export function createPackOverride(
+  packId: string,
+  body: { readonly termPath: string; readonly kind: PackOverrideKind; readonly payload?: unknown },
+): Promise<PackOverride> {
+  return apiPost<PackOverride>(`/ontology-packs/${encodeURIComponent(packId)}/overrides`, body);
+}
+
+export function deletePackOverride(packId: string, overrideId: string): Promise<void> {
+  return apiDelete(`/ontology-packs/${encodeURIComponent(packId)}/overrides/${encodeURIComponent(overrideId)}`);
+}
+
+export interface PackUpgradeResult {
+  readonly report: unknown;
+  readonly applied: boolean;
+}
+
+export function upgradePack(packId: string, version: string, manifest: string, dryRun: boolean): Promise<PackUpgradeResult> {
+  const params = new URLSearchParams({ version, dryRun: String(dryRun) });
+  return fetch(`${API_BASE}/ontology-packs/${encodeURIComponent(packId)}/upgrade?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: manifest,
+  }).then((response) => {
+    if (!response.ok) throw new Error(`upgrade responded ${response.status}`);
+    return response.json() as Promise<PackUpgradeResult>;
+  });
+}
+
+export interface Team {
+  readonly id: string;
+  readonly parentTeamId: string | null;
+  readonly displayName: string;
+  readonly description: string | null;
+  readonly members: readonly string[];
+}
+
+export function fetchTeams(): Promise<readonly Team[]> {
+  return apiFetch<readonly Team[]>("/teams");
+}
+
+export function upsertTeam(team: {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description?: string;
+  readonly members?: readonly string[];
+  readonly parentTeamId?: string;
+}): Promise<Team> {
+  return apiPost<Team>("/teams", team);
+}
+
+export function deleteTeam(id: string): Promise<void> {
+  return apiDelete(`/teams/${encodeURIComponent(id)}`);
+}
+
+export function upsertUser(id: string, displayName: string, email?: string): Promise<unknown> {
+  return apiPut(`/users/${encodeURIComponent(id)}`, { displayName, email });
+}
+
+export function setUserRoles(id: string, roles: readonly string[]): Promise<unknown> {
+  return apiPut(`/users/${encodeURIComponent(id)}/roles`, { roles });
+}
+
+export function fetchMapping(name: string): Promise<unknown> {
+  return apiFetch(`/webhooks/mappings/${encodeURIComponent(name)}`);
+}
+
+export function fetchHealth(): Promise<{ readonly status: string; readonly version: string }> {
+  return apiFetch("/health");
+}
