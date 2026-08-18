@@ -429,6 +429,14 @@ async def create_case_route(client_id: str, period_id: str, payload: dict) -> di
         case_id = await repo.create_case(
             conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
             reason_code=payload.get("reason_code"),
+            supplier_name=payload.get("supplier_name"),
+            supplier_gstin=payload.get("supplier_gstin"),
+            books_amount=payload.get("books_amount"),
+            portal_amount=payload.get("portal_amount"),
+            subject=payload.get("subject"),
+            summary=payload.get("summary"),
+            governed_by=payload.get("governed_by"),
+            evidence_count=payload.get("evidence_count"),
         )
     return {"id": case_id, "invoice_no": invoice_no, "reason_code": payload.get("reason_code")}
 
@@ -613,12 +621,24 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
         # to be safely re-runnable (a re-upload, a corrected mapping).
         existing = {c["invoice_no"] for c in await repo.list_cases(conn, client_id=client_id, period_id=period_id)}
         for finding in findings:
+            # Field names match graph-owl-core's real `Finding` struct
+            # (crates/graph-owl-core/src/finding.rs) — an earlier version
+            # of this bridge read `finding["rule"]`, which is not a field
+            # that struct has, and would have silently landed every real
+            # case with reason_code=None. `label` is the rule kind;
+            # `governed_by` and `evidence` are "never absent"/"never
+            # empty" per that struct's own doc comments, so both are safe
+            # to read without a default meaning something real is missing.
             invoice_no = str(finding.get("subject") or finding.get("id") or "unknown")
             if invoice_no in existing:
                 continue
             await repo.create_case(
                 conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
-                reason_code=finding.get("rule"),
+                reason_code=finding.get("label"),
+                subject=finding.get("subject"),
+                summary=finding.get("summary"),
+                governed_by=finding.get("governed_by"),
+                evidence_count=len(finding.get("evidence") or []),
             )
             existing.add(invoice_no)
             created += 1
@@ -630,6 +650,114 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
         "found": result.found,
         "cases_created": created,
     }
+
+
+def _case_exposure(case: dict) -> float:
+    books = float(case["books_amount"]) if case["books_amount"] is not None else 0.0
+    if case["portal_amount"] is None:
+        return books
+    return abs(books - float(case["portal_amount"]))
+
+
+def _case_row(case: dict) -> dict:
+    return {
+        "id": str(case["id"]),
+        "invoice_no": case["invoice_no"],
+        "reason_code": case["reason_code"],
+        "status": case["status"],
+        "supplier_name": case["supplier_name"],
+        "supplier_gstin": case["supplier_gstin"],
+        "books_amount": case["books_amount"],
+        "portal_amount": case["portal_amount"],
+        "exposure": _case_exposure(case),
+    }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/register")
+async def register_route(client_id: str, period_id: str, reason_code: str | None = None) -> dict:
+    """Plan 122b B4's own RED: the exposure total equals the sum of the
+    *filtered* rows — computed here from the same list the response
+    returns, in one pass, so a filter and its total cannot silently
+    disagree the way two independently-computed values could."""
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+    if reason_code is not None:
+        cases = [c for c in cases if c["reason_code"] == reason_code]
+    rows = sorted((_case_row(c) for c in cases), key=lambda r: r["exposure"], reverse=True)
+    return {"rows": rows, "total_exposure": sum(r["exposure"] for r in rows)}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/exceptions")
+async def exceptions_route(client_id: str, period_id: str) -> list[dict]:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+    groups: dict[str, list[dict]] = {}
+    for c in cases:
+        key = c["reason_code"] or "unclassified"
+        groups.setdefault(key, []).append(c)
+    return [
+        {
+            "reason_code": reason,
+            "count": len(members),
+            "total_exposure": sum(_case_exposure(c) for c in members),
+        }
+        for reason, members in sorted(groups.items(), key=lambda kv: sum(_case_exposure(c) for c in kv[1]), reverse=True)
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/register/{case_id}")
+async def case_detail_route(client_id: str, period_id: str, case_id: str) -> dict:
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+        if case is None or str(case["period_id"]) != period_id:
+            raise HTTPException(status_code=404, detail="case not found for this client and period")
+        siblings = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+        ims_decisions = await repo.list_ims_decisions(conn, client_id=client_id, period_id=period_id)
+
+    group = [c for c in siblings if c["reason_code"] == case["reason_code"]]
+    group.sort(key=lambda c: c["created_at"])
+    index = next(i for i, c in enumerate(group) if str(c["id"]) == case_id)
+    prev_id = str(group[index - 1]["id"]) if index > 0 else None
+    next_id = str(group[index + 1]["id"]) if index < len(group) - 1 else None
+
+    row = _case_row(case)
+    row.update(
+        {
+            "subject": case["subject"],
+            "summary": case["summary"],
+            "governed_by": case["governed_by"],
+            "evidence_count": case["evidence_count"],
+            "group_reason_code": case["reason_code"],
+            "graphowl_url": GRAPH_OWL_SERVER,
+            "prev_id": prev_id,
+            "next_id": next_id,
+            "ims_decisions": [
+                {"decision": d["decision"], "decided_at": d["decided_at"].isoformat()}
+                for d in ims_decisions
+                if str(d["case_id"]) == case_id
+            ],
+        }
+    )
+    return row
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/register/{case_id}/ims", status_code=201)
+async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, payload: dict) -> dict:
+    pool = _require_db_pool()
+    decision = payload.get("decision")
+    if decision not in ("accept", "reject", "pending"):
+        raise HTTPException(status_code=400, detail='decision must be "accept", "reject" or "pending"')
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+        if case is None or str(case["period_id"]) != period_id:
+            raise HTTPException(status_code=404, detail="case not found for this client and period")
+        decision_id = await repo.create_ims_decision(
+            conn, client_id=client_id, period_id=period_id, case_id=case_id, decision=decision
+        )
+    return {"id": decision_id, "decision": decision}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/dashboard")
@@ -647,20 +775,13 @@ async def dashboard_route(client_id: str, period_id: str) -> dict:
         cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
         approvals = await repo.list_approvals(conn, client_id=client_id, period_id=period_id, status="pending")
 
-    def _exposure(case: dict) -> float:
-        books = float(case["books_amount"]) if case["books_amount"] is not None else 0.0
-        portal = float(case["portal_amount"]) if case["portal_amount"] is not None else 0.0
-        if case["portal_amount"] is None:
-            return books
-        return abs(books - portal)
-
     scored = sorted(
         (
             {
                 "invoice_no": c["invoice_no"],
                 "reason_code": c["reason_code"],
                 "supplier_name": c["supplier_name"],
-                "exposure": _exposure(c),
+                "exposure": _case_exposure(c),
                 "status": c["status"],
             }
             for c in cases

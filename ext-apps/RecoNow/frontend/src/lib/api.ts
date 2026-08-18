@@ -156,6 +156,72 @@ export function fetchDashboard(clientId: string, periodId: string): Promise<Dash
   );
 }
 
+export interface RegisterRow {
+  readonly id: string;
+  readonly invoice_no: string;
+  readonly reason_code: string | null;
+  readonly status: string;
+  readonly supplier_name: string | null;
+  readonly supplier_gstin: string | null;
+  readonly books_amount: number | null;
+  readonly portal_amount: number | null;
+  readonly exposure: number;
+}
+
+export interface Register {
+  readonly rows: readonly RegisterRow[];
+  readonly total_exposure: number;
+}
+
+export function fetchRegister(clientId: string, periodId: string, reasonCode?: string): Promise<Register> {
+  const query = reasonCode ? `?reason_code=${encodeURIComponent(reasonCode)}` : "";
+  return apiFetch<Register>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/register${query}`,
+  );
+}
+
+export interface ExceptionGroup {
+  readonly reason_code: string;
+  readonly count: number;
+  readonly total_exposure: number;
+}
+
+export function fetchExceptions(clientId: string, periodId: string): Promise<readonly ExceptionGroup[]> {
+  return apiFetch<ExceptionGroup[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/exceptions`,
+  );
+}
+
+export interface CaseDetail extends RegisterRow {
+  readonly subject: string | null;
+  readonly summary: string | null;
+  readonly governed_by: string | null;
+  readonly evidence_count: number | null;
+  readonly group_reason_code: string | null;
+  readonly graphowl_url: string;
+  readonly prev_id: string | null;
+  readonly next_id: string | null;
+  readonly ims_decisions: readonly { decision: string; decided_at: string }[];
+}
+
+export function fetchCaseDetail(clientId: string, periodId: string, caseId: string): Promise<CaseDetail> {
+  return apiFetch<CaseDetail>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/register/${encodeURIComponent(caseId)}`,
+  );
+}
+
+export function recordImsDecision(
+  clientId: string,
+  periodId: string,
+  caseId: string,
+  decision: "accept" | "reject" | "pending",
+): Promise<{ id: string; decision: string }> {
+  return apiPost(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/register/${encodeURIComponent(caseId)}/ims`,
+    { decision },
+  );
+}
+
 export function decideApproval(
   clientId: string,
   periodId: string,

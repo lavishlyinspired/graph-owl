@@ -55,24 +55,42 @@ async def create_case(
     supplier_gstin: str | None = None,
     books_amount: float | None = None,
     portal_amount: float | None = None,
+    subject: str | None = None,
+    summary: str | None = None,
+    governed_by: str | None = None,
+    evidence_count: int | None = None,
 ) -> str:
     row = await conn.fetchrow(
         "INSERT INTO case_record "
-        "(client_id, period_id, invoice_no, reason_code, supplier_name, supplier_gstin, books_amount, portal_amount) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "(client_id, period_id, invoice_no, reason_code, supplier_name, supplier_gstin, books_amount, "
+        "portal_amount, subject, summary, governed_by, evidence_count) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
         client_id, period_id, invoice_no, reason_code, supplier_name, supplier_gstin, books_amount, portal_amount,
+        subject, summary, governed_by, evidence_count,
     )
     return str(row["id"])
 
 
+_CASE_COLUMNS = (
+    "id, invoice_no, reason_code, status, assigned_to, supplier_name, supplier_gstin, "
+    "books_amount, portal_amount, subject, summary, governed_by, evidence_count, created_at, updated_at"
+)
+
+
 async def list_cases(conn: asyncpg.Connection, *, client_id: str, period_id: str) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        "SELECT id, invoice_no, reason_code, status, assigned_to, supplier_name, supplier_gstin, "
-        "books_amount, portal_amount, created_at, updated_at "
-        "FROM case_record WHERE client_id = $1 AND period_id = $2 ORDER BY created_at",
+        f"SELECT {_CASE_COLUMNS} FROM case_record WHERE client_id = $1 AND period_id = $2 ORDER BY created_at",
         client_id, period_id,
     )
     return [dict(row) for row in rows]
+
+
+async def get_case(conn: asyncpg.Connection, *, client_id: str, case_id: str) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        f"SELECT {_CASE_COLUMNS}, period_id FROM case_record WHERE client_id = $1 AND id = $2",
+        client_id, case_id,
+    )
+    return dict(row) if row is not None else None
 
 
 async def create_ims_decision(

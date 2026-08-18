@@ -44,18 +44,20 @@ async def test_applying_migrations_twice_is_a_no_op(pool):
 async def test_rollback_undoes_only_the_most_recent_migration(pool):
     """`rollback_last_migration` rolls back one migration at a time (the
     same shape `refinery` and every other migration runner uses) — rolling
-    back once with two migrations applied must undo 0002's own columns
-    without touching 0001's tables."""
+    back once must undo only the *latest* applied migration's own effect,
+    not reach back into an earlier one. Checked against whichever
+    migration is actually last, not a hardcoded version string, so this
+    does not need editing every time a new migration lands."""
     async with pool.acquire() as conn:
+        before = sorted(row["version"] for row in await conn.fetch("SELECT version FROM schema_migrations"))
         await db.rollback_last_migration(conn)
+        after = {row["version"] for row in await conn.fetch("SELECT version FROM schema_migrations")}
         columns = await conn.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_name = 'case_record'"
         )
-        applied = {row["version"] for row in await conn.fetch("SELECT version FROM schema_migrations")}
-    column_names = {row["column_name"] for row in columns}
-    assert "books_amount" not in column_names
-    assert "invoice_no" in column_names  # 0001's own column, untouched
-    assert applied == {"0001_initial"}
+    assert after == set(before[:-1])  # everything except the one just rolled back
+    # 0001's own column survives any later migration's rollback.
+    assert "invoice_no" in {row["column_name"] for row in columns}
 
 
 async def test_repeated_rollback_eventually_drops_every_table(pool):

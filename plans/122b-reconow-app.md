@@ -443,6 +443,47 @@ subject. An amount-mismatch case cites the same facts
 comparison columns transposed (books vs 2B) — assert per-column, since a
 swap still renders three plausible numbers.
 
+**A real bug found while designing this slice, before any code ran**:
+B3's reconcile bridge read `finding.get("rule")` — but graph-owl-core's
+actual `Finding` struct (`crates/graph-owl-core/src/finding.rs`) has no
+`rule` field at all. It is `label` (the rule kind). Every real finding
+would have landed with `reason_code = None` silently, and Exceptions'
+whole reason-grouping would have shown one meaningless "unclassified"
+bucket instead of the real breakdown. Fixed in the same commit as B4
+rather than left for whoever noticed the empty groups first. `governed_by`
+and `evidence` are documented on that struct as "never absent"/"never
+empty", so `evidence_count = len(finding["evidence"])` is safe to read
+without a fallback meaning something is actually missing.
+
+**Shipped**, narrower than the mockup's own Register (no bulk selection,
+search, or export yet — the filter/sort/exposure-reconciliation core is
+what the RED tests) and Case detail (books vs 2B only, not a three-way
+GSTR-1 comparison — `case_record` has no separate GSTR-1 amount column;
+no "confidence" score, because `Finding` genuinely does not track one, so
+none is invented; no supplier-pattern panel, no drafted-follow-up
+recommended-action text yet — those need supplier-level aggregation this
+slice does not build). Migration `0003_case_evidence` adds
+`subject`/`summary`/`governed_by`/`evidence_count` to `case_record`, the
+real fields "why this case exists" reads.
+
+`register`'s exposure total and `exceptions`' per-group totals are each
+computed from one `list_cases` result inside one function, the same
+structural guarantee B2's dashboard used — a filter and its total cannot
+silently disagree because there is only one place either number comes
+from. Case detail's prev/next walks the *same* reason group the case
+itself belongs to, ordered by creation time, not the whole register.
+
+**Verified live end to end**: three real cases seeded via the API (two
+`amount_mismatch`, one `only_books`) — Exceptions correctly grouped and
+summed (₹1,500 across 2 cases for `amount_mismatch`, ₹96,400 for the
+single `only_books` case whose `portal_amount` is null), clicking through
+to the filtered Register showed the same two rows sorted by exposure
+descending, opening a case rendered the real summary/rule/fact-count text,
+recording an IMS decision showed the ACCEPT badge immediately and
+persisted across a real page reload, and Next/Previous correctly stayed
+within the `amount_mismatch` group — landing on the second case showed no
+IMS badge (a fresh case, not the first one's decision leaking across).
+
 ---
 
 ### B5 · ITC — position · at risk · eligibility
