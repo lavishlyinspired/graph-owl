@@ -498,8 +498,12 @@ export const SCREEN_CONFIGS: Record<string, ScreenConfig> = {
       { label: "HIGH RISK", value: "28", sub: "behaviour-scored", color: "#a13f28" },
       { label: "MERGED IDENTITIES", value: "96", sub: "by entity resolution", color: "#41508f" },
     ],
-    grid: "1.4fr 90px 90px 96px 116px 96px",
-    cols: ["SUPPLIER", "INVOICES", "MATCHED", "MISMATCH", "ITC AT RISK", "RISK"],
+    // Columns describe what the route actually supplies. They previously
+    // described the mockup's six-column shape, so the live five-cell rows
+    // fell under the wrong headings — a rupee figure sat under "MISMATCH"
+    // and a count under "ITC AT RISK".
+    grid: "1.15fr 1.15fr 80px 130px 96px",
+    cols: ["GSTIN", "SUPPLIER", "CASES", "ITC AT RISK", "PENDING"],
     rows: [
       { cells: [c("XYZ Pvt Ltd", "29XXXXX4321X1Z9 · 2 identities merged"), m("382"), m("344"), m("18", "#a86a2c"), m("₹4.82 L", "#a13f28"), m("HIGH", "#a13f28")] },
       { cells: [c("ABC Suppliers", "27XXXXX7788X1Z3"), m("294"), m("271"), m("11", "#a86a2c"), m("₹3.17 L", "#a13f28"), m("HIGH", "#a13f28")] },
@@ -518,7 +522,7 @@ export const SCREEN_CONFIGS: Record<string, ScreenConfig> = {
         { label: "Over 20", value: "10", pct: "1%", color: "#a13f28" },
       ],
     },
-    graphNote: "\u201c2 identities merged\u201d means the graph resolved two source records — an ERP master row and a CRM account — to one supplier at 0.97 confidence. You can inspect and reverse that.",
+    graphNote: "Suppliers are grouped by GSTIN, the identifier the statute keys on. Where the graph resolves two source records to one supplier, that merge and its confidence are inspectable and reversible.",
     related: [rel("Supplier risk", "risk", "behaviour detail"), rel("At risk", "atrisk", "exposure"), rel("Follow-ups", "followups", "chase list")],
     copilot: { text: "96 suppliers were merged from two source records this period. Two of those merges look weak — similar names, no shared PAN.", action: "Review the 2 weak merges" },
     rowActs: ["Open supplier", "Draft follow-up", "View graph"],

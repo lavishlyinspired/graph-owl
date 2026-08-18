@@ -47,5 +47,10 @@ export default function ImsRoute() {
       .finally(() => setLoading(false));
   }, [clientId, periodId]);
 
-  return <GenericScreen config={screenConfig("ims")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["INVOICE", "SUPPLIER", "REASON", "EXPOSURE"] as const;
+  const grid = "1fr 1.3fr 1.2fr 130px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("ims")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

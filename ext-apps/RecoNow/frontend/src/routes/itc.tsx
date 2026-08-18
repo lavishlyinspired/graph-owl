@@ -36,5 +36,9 @@ export default function ItcRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("itc")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["MEASURE", "AMOUNT"] as const;
+  const grid = "1.4fr 160px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("itc")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

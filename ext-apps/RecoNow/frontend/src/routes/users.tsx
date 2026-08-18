@@ -32,5 +32,9 @@ export default function UsersRoute() {
     { label: "Admins", value: String(rows.filter((u) => u.role === "admin").length), sub: "", color: "red" },
   ];
 
-  return <GenericScreen config={screenConfig("users")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["NAME", "EMAIL", "ROLE", "ASSIGNED"] as const;
+  const grid = "1.2fr 1.5fr 110px 100px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("users")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

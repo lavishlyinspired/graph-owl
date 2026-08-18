@@ -43,5 +43,10 @@ export default function FollowupsRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("followups")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["INVOICE", "SUPPLIER", "REASON", "EXPOSURE", "STATUS", "SUBJECT"] as const;
+  const grid = "0.9fr 1.1fr 1.1fr 120px 90px 1.3fr";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("followups")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

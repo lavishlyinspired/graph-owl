@@ -37,5 +37,9 @@ export default function AtRiskRoute() {
     { label: "Pending", value: String(rows.reduce((s, r) => s + r.case_count, 0)), sub: "", color: "red" },
   ];
 
-  return <GenericScreen config={screenConfig("atrisk")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["GSTIN", "SUPPLIER", "AT RISK", "CASES"] as const;
+  const grid = "1.1fr 1.3fr 140px 90px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("atrisk")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

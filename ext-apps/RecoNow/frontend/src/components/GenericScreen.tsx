@@ -18,6 +18,13 @@ interface GenericScreenProps {
   readonly liveKpis?: readonly KpiItem[];
   readonly liveViz?: VizData;
   readonly liveCopilot?: CopilotData;
+  /** Column headings for `liveRows`. A route knows what it is rendering; the
+   *  config knows the mockup's shape. Where they differed, rows rendered
+   *  under the wrong headings — a rupee figure beneath "MISMATCH" and a count
+   *  beneath "ITC AT RISK" on the suppliers screen. Supplying them together
+   *  with the rows is what stops the two drifting apart. */
+  readonly liveCols?: readonly string[];
+  readonly liveGrid?: string;
   readonly loading?: boolean;
   readonly error?: string | null;
 }
@@ -38,13 +45,29 @@ export default function GenericScreen({
   liveKpis,
   liveViz,
   liveCopilot,
+  liveCols,
+  liveGrid,
   loading,
   error,
 }: GenericScreenProps) {
   const effectiveRows = liveRows ?? [];
   const effectiveKpis = liveKpis ?? [];
+  const effectiveCols = liveCols ?? config.cols;
+  const effectiveGrid = liveGrid ?? config.grid;
   const [drawerRow, setDrawerRow] = useState<number | null>(null);
   const navigate = useNavigate();
+
+  // A row under the wrong headings is a chart with mislabelled axes: every
+  // value is shown, and every value means something else. Silence is the
+  // worst outcome, so say so loudly rather than rendering it.
+  const widest = effectiveRows.reduce((n, r) => Math.max(n, r.cells.length), 0);
+  if (widest > 0 && widest !== effectiveCols.length) {
+    console.error(
+      `GenericScreen("${config.title}"): ${effectiveCols.length} column headings for rows of ` +
+        `${widest} cells. Values are being rendered under headings that do not describe them. ` +
+        `Pass liveCols alongside liveRows.`,
+    );
+  }
 
   const handleRelated = (route: string) => {
     // Routes are mounted at `/${route}` by router.tsx, not under an `/r/`
@@ -96,10 +119,10 @@ export default function GenericScreen({
             <div className="overflow-hidden rounded-[10px] border border-reco-line bg-white">
               <div
                 className="grid gap-3 border-b border-reco-line bg-reco-panel-2 px-[18px] py-2.5 font-mono text-[9.5px] tracking-[0.1em] text-reco-t4"
-                style={{ gridTemplateColumns: `28px ${config.grid} 96px` }}
+                style={{ gridTemplateColumns: `28px ${effectiveGrid} 96px` }}
               >
                 <span>☐</span>
-                {config.cols.map((col) => (
+                {effectiveCols.map((col) => (
                   <span key={col}>{col}</span>
                 ))}
                 <span />
@@ -119,7 +142,7 @@ export default function GenericScreen({
             <div
               key={i}
               className="grid cursor-pointer items-center gap-3 border-b border-reco-row px-[18px] py-3 hover:bg-reco-panel-2"
-              style={{ gridTemplateColumns: `28px ${config.grid} 96px` }}
+              style={{ gridTemplateColumns: `28px ${effectiveGrid} 96px` }}
               onClick={() => setDrawerRow(i)}
               onKeyDown={() => setDrawerRow(i)}
               role="button"
@@ -203,7 +226,7 @@ export default function GenericScreen({
           {drawerRow !== null && effectiveRows[drawerRow] !== undefined && (
             <Drawer
               row={effectiveRows[drawerRow]!}
-              cols={config.cols}
+              cols={effectiveCols}
               title={config.title}
               graphNote={config.graphNote}
               actions={config.rowActs}

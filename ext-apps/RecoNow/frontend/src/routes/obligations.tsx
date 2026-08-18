@@ -52,5 +52,10 @@ export default function ObligationsRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("obligations")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["REASON CODE", "CASES", "EXPOSURE"] as const;
+  const grid = "1.6fr 90px 140px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("obligations")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

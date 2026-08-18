@@ -109,3 +109,44 @@ describe("GenericScreen never presents mockup figures as data", () => {
     expect(screen.getByText(note, { exact: false })).toBeInTheDocument();
   });
 });
+
+describe("column headings describe the cells beneath them", () => {
+  it("uses the caller's own headings when it supplies them", () => {
+    renderScreen(
+      <GenericScreen
+        config={screenConfig("suppliers")}
+        liveCols={["GSTIN", "SUPPLIER", "CASES"]}
+        liveRows={[{ cells: [{ t: "27AAA" }, { t: "Acme" }, { t: "2" }] }]}
+      />,
+    );
+
+    expect(screen.getByText("GSTIN")).toBeInTheDocument();
+    expect(screen.getByText("CASES")).toBeInTheDocument();
+    // The config's own six-column shape must not be used for these rows.
+    expect(screen.queryByText("MISMATCH")).not.toBeInTheDocument();
+    expect(screen.queryByText("RISK")).not.toBeInTheDocument();
+  });
+
+  it("reports a heading/cell count mismatch instead of rendering it silently", () => {
+    // A row rendered under the wrong headings is a chart with mislabelled
+    // axes: every value is displayed, and every value means something else.
+    // The suppliers screen shipped a rupee figure under "MISMATCH" and a
+    // count under "ITC AT RISK" this way.
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => errors.push(args[0]);
+    try {
+      renderScreen(
+        <GenericScreen
+          config={screenConfig("suppliers")}
+          liveCols={["GSTIN", "SUPPLIER"]}
+          liveRows={[{ cells: [{ t: "a" }, { t: "b" }, { t: "c" }] }]}
+        />,
+      );
+    } finally {
+      console.error = original;
+    }
+
+    expect(errors.some((e) => String(e).includes("column"))).toBe(true);
+  });
+});

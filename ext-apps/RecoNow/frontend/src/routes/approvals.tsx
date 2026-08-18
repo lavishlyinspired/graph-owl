@@ -48,5 +48,10 @@ export default function ApprovalsRoute() {
       .finally(() => setLoading(false));
   }, [clientId, periodId]);
 
-  return <GenericScreen config={screenConfig("approvals")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["DECISION", "AMOUNT", "STATUS"] as const;
+  const grid = "1.4fr 140px 120px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("approvals")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

@@ -37,5 +37,10 @@ export default function MappingsRoute() {
     { label: "Avg Tolerance", value: rows.length ? `${(rows.reduce((s, r) => s + r.tolerance, 0) / rows.length * 100).toFixed(0)}%` : "—", sub: "", color: "green" },
   ];
 
-  return <GenericScreen config={screenConfig("mappings")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["DATASET", "FIELDS MAPPED", "TOLERANCE", "UPDATED"] as const;
+  const grid = "1.2fr 130px 110px 130px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("mappings")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

@@ -37,5 +37,9 @@ export default function CrossPeriodRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("crossperiod")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["PERIOD", "GSTIN", "SUPPLIER", "CASES", "EXPOSURE"] as const;
+  const grid = "1fr 1.1fr 1.2fr 80px 130px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("crossperiod")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

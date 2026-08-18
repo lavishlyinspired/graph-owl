@@ -56,5 +56,10 @@ export default function SuppliersRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("suppliers")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["GSTIN", "SUPPLIER", "CASES", "ITC AT RISK", "PENDING"] as const;
+  const grid = "1.15fr 1.15fr 80px 130px 96px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("suppliers")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

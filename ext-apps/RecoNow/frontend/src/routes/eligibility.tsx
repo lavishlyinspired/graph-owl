@@ -37,5 +37,10 @@ export default function EligibilityRoute() {
     { label: "Eligibility Rate", value: rows.length ? `${((eligible / rows.length) * 100).toFixed(0)}%` : "—", sub: "", color: eligible > rows.length / 2 ? "green" : "red" },
   ];
 
-  return <GenericScreen config={screenConfig("eligibility")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["INVOICE", "SUPPLIER", "ELIGIBILITY", "BOOKS", "2B"] as const;
+  const grid = "1fr 1.2fr 120px 120px 120px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("eligibility")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

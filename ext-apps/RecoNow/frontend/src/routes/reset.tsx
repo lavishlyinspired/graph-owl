@@ -35,5 +35,9 @@ export default function ResetRoute() {
       ]
     : [];
 
-  return <GenericScreen config={screenConfig("reset")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["ENTITY", "COUNT"] as const;
+  const grid = "1.4fr 140px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("reset")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

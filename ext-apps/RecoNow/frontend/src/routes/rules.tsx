@@ -33,5 +33,10 @@ export default function RulesRoute() {
     { label: "Total Matches", value: String(rows.reduce((s, r) => s + r.case_count, 0)), sub: "", color: "amber" },
   ];
 
-  return <GenericScreen config={screenConfig("rules")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["CODE", "RULE", "SEVERITY", "STATE", "CASES"] as const;
+  const grid = "1fr 1.5fr 110px 90px 90px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("rules")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

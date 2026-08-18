@@ -37,5 +37,10 @@ export default function RiskRoute() {
     { label: "Max single exposure", value: `₹${Math.max(0, ...rows.map((r) => r.max_exposure)).toLocaleString()}`, sub: "", color: "red" },
   ];
 
-  return <GenericScreen config={screenConfig("risk")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["GSTIN", "SUPPLIER", "CASES", "TOTAL EXPOSURE", "LARGEST", "PENDING"] as const;
+  const grid = "1.1fr 1.2fr 80px 140px 120px 90px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("risk")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

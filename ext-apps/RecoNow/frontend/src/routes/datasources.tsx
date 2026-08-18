@@ -43,5 +43,9 @@ export default function DatasourcesRoute() {
       .finally(() => setLoading(false));
   }, [clientId, periodId]);
 
-  return <GenericScreen config={screenConfig("datasources")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["KIND", "FILE", "ROWS", "STATE"] as const;
+  const grid = "120px 1.6fr 90px 120px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("datasources")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

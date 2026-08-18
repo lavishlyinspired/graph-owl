@@ -42,5 +42,10 @@ export default function PeriodsRoute() {
       .finally(() => setLoading(false));
   }, [clientId]);
 
-  return <GenericScreen config={screenConfig("periods")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["PERIOD", "STATUS", "FILED"] as const;
+  const grid = "1.3fr 120px 120px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("periods")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }

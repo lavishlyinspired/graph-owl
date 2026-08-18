@@ -34,5 +34,10 @@ export default function DeliverablesRoute() {
     { label: "Export Ready", value: String(rows.filter((d) => d.status !== "drafted").length), sub: "", color: "green" },
   ];
 
-  return <GenericScreen config={screenConfig("deliverables")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds, not the mockup's
+  // own column shape — see GenericScreen's liveCols.
+  const cols = ["DELIVERABLE", "STATUS", "GENERATED"] as const;
+  const grid = "1.5fr 120px 140px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("deliverables")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

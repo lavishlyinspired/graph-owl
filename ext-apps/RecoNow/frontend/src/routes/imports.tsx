@@ -33,5 +33,9 @@ export default function ImportsRoute() {
     { label: "Avg Tolerance", value: rows.length ? `${(rows.reduce((s, r) => s + r.tolerance, 0) / rows.length * 100).toFixed(0)}%` : "—", sub: "", color: "green" },
   ];
 
-  return <GenericScreen config={screenConfig("imports")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["DATASET", "COLUMNS MAPPED", "TOLERANCE", "IMPORTED"] as const;
+  const grid = "1.2fr 140px 110px 130px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("imports")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
 }

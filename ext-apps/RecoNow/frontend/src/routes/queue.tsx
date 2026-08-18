@@ -49,5 +49,9 @@ export default function QueueRoute() {
       .finally(() => setLoading(false));
   }, [clientId, periodId]);
 
-  return <GenericScreen config={screenConfig("queue")} liveRows={rows} liveKpis={kpis} loading={loading} />;
+  // Headings describe the cells this route builds — see liveCols.
+  const cols = ["INVOICE", "SUPPLIER", "REASON", "EXPOSURE"] as const;
+  const grid = "1fr 1.3fr 1.2fr 130px";
+
+  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("queue")} liveRows={rows} liveKpis={kpis} loading={loading} />;
 }
