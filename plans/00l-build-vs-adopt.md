@@ -1079,3 +1079,41 @@ Recorded so the row exists: a check that returns "no candidate, and here is why
 that is the expected answer for wiring work" is worth writing down once per
 class of slice, so the next wiring slice can point at it instead of re-running
 the same searches.
+
+## Postgres driver and migrations for `ext-apps/RecoNow/backend` — checked before Plan 122b Slice B0
+
+B0 replaces `SESSION`/`AI_JOBS` module-level dicts with real, multi-client,
+multi-period Postgres persistence — the first database dependency this
+Python backend has ever had (`requirements.txt` was fastapi, uvicorn,
+pandas, openpyxl, and `-e ../../../connectors/python` before this).
+
+**Driver — `asyncpg` (adopted).** Apache-2.0, actively maintained (pushed
+within the month checked), 8000+ GitHub stars, the standard high-performance
+async Postgres driver for FastAPI. **`psycopg` (v3) was checked first and
+rejected**: PyPI's own metadata omits a license field entirely, and reading
+the actual repository shows why — `LICENSE.txt` is GPL-3.0 family
+(LGPL-3.0). Copyleft is rejected here the same way `rust-igraph` was
+rejected for Epic 38 on the Rust side — a licence gate, not a quality
+judgement; psycopg is a fine driver, just not one this project can depend
+on.
+
+**Migrations — hand-rolled, not adopted, and that is the honest answer.**
+`yoyo-migrations` (Apache-2.0, "database migrations with SQL" — the closest
+Python equivalent to the Rust side's adopted `refinery`) was the first
+candidate checked and **blocked, not rejected**: its PyPI metadata's only
+link is a personal homepage (`ollycope.com`), not a resolvable source
+repository — the same "blocked, not rejected" bucket `opencypher` and `ocg`
+landed in during the Rust engine's own build-vs-adopt passes, for the same
+reason (the licence claim cannot be checked against readable source, and
+there is nowhere to file a bug). Full SQLAlchemy + Alembic was not seriously
+considered: it is a heavy ORM this backend has never needed and does not
+gain from adding — B0's own AC is direct, auditable SQL against 10 small
+tables, not object-relational mapping, and `graph_owl_packs`' own stated
+philosophy in this same monorepo ("no runtime dependencies, on purpose")
+argues the same direction. The chosen shape — numbered `.sql` files in
+`migrations/`, a `schema_migrations` tracking table, applied forward in a
+transaction, with a matching `.down.sql` per file for the AC's own "roll
+back" requirement — is small enough (under 60 lines) to write once, read in
+full in one sitting, and owns no dependency of its own. Revisit if the
+migration set grows past what one file can review, or if a genuinely
+auditable Python migration tool surfaces later.

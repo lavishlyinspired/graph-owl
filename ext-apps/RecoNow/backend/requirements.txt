@@ -1,0 +1,19 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pandas
+openpyxl
+
+# graph-owl integration (plans/118-reco-now-integration.md, Slice 1) —
+# monorepo-relative now that this backend lives at ext-apps/RecoNow/backend.
+-e ../../../connectors/python
+
+# Plan 122b B0: durable, multi-client, multi-period persistence, replacing
+# the SESSION/AI_JOBS module-level dicts. Apache-2.0, checked against
+# psycopg (rejected — LGPL-3.0) in plans/00l-build-vs-adopt.md.
+asyncpg
+
+# dev/test only
+pytest>=8
+httpx2
+pytest-asyncio

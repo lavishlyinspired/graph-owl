@@ -158,6 +158,52 @@ missing its `client_id` predicate still returns plausible rows for a
 single-client fixture — **the isolation tests must use two clients**, or
 the mutation survives.
 
+**Shipped** — `ext-apps/RecoNow/backend/` (moved via `git mv`, `.venv`
+recreated at the new path since a venv's shebang bakes in an absolute
+path). All 10 models landed in `migrations/0001_initial.{up,down}.sql`, a
+hand-rolled migration runner (`app/db.py` — build-vs-adopt entry in `00l`:
+`psycopg` rejected on licence (LGPL-3.0), `yoyo-migrations` blocked on
+auditability, a full ORM judged unnecessary for 10 small tables), and a
+repository module (`app/repo.py`) covering all 10 tables with `client_id`
+(and `period_id`, where the table has one) as a required predicate on every
+scoped read — never an optional filter. `app_user`, not `user`: reserved
+word in every SQL dialect.
+
+Characterisation tests (`tests/test_characterisation.py`) pin the current
+SESSION-based `/api/sample → /api/reconcile → /api/overview` flow's exact
+stats and the working-paper CSV's shape — written and passing against the
+*pre-change* code first, as the plan's own RED instructs.
+
+**Verified, not merely asserted**: the isolation RED tests
+(`tests/test_repo_isolation.py`) run against a real Postgres database (a
+fresh one per test, `CREATE DATABASE` on the same shared, reusable
+`graph-owl-tests` container the Rust suite already uses — no second
+container). Two clients × three periods, exactly as the AC states, plus the
+plan's own named mutant: manually dropping `list_follow_ups`'s `client_id`
+predicate was confirmed to fail the two-client test (client B saw client
+A's follow-up) before being reverted — the test is load-bearing, not
+merely passing by construction. Restart was verified two ways: a second
+pool connection within one test, and — because that alone doesn't rule out
+pool-level caching — two genuinely separate Python processes against a
+dedicated database, the second reading back exactly what the first wrote
+after fully closing its pool. Rollback verified round-trip: migrate → roll
+back → tables gone → re-migrate → tables back.
+
+**Scope boundary, stated rather than silently left**: `main.py` itself
+still reads and writes `SESSION`/`AI_JOBS` — this slice proves the
+persistence and isolation layer is correct in isolation (the AC's own
+bar), not that every HTTP route has been rewired onto it. Wiring
+`client_id`/`period_id` into the request path is deferred to B1, which
+already owns introducing those as real, user-facing concepts (the client
+switcher and period picker) — rewiring the API to require them ahead of
+having a UI to supply them would be scoping the HTTP contract before the
+concept it belongs to exists. `AI_JOBS` specifically is left as an
+in-memory dict rather than made durable: it tracks in-flight async job
+*progress* (an AI draft being generated), which a restart legitimately
+discards and the client re-triggers — persisting it would not buy the
+resumability its own ephemeral nature can't support, unlike the 10 models
+above, which are workflow *decisions* that must survive.
+
 ---
 
 ### B1 · Shell, client switcher, period picker, inbox, Ask
