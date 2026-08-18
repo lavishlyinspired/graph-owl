@@ -18,6 +18,6 @@ export default defineConfig({
   build: { outDir: "dist", assetsDir: "static", emptyOutDir: true },
   // Dev-only. In production the SPA is embedded in the binary and served from
   // the same origin — 00f-ui-architecture.md.
-  server: { proxy: { "/api": { target: "http://localhost:8080", rewrite: (p) => p.replace(/^\/api/, "") } } },
+  server: { port: 5174, proxy: { "/api": { target: "http://localhost:8081", rewrite: (p) => p.replace(/^\/api/, "") } } },
   test: { exclude: ["**/node_modules/**", "**/dist/**", "tests/**"], environment: "jsdom" },
 });

@@ -88,7 +88,7 @@ def _request(
     if token:
         request.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as refused:
@@ -99,6 +99,8 @@ def _request(
         raise LoadError(f"{method} {url} failed: HTTP {refused.code} {detail}") from refused
     except urllib.error.URLError as unreachable:
         raise LoadError(f"{method} {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError as timeout:
+        raise LoadError(f"{method} {url} timed out") from timeout
     except json.JSONDecodeError as not_json:
         raise LoadError(f"{method} {url} returned a non-JSON response") from not_json
 

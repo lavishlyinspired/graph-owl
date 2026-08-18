@@ -233,3 +233,100 @@ export function decideApproval(
     { status },
   );
 }
+
+export interface SupplierSummary {
+  readonly gstin: string;
+  readonly name: string | null;
+  readonly case_count: number;
+  readonly total_exposure: number;
+  readonly pending_count: number;
+}
+
+export function fetchSuppliers(clientId: string, periodId: string): Promise<readonly SupplierSummary[]> {
+  return apiFetch<SupplierSummary[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/suppliers`,
+  );
+}
+
+export interface ItcPosition {
+  readonly books_amount: number;
+  readonly portal_amount: number;
+  readonly exposure: number;
+  readonly case_count: number;
+  readonly pending_count: number;
+}
+
+export function fetchItcPosition(clientId: string, periodId: string): Promise<ItcPosition> {
+  return apiFetch<ItcPosition>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/itc`,
+  );
+}
+
+export interface AtRiskSupplier {
+  readonly gstin: string;
+  readonly name: string | null;
+  readonly at_risk_amount: number;
+  readonly case_count: number;
+}
+
+export function fetchAtRisk(clientId: string, periodId: string): Promise<readonly AtRiskSupplier[]> {
+  return apiFetch<AtRiskSupplier[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/atrisk`,
+  );
+}
+
+export interface FollowUp {
+  readonly case_id: string;
+  readonly invoice_no: string;
+  readonly supplier_name: string | null;
+  readonly reason_code: string | null;
+  readonly exposure: number;
+  readonly status: string;
+  readonly subject: string | null;
+  readonly summary: string | null;
+}
+
+export function fetchFollowUps(clientId: string, periodId: string): Promise<readonly FollowUp[]> {
+  return apiFetch<FollowUp[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/followups`,
+  );
+}
+
+export interface AuthorityRow {
+  readonly authority: string;
+  readonly case_count: number;
+  readonly exposure: number;
+}
+
+export function fetchAuthority(clientId: string, periodId: string): Promise<readonly AuthorityRow[]> {
+  return apiFetch<AuthorityRow[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/authority`,
+  );
+}
+
+export interface ObligationRow {
+  readonly obligation: string;
+  readonly case_count: number;
+  readonly exposure: number;
+}
+
+export function fetchObligations(clientId: string, periodId: string): Promise<readonly ObligationRow[]> {
+  return apiFetch<ObligationRow[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/obligations`,
+  );
+}
+
+export interface RiskSupplier {
+  readonly gstin: string;
+  readonly name: string | null;
+  readonly case_count: number;
+  readonly total_exposure: number;
+  readonly max_exposure: number;
+  readonly pending_count: number;
+}
+
+export function fetchRisk(clientId: string, periodId: string): Promise<readonly RiskSupplier[]> {
+  return apiFetch<RiskSupplier[]>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/risk`,
+  );
+}

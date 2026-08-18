@@ -4,6 +4,7 @@ export const strings = {
   brand: "Reco Now",
   clientIsolationCopy: "Cases, ITC and follow-ups never cross clients.",
   clientPickerHint: "CLIENT · OWN BOOKS, OWN FILING CALENDAR",
+  askButtonLabel: "Ask…",
   askPlaceholder: "Ask about this period, or find an invoice",
   askShortcut: "⌘K",
   askNotEnoughEvidence: "Not enough evidence to answer that from what's in this period.",

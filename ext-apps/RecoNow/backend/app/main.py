@@ -6,6 +6,7 @@ import io
 import json
 import os
 import threading
+import hashlib
 import uuid
 from datetime import date
 from pathlib import Path
@@ -575,7 +576,12 @@ def _ingest_scoped_to_graphowl(client_id: str, period_id: str, kind: str, datase
     scoping mechanism this Python backend cannot add on its own."""
     normalized = _normalize(dataset, mapping)
     turtle = graphowl_client.rows_to_turtle(normalized, kind)
-    source = f"reco-{client_id}-{period_id}-{kind}"
+    # Source name must be 1-64 chars of [a-zA-Z0-9_-].  Two UUIDs + prefix
+    # blow the limit, so we take the first 12 hex chars of a SHA-256 of the
+    # (client_id, period_id, kind) tuple — unique enough for a source graph
+    # name and short enough to pass graph-owl's validation.
+    short_id = hashlib.sha256(f"{client_id}:{period_id}:{kind}".encode()).hexdigest()[:12]
+    source = f"reco-{short_id}-{kind}"
     if not turtle:
         return {"source": source, "landed": 0, "skipped": 0, "rejected": []}
     graphowl_client.delete_document(GRAPH_OWL_SERVER, source, GRAPH_OWL_TOKEN)
@@ -629,16 +635,26 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
             # `governed_by` and `evidence` are "never absent"/"never
             # empty" per that struct's own doc comments, so both are safe
             # to read without a default meaning something real is missing.
-            invoice_no = str(finding.get("subject") or finding.get("id") or "unknown")
+            subject_uri = str(finding.get("subject") or finding.get("id") or "unknown")
+            # Evidence carries the real invoice_number and supplier_gstin as
+            # named bindings — extract them so the case is human-readable
+            # instead of showing a raw URI.
+            evidence = finding.get("evidence") or []
+            ev = {e["var"]: e["value"] for e in evidence if "var" in e and "value" in e}
+            invoice_no = ev.get("number") or subject_uri
+            supplier_gstin = ev.get("gstin")
+            supplier_name = None
             if invoice_no in existing:
                 continue
             await repo.create_case(
                 conn, client_id=client_id, period_id=period_id, invoice_no=invoice_no,
                 reason_code=finding.get("label"),
-                subject=finding.get("subject"),
+                subject=subject_uri,
                 summary=finding.get("summary"),
                 governed_by=finding.get("governed_by"),
-                evidence_count=len(finding.get("evidence") or []),
+                evidence_count=len(evidence),
+                supplier_gstin=supplier_gstin,
+                supplier_name=supplier_name,
             )
             existing.add(invoice_no)
             created += 1
@@ -1220,3 +1236,238 @@ def _template_report(stats: dict, classifications: list[dict], period: dict) -> 
         f"3. Claim eligible ITC in GSTR-3B Table 4 up to {rc.display_tax(stats['gross_itc'])}.\n"
     )
     return report
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/suppliers")
+async def list_suppliers(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                supplier_gstin,
+                supplier_name,
+                COUNT(*) as case_count,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as total_exposure,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+              AND supplier_gstin IS NOT NULL
+            GROUP BY supplier_gstin, supplier_name
+            ORDER BY total_exposure DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "gstin": r["supplier_gstin"],
+            "name": r["supplier_name"],
+            "case_count": r["case_count"],
+            "total_exposure": float(r["total_exposure"]),
+            "pending_count": r["pending_count"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/itc")
+async def itc_position(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 
+                COALESCE(SUM(COALESCE(books_amount, 0)), 0) as total_books_amount,
+                COALESCE(SUM(COALESCE(portal_amount, 0)), 0) as total_portal_amount,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as total_exposure,
+                COUNT(*) as total_cases,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_cases
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+            """,
+            client_id,
+            period_id,
+        )
+    return {
+        "books_amount": float(row["total_books_amount"]),
+        "portal_amount": float(row["total_portal_amount"]),
+        "exposure": float(row["total_exposure"]),
+        "case_count": row["total_cases"],
+        "pending_count": row["pending_cases"],
+    }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/atrisk")
+async def at_risk(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                supplier_gstin,
+                supplier_name,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as at_risk_amount,
+                COUNT(*) as case_count
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+              AND supplier_gstin IS NOT NULL
+            GROUP BY supplier_gstin, supplier_name
+            ORDER BY at_risk_amount DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "gstin": r["supplier_gstin"],
+            "name": r["supplier_name"],
+            "at_risk_amount": float(r["at_risk_amount"]),
+            "case_count": r["case_count"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/followups")
+async def list_followups(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                id,
+                invoice_no,
+                supplier_name,
+                reason_code,
+                ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0))) as exposure,
+                status,
+                subject,
+                summary
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+              AND status IN ('pending', 'open')
+            ORDER BY exposure DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "case_id": str(r["id"]),
+            "invoice_no": r["invoice_no"],
+            "supplier_name": r["supplier_name"],
+            "reason_code": r["reason_code"],
+            "exposure": float(r["exposure"]),
+            "status": r["status"],
+            "subject": r["subject"],
+            "summary": r["summary"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/authority")
+async def authority(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                governed_by,
+                COUNT(*) as count,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as exposure
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+              AND governed_by IS NOT NULL
+            GROUP BY governed_by
+            ORDER BY exposure DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "authority": r["governed_by"],
+            "case_count": r["count"],
+            "exposure": float(r["exposure"]),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/obligations")
+async def obligations(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                reason_code,
+                COUNT(*) as count,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as exposure
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+            GROUP BY reason_code
+            ORDER BY count DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "obligation": r["reason_code"] or "Unspecified",
+            "case_count": r["count"],
+            "exposure": float(r["exposure"]),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/risk")
+async def supplier_risk(client_id: str, period_id: str):
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                supplier_gstin,
+                supplier_name,
+                COUNT(*) as case_count,
+                COALESCE(SUM(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as total_exposure,
+                COALESCE(MAX(
+                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
+                ), 0) as max_exposure,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count
+            FROM case_record
+            WHERE client_id = $1 AND period_id = $2
+              AND supplier_gstin IS NOT NULL
+            GROUP BY supplier_gstin, supplier_name
+            ORDER BY total_exposure DESC
+            """,
+            client_id,
+            period_id,
+        )
+    return [
+        {
+            "gstin": r["supplier_gstin"],
+            "name": r["supplier_name"],
+            "case_count": r["case_count"],
+            "total_exposure": float(r["total_exposure"]),
+            "max_exposure": float(r["max_exposure"]),
+            "pending_count": r["pending_count"],
+        }
+        for r in rows
+    ]

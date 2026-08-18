@@ -62,6 +62,7 @@ NAMESPACE = "https://graph-owl.dev/packs/gst#"
 #: [gst:Gstr1Invoice] already carries."
 CLASS_BY_KIND = {
     "books": "gst:PurchaseInvoice",
+    "portal": "gst:Gstr2bInvoice",
     "gstr2b": "gst:Gstr2bInvoice",
     "gstr1": "gst:Gstr1Invoice",
 }
@@ -71,6 +72,7 @@ CLASS_BY_KIND = {
 #: when their own uploads land, never in the same call.
 LINK_PREDICATE_BY_KIND = {
     "books": "gst:recordedIn",
+    "portal": "gst:reflectedIn",
     "gstr2b": "gst:reflectedIn",
     "gstr1": "gst:appearsIn",
 }
@@ -86,7 +88,7 @@ LINK_PREDICATE_BY_KIND = {
 #: 16 August 2026, the moment GSTR-1 data first existed in the store for
 #: this rule to actually run against (verify-reconcile-parity.py's
 #: SupplierNotFiled count came back 10 against an expected 2).
-KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b"}
+KINDS_NEEDING_INVOICE_KEY = {"books", "gstr1", "gstr2b", "portal"}
 
 #: Kinds whose invoice subject needs a combined `gst:taxAmount` —
 #: `missing-in-gstr2b.sparql` reads it off the books side,
@@ -345,7 +347,7 @@ def import_document(
     if token:
         request.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as refused:
@@ -353,6 +355,8 @@ def import_document(
         raise IngestError(f"POST {url} failed: HTTP {refused.code} {detail}") from refused
     except urllib.error.URLError as unreachable:
         raise IngestError(f"POST {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError:
+        raise IngestError(f"POST {url} timed out") from None
 
 
 def delete_document(server: str, source: str, token: str | None = None) -> dict:
@@ -380,7 +384,7 @@ def delete_document(server: str, source: str, token: str | None = None) -> dict:
     if token:
         request.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as refused:
@@ -388,6 +392,8 @@ def delete_document(server: str, source: str, token: str | None = None) -> dict:
         raise IngestError(f"DELETE {url} failed: HTTP {refused.code} {detail}") from refused
     except urllib.error.URLError as unreachable:
         raise IngestError(f"DELETE {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError as timeout:
+        raise IngestError(f"DELETE {url} timed out") from timeout
 
 
 def list_findings(server: str, token: str | None = None) -> list:
@@ -407,7 +413,7 @@ def list_findings(server: str, token: str | None = None) -> list:
     if token:
         request.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             raw = response.read()
             return json.loads(raw) if raw else []
     except urllib.error.HTTPError as refused:
@@ -415,6 +421,8 @@ def list_findings(server: str, token: str | None = None) -> list:
         raise IngestError(f"GET {url} failed: HTTP {refused.code} {detail}") from refused
     except urllib.error.URLError as unreachable:
         raise IngestError(f"GET {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError as timeout:
+        raise IngestError(f"GET {url} timed out") from timeout
 
 
 __all__ = [

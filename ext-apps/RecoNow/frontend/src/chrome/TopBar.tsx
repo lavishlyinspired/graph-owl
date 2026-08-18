@@ -41,7 +41,7 @@ export function TopBar({
         className="flex h-8 max-w-[330px] flex-1 items-center gap-2.5 rounded-md border border-reco-line bg-reco-panel-2 px-2.5 disabled:opacity-50"
       >
         <span className="text-[12px] text-reco-t5">⌕</span>
-        <span className="text-[12px] text-reco-t4">{strings.askPlaceholder}</span>
+        <span className="text-[12px] text-reco-t4">{strings.askButtonLabel}</span>
         <span className="ml-auto rounded border border-reco-line px-1.5 py-0.5 font-mono text-[9.5px] text-reco-t5">
           {strings.askShortcut}
         </span>
