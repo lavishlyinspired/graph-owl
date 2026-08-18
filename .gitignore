@@ -1,6 +1,12 @@
 /target
 .DS_Store
 .env
+.env.local
+.env.*.local
+
+# Every node_modules, anywhere — the path-anchored entries below predate this
+# and are kept, but a new frontend directory should not need a new line here.
+node_modules/
 
 # Local reference material, not part of this project — never committed
 .claude/docs/
@@ -96,3 +102,7 @@ __pycache__/
 .git/credentials
 research
 /research
+
+# Stryker output
+/ext-apps/RecoNow/frontend/reports/
+.stryker-tmp/

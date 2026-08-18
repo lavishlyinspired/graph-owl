@@ -17,6 +17,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PGHOST="${PGHOST:-127.0.0.1}"
 PGPORT="${PGPORT:-55000}"
+# The local test container's own default credentials, not a secret. Kept
+# overridable so a deployment that does have real ones never has to edit this
+# script — set PGUSER/PGPASSWORD (or the DATABASE_URLs outright) in the
+# environment instead. See ext-apps/RecoNow/.env.example.
+PGUSER="${PGUSER:-postgres}"
+PGPASSWORD="${PGPASSWORD:-postgres}"
+GRAPHOWL_DATABASE_URL="${GRAPHOWL_DATABASE_URL:-postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/graphowl_reconow}"
+RECONOW_DATABASE_URL="${RECONOW_DATABASE_URL:-postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/reconow}"
 LOGDIR="${LOGDIR:-/tmp/reconow-run}"
 mkdir -p "$LOGDIR"
 
@@ -27,7 +35,7 @@ mkdir -p "$LOGDIR"
 echo "==> graph-owl-server on :8080"
 lsof -ti:8080 | xargs kill 2>/dev/null || true
 sleep 1
-DATABASE_URL="postgresql://postgres:postgres@${PGHOST}:${PGPORT}/graphowl_reconow" \
+DATABASE_URL="$GRAPHOWL_DATABASE_URL" \
 BIND_ADDR="0.0.0.0:8080" OIDC_ISSUER= GRAPH_OWL_JWT_SECRET= \
   nohup "$ROOT/target/debug/graph-owl-server" > "$LOGDIR/graphowl.log" 2>&1 &
 
@@ -35,7 +43,7 @@ echo "==> reco-now backend on :8000"
 lsof -ti:8000 | xargs kill 2>/dev/null || true
 sleep 1
 cd "$ROOT/ext-apps/RecoNow/backend"
-DATABASE_URL="postgresql://postgres:postgres@${PGHOST}:${PGPORT}/reconow" \
+DATABASE_URL="$RECONOW_DATABASE_URL" \
 GRAPH_OWL_SERVER="http://127.0.0.1:8080" \
   nohup .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 \
   > "$LOGDIR/reconow.log" 2>&1 &
