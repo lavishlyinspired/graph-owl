@@ -105,6 +105,51 @@ class TestTheRule:
             check_claim(text="₹45000 at risk", fact_ids=["f2"], facts=FACTS)
 
 
+class TestDigitsInsideASuppliedIdentifier:
+    """**Found 19 August 2026 by running a real model against real data.**
+
+    The model wrote a genuinely accurate explanation and was refused for
+    "states 003, 06" — fragments of `INV-MAR-003` and the GSTIN
+    `06AAKCA0977G1Z3`, both of which were supplied. `numbers_in` correctly
+    declines to read digits *inside* an identifier as an amount, but phrasing
+    varies: an identifier split across a line, quoted, or written with a
+    different dash reaches the checker as a bare number.
+
+    **A number appearing within a supplied identifier is supported by it.**
+    Refusing otherwise makes the rule non-deterministic from the reader's point
+    of view — the same true explanation passes or fails depending on how the
+    model happened to punctuate — and a safety rule that refuses correct
+    statements at random is one that gets switched off.
+
+    The property that matters is unchanged: a figure appearing in **no** fact,
+    identifier or otherwise, is still refused.
+    """
+
+    FACTS = {
+        "invoice": {"value": "INV-MAR-003"},
+        "gstin": {"value": "06AAKCA0977G1Z3"},
+        "tax": {"value": "30000"},
+    }
+
+    def test_a_fragment_of_a_supplied_invoice_number_is_supported(self):
+        check_claim(text="Invoice 003 is the one", fact_ids=["invoice"], facts=self.FACTS)
+
+    def test_a_fragment_of_a_supplied_gstin_is_supported(self):
+        check_claim(text="the 06 state code", fact_ids=["gstin"], facts=self.FACTS)
+
+    def test_a_figure_in_no_supplied_fact_is_still_refused(self):
+        """The property the whole rule exists for, unchanged."""
+        with pytest.raises(GroundingError, match="820000"):
+            check_claim(text="short by 8,20,000", fact_ids=["tax"], facts=self.FACTS)
+
+    def test_a_fragment_of_an_uncited_identifier_is_not_supported(self):
+        """Support must still be *cited*. Otherwise the relaxation becomes "is
+        this digit anywhere in the database", which is not a claim about this
+        case."""
+        with pytest.raises(GroundingError):
+            check_claim(text="the 06 state code", fact_ids=["tax"], facts=self.FACTS)
+
+
 class TestRenderingRefusesRatherThanFabricates:
     def test_a_grounded_claim_renders(self):
         rendered = render_claim(

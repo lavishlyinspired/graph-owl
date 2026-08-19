@@ -28,7 +28,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import case_narrative, explain, rule_guidance
+from . import case_explainer, case_narrative, explain, rule_guidance
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1334,7 +1334,15 @@ async def register_route(client_id: str, period_id: str, reason_code: str | None
         cases = await repo.list_cases(conn, client_id=client_id, period_id=period_id)
     if reason_code is not None:
         cases = [c for c in cases if c["reason_code"] == reason_code]
-    rows = sorted((_case_row(c) for c in cases), key=lambda r: r["exposure"], reverse=True)
+    # Human title, meaning and next action from the pack, plus what is wrong
+    # with *this* invoice computed from its own figures — so the list is
+    # readable without opening anything, and `gst:AmountMismatch` never
+    # reaches a business reader as a label.
+    rows = rule_guidance.decorate(
+        sorted((_case_row(c) for c in cases), key=lambda r: r["exposure"], reverse=True),
+        _pack_guidance(),
+    )
+    rows = [{**row, "narrative": case_narrative.narrate(row)} for row in rows]
     # Not `sum(r["exposure"] ...)`: two rules flagging one invoice would count
     # the same rupees twice. See `period_exposure`.
     return {"rows": rows, "total_exposure": period_exposure(cases)}
@@ -1523,6 +1531,93 @@ async def agent_activity_route() -> dict:
         # Stated so a reader does not mistake this for an audit trail.
         "scope": "this process only — a durable record belongs in graph-owl agent activity",
     }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/cases/{case_id}/explain")
+async def explain_case_route(client_id: str, period_id: str, case_id: str) -> dict:
+    """Why this rule fired for **this** invoice, from its real data.
+
+    The pack's guidance says what the rule means; `case_narrative` states the
+    two headline figures. Neither reads the rest of the row. This gathers both
+    sides in full — tax heads, dates, HSN, place of supply — and asks a model
+    to say what is notable, which is the kind of work current practice on AI in
+    tax says models are actually good at.
+
+    **Every figure is supplied, and nothing outside them survives.** A model
+    handed a case with no numbers can only invent them; handed every number in
+    the row it can be specific without inventing anything. Anything it states
+    beyond the supplied set is refused by `grounding` and the computed sentence
+    shown instead — so the worst case is the answer we had before, never a
+    confident wrong one.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+        if case is None:
+            raise HTTPException(status_code=404, detail="no such case")
+        stored = await repo.list_dataset_uploads(conn, client_id=client_id, period_id=period_id)
+
+    by_kind = {e["kind"]: e for e in stored}
+
+    def row_for(kind: str) -> dict | None:
+        entry = by_kind.get(kind)
+        if entry is None:
+            return None
+        dataset = {"headers": entry["headers"], "rows": entry["rows"]}
+        rows = graphowl_client.net_credit_notes(
+            graphowl_client.aggregate_invoice_lines(_normalize(dataset, entry["mapping"]))
+        )
+        wanted = graphowl_client.normalize_invoice_no(case["invoice_no"])
+        return next(
+            (
+                r
+                for r in rows
+                if graphowl_client.normalize_invoice_no(r.get("invoice_no")) == wanted
+            ),
+            None,
+        )
+
+    guidance = _pack_guidance().get(str(case.get("reason_code")), {})
+    facts = case_explainer.gather_facts(
+        case=case,
+        books_row=row_for("books"),
+        portal_row=row_for("gstr2b"),
+        guidance=guidance,
+    )
+
+    computed = case_narrative.narrate(case)
+    if not ai.is_available():
+        return {
+            "text": computed,
+            "source": "computed",
+            "facts": facts,
+            # Said out loud rather than left to look like the model's answer.
+            "note": "No inference model is reachable, so this is the computed "
+            "explanation. Every figure in it is read from your data.",
+        }
+
+    drafted = ai.chat(
+        "You are a precise Indian indirect-tax assistant. You never invent figures.",
+        case_explainer.build_prompt(facts),
+    )
+    if not drafted:
+        return {"text": computed, "source": "computed", "facts": facts, "note": None}
+
+    checked = grounding.ground_draft(
+        draft=drafted,
+        supplied=case_explainer.numeric_facts(facts),
+        log=AGENT_REFUSALS,
+    )
+    if not checked["grounded"]:
+        return {
+            "text": computed,
+            "source": "computed",
+            "facts": facts,
+            "note": "The model's explanation stated a figure your data does not "
+            "carry, so it was refused. This is the computed explanation.",
+            "refusal": checked["reason"],
+        }
+    return {"text": drafted.strip(), "source": "model", "facts": facts, "note": None}
 
 
 @app.get("/api/clients/{client_id}/cases/{case_id}/defence")

@@ -204,6 +204,13 @@ export function fetchDashboard(clientId: string, periodId: string): Promise<Dash
 }
 
 export interface RegisterRow {
+  /** The rule's authored human title, its meaning and what to do — from the
+   *  pack, never from this file. */
+  readonly title?: string | null;
+  readonly meaning?: string | null;
+  readonly next_action?: string | null;
+  /** What is wrong with *this* invoice, computed from its own figures. */
+  readonly narrative?: string | null;
   readonly id: string;
   readonly invoice_no: string;
   readonly reason_code: string | null;
@@ -372,6 +379,31 @@ export interface WorkingPaper {
 export function fetchWorkingPaper(clientId: string, periodId: string): Promise<WorkingPaper> {
   return apiFetch<WorkingPaper>(
     `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/working-paper`,
+  );
+}
+
+/** A case explained from its own real data.
+ *
+ *  `source` says which produced the words: `"model"` when an inference model
+ *  read the whole row and wrote the explanation, `"computed"` when it was
+ *  unreachable, returned nothing, or stated a figure the data does not carry —
+ *  in which case `refusal` says what it tried to claim. A reader deciding how
+ *  much to trust a sentence needs to know which produced it. */
+export interface CaseExplanation {
+  readonly text: string;
+  readonly source: "model" | "computed";
+  readonly note: string | null;
+  readonly refusal?: string;
+  readonly facts?: Record<string, unknown>;
+}
+
+export function fetchCaseExplanation(
+  clientId: string,
+  periodId: string,
+  caseId: string,
+): Promise<CaseExplanation> {
+  return apiFetch<CaseExplanation>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/cases/${encodeURIComponent(caseId)}/explain`,
   );
 }
 

@@ -88,10 +88,33 @@ def check_claim(*, text: str, fact_ids: list[str], facts: dict[str, Any]) -> Non
         )
 
     supported = set()
+    #: The raw text of every cited fact, so a digit *inside* a supplied
+    #: identifier counts as supported by it.
+    #:
+    #: **Found by running a real model against real data.** It wrote a
+    #: genuinely accurate explanation and was refused for "states 003, 06" —
+    #: fragments of `INV-MAR-003` and `06AAKCA0977G1Z3`, both supplied.
+    #: `numbers_in` correctly declines to read digits inside an identifier as
+    #: an *amount*, but phrasing varies: quoted, hyphenated differently, or
+    #: split across a line, the same identifier reaches the checker as a bare
+    #: number. Refusing then makes the rule non-deterministic from the
+    #: reader's point of view — the same true sentence passes or fails on
+    #: punctuation — and a safety rule that refuses correct statements at
+    #: random is one that gets switched off.
+    cited_text = ""
     for fid in fact_ids:
-        supported |= numbers_in(str(facts[fid].get("value", "")))
+        raw = str(facts[fid].get("value", ""))
+        supported |= numbers_in(raw)
+        cited_text += " " + raw.replace(",", "")
 
-    unsupported = sorted(claimed - supported)
+    unsupported = sorted(
+        number
+        for number in claimed - supported
+        # Still requires the digits to appear in something cited. This is not
+        # "is this number anywhere in the database" — an uncited fact supports
+        # nothing, and a figure in no cited fact at all is still refused.
+        if number not in cited_text
+    )
     if unsupported:
         raise GroundingError(
             f"states {', '.join(unsupported)}, which no cited fact carries"
