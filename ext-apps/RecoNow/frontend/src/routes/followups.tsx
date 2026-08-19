@@ -3,6 +3,7 @@ import { SectionTabs } from "../components/SectionTabs";
 import { sectionsFor } from "../lib/sections";
 import type { Capability } from "../lib/sections";
 import FollowupsMainPanel from "../panels/followupsMain";
+import FollowUpDraftsPanel from "../panels/followUpDrafts";
 import SuppliersPanel from "../panels/suppliers";
 
 /** Followups — Plan 123 Slice D.
@@ -15,6 +16,7 @@ import SuppliersPanel from "../panels/suppliers";
  *  console had is left without a home. */
 const PANELS: Partial<Record<Capability, React.ComponentType>> = {
   "follow-ups": FollowupsMainPanel,
+  "follow-up-drafts": FollowUpDraftsPanel,
   "suppliers": SuppliersPanel,
 };
 

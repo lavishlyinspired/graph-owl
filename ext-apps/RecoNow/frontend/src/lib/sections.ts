@@ -38,6 +38,7 @@ export const CAPABILITIES = [
   "ims",
   "approvals",
   "follow-ups",
+  "follow-up-drafts",
   "suppliers",
   "authority",
   "obligations",
@@ -180,6 +181,11 @@ export const SECTIONS: Partial<Record<RouteName, readonly Section[]>> = {
   ],
   followups: [
     { capability: "follow-ups", label: "Follow-ups", because: "the stage's own purpose" },
+    {
+      capability: "follow-up-drafts",
+      label: "Draft messages",
+      because: "the vendor agent drafts these on every reconciliation and nothing rendered them",
+    },
     {
       capability: "suppliers",
       label: "Suppliers",

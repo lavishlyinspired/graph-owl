@@ -471,6 +471,25 @@ export function fetchClientReport(clientId: string, periodId: string): Promise<C
   );
 }
 
+export interface FollowUpGroup {
+  readonly supplier_gstin: string;
+  readonly supplier_name: string;
+  readonly invoices: readonly string[];
+  readonly at_risk: number;
+  readonly message: string;
+  readonly source: "model" | "computed";
+}
+
+export function generateFollowUps(
+  clientId: string,
+  periodId: string,
+): Promise<{ readonly groups: readonly FollowUpGroup[]; readonly run_id: string }> {
+  return apiPost(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/follow-ups/drafts`,
+    {},
+  );
+}
+
 export interface AtRiskSupplier {
   readonly gstin: string;
   readonly name: string | null;

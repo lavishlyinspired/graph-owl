@@ -29,7 +29,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import case_explainer, case_narrative, client_report, explain, rule_guidance
+from . import case_explainer, case_narrative, client_report, explain, follow_ups, rule_guidance
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1977,6 +1977,41 @@ async def waive_case_route(client_id: str, case_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=502, detail=f"graph-owl refused the waiver: {exc}") from exc
 
     return {"waived": True, "waiver": request}
+
+
+@app.post("/api/clients/{client_id}/periods/{period_id}/follow-ups/drafts")
+async def follow_up_drafts_route(client_id: str, period_id: str) -> dict:
+    """Draft a chase message per supplier who has not filed.
+
+    **Runs the vendor agent rather than duplicating it.** The agent already
+    knows which findings mean "the supplier has not filed", already dedupes an
+    invoice flagged by two rules, and already puts every draft through the
+    grounding check. A second implementation here would be a second set of
+    those decisions to keep in step.
+
+    Grouped per supplier, because that is who receives it: a supplier with
+    three unfiled invoices gets one message, not three.
+    """
+    cases = await _cases_for(client_id, period_id)
+    model = (lambda prompt: ai.chat(AGENT_SYSTEM_PROMPT, prompt)) if ai.is_available() else None
+
+    run = agents.run_vendor(
+        cases=[dict(c) for c in cases],
+        registry=AGENT_REGISTRY,
+        model=model,
+        context={"client_id": client_id, "period_id": period_id},
+    )
+    AGENT_RUNS.append({**run.summary(), "spans": run.spans, "writes": run.writes,
+                       "refusals": run.refusals,
+                       "started_at": datetime.now(timezone.utc).isoformat()})
+
+    drafts = next((w["payload"]["drafts"] for w in run.writes if "drafts" in w["payload"]), [])
+    return {
+        "groups": follow_ups.group_drafts(drafts=drafts, cases=[dict(c) for c in cases]),
+        # The run is linked so a reader can see what the agent actually did —
+        # every model call, and anything it was refused.
+        "run_id": run.id,
+    }
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/client-report")
