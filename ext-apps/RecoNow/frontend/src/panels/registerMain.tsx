@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Link, useOutletContext, useSearchParams } from "react-router-dom";
 import { fetchRegister, type Register } from "../lib/api";
 import { ExplainCase } from "../components/ExplainCase";
+import { groupFindings } from "../lib/findingGroups";
 import { DetailDrawer } from "../components/DetailDrawer";
-import { WhyPopover } from "../components/WhyPopover";
 import type { WorkspaceState } from "../lib/workspace";
 
 function formatRupees(amount: number): string {
@@ -20,6 +20,7 @@ export default function RegisterRoute() {
   // shows an empty screen.
   const [openCase, setOpenCase] = useState<string | null>(null);
   const selected = register?.rows.find((r) => r.id === openCase) ?? null;
+  const groups = groupFindings(register?.rows ?? []);
 
   useEffect(() => {
     if (!clientId || !periodId) return;
@@ -57,62 +58,76 @@ export default function RegisterRoute() {
         )}
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-reco-line bg-reco-panel">
-        <div className="grid grid-cols-[130px_1fr_120px_120px_110px_140px] gap-3 border-b border-reco-line bg-reco-panel-2 px-4 py-2 font-mono text-[9.5px] tracking-[0.1em] text-reco-t5">
-          <span>INVOICE</span>
-          <span>SUPPLIER</span>
-          <span className="text-right">BOOKS</span>
-          <span className="text-right">2B</span>
-          <span className="text-right">DELTA</span>
-          <span>REASON</span>
-        </div>
-        {register?.rows.length === 0 && (
-          <div className="px-4 py-4 text-[12.5px] text-reco-t4">No cases in this filter yet.</div>
-        )}
-        {register?.rows.map((row) => (
-          <div key={row.id} className="border-b border-reco-line-2">
-          <button
-            type="button"
-            aria-expanded={openCase === row.id}
-            onClick={() => {
-              const next = openCase === row.id ? null : row.id;
-              setOpenCase(next);
-              // Also record the selection in the URL, so the Case detail tab
-              // has something to show. It read `?id=` and nothing set it, so
-              // that tab was permanently empty and told the reader to open a
-              // case from a list that offered no way to.
-              const updated = new URLSearchParams(params);
-              if (next) updated.set("id", next);
-              else updated.delete("id");
-              setParams(updated, { replace: true });
-            }}
-            className="grid w-full grid-cols-[130px_1fr_120px_120px_110px_140px] items-center gap-3 px-4 py-2.5 text-left text-[12.5px] hover:bg-reco-panel-2"
-          >
-            <span className="font-mono text-reco-t1">{row.invoice_no}</span>
-            <div>
-              <div className="text-reco-t1">{row.supplier_name ?? "—"}</div>
-              <div className="font-mono text-[10px] text-reco-t5">{row.supplier_gstin ?? ""}</div>
-            </div>
-            <span className="text-right font-mono text-reco-t2">
-              {row.books_amount != null ? formatRupees(row.books_amount) : "—"}
+      {/* **Grouped by who has to act, not listed flat.** A flat exception
+          table makes a reviewer decide for every row whether it is their
+          problem, the supplier's, or the law's — twelve times a period, from
+          a rule label. The categories are authored in the pack, because the
+          remedy is domain knowledge. */}
+      {groups.map((group) => (
+        <section key={group.category} className="mb-4">
+          <div className="mb-1.5 flex items-baseline gap-2">
+            <h2 className="text-[13px] font-semibold text-reco-t1">{group.label}</h2>
+            <span className="font-mono text-[11px] text-reco-t5">
+              {group.count} · {formatRupees(group.exposure)}
             </span>
-            <span className="text-right font-mono text-reco-t2">
-              {row.portal_amount != null ? formatRupees(row.portal_amount) : "—"}
-            </span>
-            <span className="text-right font-mono text-reco-bad">{formatRupees(row.exposure)}</span>
-            <span className="text-[11px] text-reco-t4">
-              {row.title ?? row.reason_code ?? "—"}
-              <WhyPopover
-                title={row.title ?? row.reason_code ?? ""}
-                explanation={{ meaning: row.meaning, next_action: row.next_action }}
-                align="right"
-              />
-            </span>
-          </button>
-
+            <span className="text-[11.5px] text-reco-t4">{group.blurb}</span>
           </div>
-        ))}
-      </div>
+
+          <div className="overflow-hidden rounded-lg border border-reco-line bg-reco-panel">
+            {group.rules.map((rule) => (
+              <div key={rule.reason_code}>
+                <div className="flex items-baseline gap-2 border-b border-reco-line bg-reco-panel-2 px-4 py-1.5">
+                  <span className="text-[12px] text-reco-t1">{rule.title}</span>
+                  <span className="font-mono text-[10px] text-reco-t5">{rule.reason_code}</span>
+                  <span className="flex-1" />
+                  <span className="font-mono text-[11px] text-reco-t2">
+                    {rule.rows.length} · {formatRupees(rule.exposure)}
+                  </span>
+                </div>
+
+                {rule.rows.map((row) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    onClick={() => {
+                      const next = openCase === row.id ? null : row.id;
+                      setOpenCase(next);
+                      const updated = new URLSearchParams(params);
+                      if (next) updated.set("id", next);
+                      else updated.delete("id");
+                      setParams(updated, { replace: true });
+                    }}
+                    className="grid w-full grid-cols-[130px_1fr_120px_120px_110px] items-center gap-3 border-b border-reco-line-2 px-4 py-2.5 text-left text-[12.5px] last:border-b-0 hover:bg-reco-panel-2"
+                  >
+                    <span className="font-mono text-reco-t1">{row.invoice_no}</span>
+                    <div>
+                      <div className="text-reco-t1">{row.supplier_name ?? "—"}</div>
+                      <div className="font-mono text-[10px] text-reco-t5">
+                        {row.supplier_gstin ?? ""}
+                      </div>
+                    </div>
+                    <span className="text-right font-mono text-reco-t2">
+                      {row.books_amount != null ? formatRupees(row.books_amount) : "—"}
+                    </span>
+                    <span className="text-right font-mono text-reco-t2">
+                      {row.portal_amount != null ? formatRupees(row.portal_amount) : "—"}
+                    </span>
+                    <span className="text-right font-mono text-reco-bad">
+                      {formatRupees(row.exposure)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {groups.length === 0 && (
+        <div className="rounded border border-reco-line px-4 py-8 text-center text-[12.5px] text-reco-t4">
+          Nothing needs attention in this period.
+        </div>
+      )}
 
       {/* Case detail in the drawer rather than expanded in the row: the row
           grew the list every time one was opened, so the next case a reviewer

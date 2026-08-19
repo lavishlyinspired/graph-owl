@@ -400,6 +400,7 @@ title = "Claimed, not available in GSTR-2B"
 meaning = "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it."
 next_action = "Upload the GSTR-2A for this period — it separates 'the supplier never filed' from 'they filed and it did not reach you'."
 tone = "danger"
+category = "follow-up"
 
 [[findings]]
 label = "gst:AmountMismatch"
@@ -428,6 +429,7 @@ title = "Your books and GSTR-2B disagree"
 meaning = "Both sides report the invoice and the values differ by more than the cap in force allowed."
 next_action = "Compare against the physical invoice, then correct whichever side is wrong."
 tone = "warning"
+category = "data"
 
 [[findings]]
 label = "gst:ITCNotAvailable"
@@ -459,6 +461,7 @@ title = "Credit reported as unavailable"
 meaning = "The invoice matches perfectly and the authority reports the credit as not available."
 next_action = "Check whether it falls under Section 17(5) blocked credits. Do not claim it on the strength of the match alone."
 tone = "danger"
+category = "compliance"
 
 [[findings]]
 label = "gst:Reversed"
@@ -491,6 +494,7 @@ title = "Flagged as reverse charge"
 meaning = "The invoice matches and the authority flags it as reverse-charge, so the tax is yours to self-assess."
 next_action = "Confirm the tax has been paid under RCM before taking the credit."
 tone = "info"
+category = "compliance"
 
 [[findings]]
 label = "gst:GstinTransposition"
@@ -547,6 +551,7 @@ title = "Near-identical GSTIN — probably a keying error"
 meaning = "Two records agree on invoice number and period under GSTINs that differ by what looks like a transposition. Nothing has been merged."
 next_action = "Confirm which GSTIN is right and correct the register. Merging automatically would attribute one supplier's invoice to another."
 tone = "warning"
+category = "data"
 
 [[findings]]
 label = "gst:SupplierNotFiled"
@@ -574,6 +579,7 @@ title = "Supplier has not filed"
 meaning = "You have booked this purchase and no supplier has declared it in any GSTR-1 or IFF."
 next_action = "Chase the supplier to file it. Do not claim the credit until it appears in a GSTR-2B."
 tone = "danger"
+category = "follow-up"
 
 [[findings]]
 label = "gst:Gstr1NotIn2b"
@@ -604,6 +610,7 @@ title = "Filed by the supplier, not in your GSTR-2B"
 meaning = "The supplier did declare it — the filing date is on the finding — but it has reached none of the GSTR-2B statements loaded here."
 next_action = "Check the GSTIN they filed against and whether it went in as B2C. If they simply filed late, it should appear in a later period's 2B."
 tone = "warning"
+category = "follow-up"
 
 [[findings]]
 label = "gst:MissingInBooks"
@@ -631,6 +638,7 @@ title = "In the GST records, not in your books"
 meaning = "A supplier has declared an invoice against your GSTIN that your purchase register does not carry."
 next_action = "Find out whether the purchase was never recorded — this is credit you may be entitled to and have not claimed — or whether somebody filed against the wrong GSTIN."
 tone = "info"
+category = "data"
 
 [[findings]]
 label = "gst:BooksGstr1Mismatch"
@@ -660,6 +668,7 @@ title = "Your books and the supplier's filing disagree"
 meaning = "Both sides declare this invoice and the values differ by more than the cap in force allowed."
 next_action = "Compare against the physical invoice. One of the two is wrong, and the finding names both figures."
 tone = "warning"
+category = "data"
 
 [[findings]]
 label = "gst:GoodsReceiptTiming"
@@ -696,6 +705,7 @@ title = "Goods received after the period"
 meaning = "Every document agrees and the credit is still not claimable in this period, because the goods or services arrived in a later one."
 next_action = "Defer the claim to the period the goods were received in. Section 16(2)(b) is a condition in its own right."
 tone = "warning"
+category = "compliance"
 
 [[findings]]
 label = "gst:TaxHeadMismatch"
@@ -725,6 +735,7 @@ title = "Totals agree, tax heads do not"
 meaning = "Every total matches and the tax sits under different heads than the supplier filed — inter-state against intra-state."
 next_action = "ITC is claimed head-wise in GSTR-3B, so correct the head before claiming. Credit under the wrong head is a reversal exposure with interest."
 tone = "danger"
+category = "data"
 
 [[findings]]
 label = "gst:SupplierPanMismatch"
@@ -760,6 +771,7 @@ title = "A different state registration of the same supplier"
 meaning = "Booked against one GSTIN and filed under another registration sharing the same PAN — both are valid, and one is the wrong one for this supply."
 next_action = "Decide which registration the supply actually came from. It changes the place of supply, and therefore which heads the tax belongs under."
 tone = "warning"
+category = "data"
 
 # --- Plan 123 Slice H: the checks nothing else in this pack performs -----
 
@@ -783,6 +795,7 @@ title = "Same invoice claimed twice"
 meaning = "Two rows in your purchase register carry the same invoice number for the same supplier, so the credit has been taken twice. It usually happens by accident — one purchase entered under two voucher numbers, or a file re-imported after a correction."
 next_action = "Delete one of the two entries and reduce the claim. An excess claim carries interest under s.50 and a demand under s.73/74, and this one is entirely your own record to fix."
 tone = "danger"
+category = "data"
 
 [[findings]]
 label = "gst:CreditNoteNotInPortal"
@@ -807,6 +820,7 @@ title = "Credit note you applied, supplier has not"
 meaning = "You have reduced your credit for a note the supplier has not declared. Your position is the safe one — you have claimed less than the portal supports — but the two sides will keep disagreeing about this invoice until the note itself is reconciled."
 next_action = "Ask the supplier to declare the credit note, or confirm they issued it against a different invoice."
 tone = "warning"
+category = "follow-up"
 
 [[findings]]
 label = "gst:ImsNotActioned"
@@ -831,6 +845,7 @@ title = "Waiting on you — will be accepted by default"
 meaning = "This record is sitting in the Invoice Management System with no decision. If you do nothing before the cut-off it is treated as accepted, and its credit flows into your GSTR-2B on that basis. Silence is a decision here, and it is the only one that gets made without anyone choosing it."
 next_action = "Accept or reject it before the cut-off. If it is genuinely yours, accepting deliberately costs nothing; if it is not, rejecting is the only way to keep it out."
 tone = "warning"
+category = "compliance"
 
 [[findings]]
 label = "gst:ReverseChargeContradiction"
@@ -852,6 +867,7 @@ title = "Reverse charge, but the supplier also charged tax"
 meaning = "You are self-assessing tax on this invoice under reverse charge, and the supplier has also declared forward tax on it in their own return. One of the two treatments is wrong, and both parties have already acted on their own."
 next_action = "Establish which treatment is correct with the supplier. If theirs is, stop self-assessing; if yours is, they need to amend."
 tone = "danger"
+category = "compliance"
 
 [[findings]]
 label = "gst:ItcTimeBarApproaching"
@@ -877,6 +893,7 @@ title = "Credit still unclaimed, and the window closes"
 meaning = "This invoice has not reached any GSTR-2B and the deadline for claiming it is set. Section 16(4) closes on the earlier of 30 November following the financial year, or the day you file your annual return — so filing GSTR-9 early closes it early."
 next_action = "Chase the supplier now. After the deadline the credit is gone regardless of who was at fault."
 tone = "danger"
+category = "compliance"
 
 [[findings]]
 label = "gst:ProportionateReversalDue"
@@ -900,6 +917,7 @@ title = "Exempt turnover — a reversal is due"
 meaning = "This period declares exempt or non-business turnover, so only the taxable share of common credit is available. The reversal is computed on the period turnover, not on any single invoice, which is why it is reported against the period."
 next_action = "Compute the Rule 42/43 reversal from your own turnover figures and report it in Table 4B(1). This tool deliberately does not compute the amount — the inputs are yours."
 tone = "warning"
+category = "compliance"
 
 # --- GSTR-2A: what the portal has said since the 2B froze — Plan 123 Slice C
 
@@ -933,6 +951,7 @@ title = "Supplier filed late — after your 2B froze"
 meaning = "The portal now shows this invoice in GSTR-2A and it reached no GSTR-2B. That means the supplier filed after the 2B you claimed against was generated, or filed against the wrong GSTIN."
 next_action = "The credit is not lost — it should appear in a later 2B. Confirm with the supplier which period they filed for, and claim it there."
 tone = "warning"
+category = "follow-up"
 
 [[findings]]
 label = "gst:AmendedAfterClaim"
@@ -955,6 +974,7 @@ title = "Portal value changed after you claimed"
 meaning = "The supplier amended this invoice after the GSTR-2B your claim rests on was frozen. Your filed position is now out of date through no error of yours, and the difference is what a reassessment would land on."
 next_action = "Check the amended value against your books and adjust in the current period. Keep the original 2B — it is what your earlier claim legitimately rested on."
 tone = "warning"
+category = "compliance"
 
 [[findings]]
 label = "gst:PaymentOverdue"
@@ -993,6 +1013,7 @@ title = "Unpaid past 180 days"
 meaning = "Credit was taken on an invoice the supplier has not been paid for within 180 days of its date."
 next_action = "Reverse the credit, or pay the supplier. Section 16(2)(d) leaves no third option."
 tone = "danger"
+category = "compliance"
 
 # The same answers, reachable from the console workbench with no new route.
 [[queries]]

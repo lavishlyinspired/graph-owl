@@ -209,6 +209,10 @@ export interface RegisterRow {
   readonly title?: string | null;
   readonly meaning?: string | null;
   readonly next_action?: string | null;
+  /** Which kind of problem this is — compliance, data or follow-up. Authored
+   *  in the pack, because it is a statement about the remedy and the remedy is
+   *  domain knowledge. */
+  readonly category?: string | null;
   /** What is wrong with *this* invoice, computed from its own figures. */
   readonly narrative?: string | null;
   readonly id: string;

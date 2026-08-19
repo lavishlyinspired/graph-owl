@@ -67,6 +67,9 @@ def decorate(rows: list[dict[str, Any]], guidance: dict[str, Any]) -> list[dict[
                 "meaning": entry.get("meaning"),
                 "next_action": entry.get("next_action"),
                 "tone": entry.get("tone"),
+                # Which kind of problem this is, and therefore who has to act.
+                # Authored in the pack: the remedy is domain knowledge.
+                "category": entry.get("category"),
             }
         )
     return decorated
