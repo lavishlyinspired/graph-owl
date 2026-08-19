@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import agent_runtime, agents, ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, notice_defence, reconciliation as rc, repo, sample_data, vocabulary, working_paper
+from . import agent_runtime, agents, ai, mcp_client, capabilities, db, exporters, graphowl_client, grounding, native_findings, notice_defence, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
 import json
@@ -29,7 +29,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import case_explainer, case_narrative, explain, rule_guidance
+from . import case_explainer, case_narrative, client_report, explain, rule_guidance
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1479,7 +1479,7 @@ AGENT_SYSTEM_PROMPT = (
 #: Agents start with the grants their work needs. Deny-by-default still holds —
 #: these are granted explicitly here, and revoking one from the UI takes effect
 #: on the very next write because every write re-checks.
-for _agent in ("triage", "vendor", "explainer"):
+for _agent in ("triage", "vendor", "explainer", "risk"):
     AGENT_REGISTRY.grant(_agent, "propose")
 
 #: Runs this process has performed, newest last.
@@ -1537,9 +1537,18 @@ def wake_agents(event: str, cases: list[dict] | None = None, **context) -> list[
             )
             continue
         try:
-            run = implementation(
-                cases=cases or [], registry=AGENT_REGISTRY, model=model, context=context
-            )
+            kwargs: dict = {
+                "cases": cases or [],
+                "registry": AGENT_REGISTRY,
+                "model": model,
+                "context": context,
+            }
+            # Only the graph-backed agent takes an MCP caller; passing one to
+            # every agent would suggest they all use it, and two of them do
+            # not.
+            if agent == "risk":
+                kwargs["mcp"] = lambda tool, args: mcp_client.call(GRAPH_OWL_SERVER, tool, args)
+            run = implementation(**kwargs)
             record = {**run.summary(), "spans": run.spans, "writes": run.writes,
                       "refusals": run.refusals, "context": context}
         except Exception as exc:  # noqa: BLE001
@@ -1968,6 +1977,55 @@ async def waive_case_route(client_id: str, case_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=502, detail=f"graph-owl refused the waiver: {exc}") from exc
 
     return {"waived": True, "waiver": request}
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/client-report")
+async def client_report_route(client_id: str, period_id: str) -> dict:
+    """The monthly report a CA sends a client.
+
+    **The skeleton is ours; only the prose is the model's.** A model asked for
+    "a report" produces a different shape every time, and a document a client
+    receives monthly must not be reorganised at random.
+
+    Grounded like every other generated text here: a report stating a figure
+    the reconciliation does not carry is refused and the computed version
+    returned. This is the worst place in the product for an invented number,
+    because it leaves the building.
+    """
+    recon = await reconciliation_route(client_id, period_id)
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        period = await repo.get_period(conn, client_id=client_id, period_id=period_id)
+
+    facts = client_report.build_facts(
+        period=f"{(period or {}).get('month', '')} {(period or {}).get('year', '')}".strip()
+        or "this period",
+        counts=recon["counts"],
+        itc=recon["itc"],
+        match_rate=recon["match_rate"],
+        outcomes=recon["rule_outcomes"],
+    )
+    computed = client_report.computed_report(facts)
+
+    if not ai.is_available():
+        return {"report": computed, "source": "computed", "facts": facts,
+                "note": "No inference model is reachable, so this is the computed report."}
+
+    drafted = ai.chat(AGENT_SYSTEM_PROMPT, client_report.build_prompt(facts, computed))
+    if not drafted:
+        return {"report": computed, "source": "computed", "facts": facts, "note": None}
+
+    checked = grounding.ground_draft(
+        draft=drafted, supplied=client_report.groundable(facts), log=AGENT_REFUSALS
+    )
+    if not checked["grounded"]:
+        return {
+            "report": computed, "source": "computed", "facts": facts,
+            "note": "The model's report stated a figure your reconciliation does not "
+            "carry, so it was refused. This is the computed report.",
+            "refusal": checked["reason"],
+        }
+    return {"report": drafted.strip(), "source": "model", "facts": facts, "note": None}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/working-paper")

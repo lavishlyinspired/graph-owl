@@ -44,6 +44,16 @@ async def list_periods(conn: asyncpg.Connection, *, client_id: str) -> list[dict
     return [dict(row) for row in rows]
 
 
+async def get_period(
+    conn: asyncpg.Connection, *, client_id: str, period_id: str
+) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "SELECT id, month, year, status FROM period WHERE client_id = $1 AND id = $2",
+        client_id, period_id,
+    )
+    return dict(row) if row is not None else None
+
+
 async def create_case(
     conn: asyncpg.Connection,
     *,

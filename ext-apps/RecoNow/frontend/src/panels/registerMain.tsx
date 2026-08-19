@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useOutletContext, useSearchParams } from "react-router-dom";
 import { fetchRegister, type Register } from "../lib/api";
 import { ExplainCase } from "../components/ExplainCase";
+import { DetailDrawer } from "../components/DetailDrawer";
 import { WhyPopover } from "../components/WhyPopover";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -18,6 +19,7 @@ export default function RegisterRoute() {
   // open a case *from* this list, and a route arrived at without a selection
   // shows an empty screen.
   const [openCase, setOpenCase] = useState<string | null>(null);
+  const selected = register?.rows.find((r) => r.id === openCase) ?? null;
 
   useEffect(() => {
     if (!clientId || !periodId) return;
@@ -104,21 +106,70 @@ export default function RegisterRoute() {
             </span>
           </button>
 
-          {openCase === row.id && (
-            <div className="space-y-3 border-t border-reco-line-2 bg-reco-panel-2/40 px-4 py-4">
-              {/* Instant: computed from this invoice's own figures. */}
-              {row.narrative && (
-                <p className="text-[12.5px] leading-relaxed text-reco-t2">{row.narrative}</p>
-              )}
-              {/* Deeper, on demand: the model reads the whole row. */}
-              {clientId && periodId && (
-                <ExplainCase clientId={clientId} periodId={periodId} caseId={row.id} />
-              )}
-            </div>
-          )}
           </div>
         ))}
       </div>
+
+      {/* Case detail in the drawer rather than expanded in the row: the row
+          grew the list every time one was opened, so the next case a reviewer
+          wanted moved down the page as they worked. */}
+      <DetailDrawer
+        open={selected !== null}
+        title={selected?.title ?? selected?.reason_code ?? ""}
+        subtitle={selected ? `${selected.invoice_no} · ${selected.supplier_name ?? ""}` : undefined}
+        onClose={() => {
+          setOpenCase(null);
+          const updated = new URLSearchParams(params);
+          updated.delete("id");
+          setParams(updated, { replace: true });
+        }}
+      >
+        {selected && (
+          <div className="space-y-4">
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-[12px]">
+              <Figure label="Books" value={selected.books_amount} />
+              <Figure label="GSTR-2B" value={selected.portal_amount} />
+              <Figure label="Difference" value={selected.exposure} tone="bad" />
+            </dl>
+
+            {selected.narrative && (
+              <p className="text-[12.5px] leading-relaxed text-reco-t2">{selected.narrative}</p>
+            )}
+
+            {selected.next_action && (
+              <div className="rounded border border-reco-line bg-reco-panel-2 p-3">
+                <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+                  What to do
+                </div>
+                <p className="text-[12px] leading-relaxed text-reco-t2">{selected.next_action}</p>
+              </div>
+            )}
+
+            {clientId && periodId && (
+              <ExplainCase clientId={clientId} periodId={periodId} caseId={selected.id} />
+            )}
+          </div>
+        )}
+      </DetailDrawer>
+    </div>
+  );
+}
+
+function Figure({
+  label,
+  value,
+  tone,
+}: {
+  readonly label: string;
+  readonly value: number | null | undefined;
+  readonly tone?: "bad";
+}) {
+  return (
+    <div>
+      <dt className="font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">{label}</dt>
+      <dd className={`font-mono text-[13px] ${tone === "bad" ? "text-reco-bad" : "text-reco-t1"}`}>
+        {value == null ? "—" : formatRupees(value)}
+      </dd>
     </div>
   );
 }

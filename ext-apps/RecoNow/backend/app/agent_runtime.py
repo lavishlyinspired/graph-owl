@@ -222,6 +222,10 @@ DEFAULT_SUBSCRIPTIONS = [
     # Woken by the same event as triage: it needs the period's cases, and
     # those exist exactly when the reconciliation has finished.
     Subscription(agent="vendor", event="reconciliation.finished"),
+    # The one agent that genuinely needs the graph: "is this supplier a repeat
+    # offender" is a question about other periods, which this period's rows
+    # cannot answer.
+    Subscription(agent="risk", event="reconciliation.finished"),
     Subscription(agent="explainer", event="finding.created"),
     Subscription(agent="eligibility", event="finding.created"),
     Subscription(agent="drift", event="gstr2a.pulled"),

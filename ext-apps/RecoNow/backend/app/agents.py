@@ -194,9 +194,12 @@ def run_vendor(
     return run
 
 
+from .agents_graph import run_supplier_risk  # noqa: E402  (cycle-free, read below)
+
 AGENTS: dict[str, Callable[..., AgentRun]] = {
     "triage": run_triage,
     "vendor": run_vendor,
+    "risk": run_supplier_risk,
 }
 
 __all__ = ["AGENTS", "DEFAULT_URGENCY", "URGENCY", "run_triage", "run_vendor"]

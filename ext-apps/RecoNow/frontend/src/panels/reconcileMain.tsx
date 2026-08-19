@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { formatRupees } from "../lib/format";
 import { WhyPopover } from "../components/WhyPopover";
+import { DetailDrawer } from "../components/DetailDrawer";
 import type { FigureExplanation } from "../lib/api";
 import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
@@ -38,6 +39,9 @@ export default function ReconcileRoute() {
   // Filtering the invoice table by rule is how "2 findings" stops being a
   // dead number: a reviewer clicks it and sees which two.
   const [ruleFilter, setRuleFilter] = useState<string | null>(null);
+  // **The drawer replaces "filter a table the reader must then scroll to".**
+  // A click whose result is off-screen reads as a click that did nothing.
+  const [drawerRule, setDrawerRule] = useState<string | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -260,15 +264,31 @@ export default function ReconcileRoute() {
         outcomes={data.rule_outcomes}
         unsupported={data.checks_disabled}
         active={ruleFilter}
-        onPick={(label) => {
-          setRuleFilter((current) => (current === label ? null : label));
-          setFilter(null);
-        }}
+        onPick={(label) => setDrawerRule(label)}
       />
 
-      <ItcPositionPanel itc={data.itc} />
-
+      {/* The ITC position lives on its own screen, which shows the same five
+          classes from the same computation. Two screens rendering one figure
+          is two places to keep in step, and the headline cards above already
+          carry the two numbers this screen needs. */}
       <Ladder rows={visible} />
+
+      <DetailDrawer
+        open={drawerRule !== null}
+        title={
+          drawerRule
+            ? (data.rule_outcomes.find((o) => o.label === drawerRule)?.title ?? drawerRule)
+            : ""
+        }
+        subtitle={drawerRule ?? undefined}
+        onClose={() => setDrawerRule(null)}
+      >
+        <RuleDrawerBody
+          rule={drawerRule}
+          outcome={data.rule_outcomes.find((o) => o.label === drawerRule)}
+          rows={data.rows.filter((r) => drawerRule && r.labels.includes(drawerRule))}
+        />
+      </DetailDrawer>
     </div>
   );
 }
@@ -310,6 +330,64 @@ function HeadlineCard({
       </div>
       <div className="mt-2 text-[11.5px] text-reco-t4">{hint}</div>
     </div>
+  );
+}
+
+/** What one rule found, in the drawer: why it fired, what to do, and every
+ *  invoice it named — without leaving the screen. */
+function RuleDrawerBody({
+  rule,
+  outcome,
+  rows,
+}: {
+  readonly rule: string | null;
+  readonly outcome: RuleOutcome | undefined;
+  readonly rows: readonly ReconRow[];
+}) {
+  if (!rule) return null;
+
+  return (
+    <>
+      {outcome?.meaning && (
+        <p className="mb-3 text-[12.5px] leading-relaxed text-reco-t2">{outcome.meaning}</p>
+      )}
+      {outcome?.next_action && (
+        <div className="mb-4 rounded border border-reco-line bg-reco-panel-2 p-3">
+          <div className="mb-1 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+            What to do
+          </div>
+          <p className="text-[12px] leading-relaxed text-reco-t2">{outcome.next_action}</p>
+        </div>
+      )}
+      {outcome?.governed_by && (
+        <div className="mb-4 inline-block rounded border border-reco-line px-2 py-1 font-mono text-[10.5px] text-reco-t4">
+          {outcome.governed_by}
+        </div>
+      )}
+
+      <div className="mb-2 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+        {rows.length} invoice{rows.length === 1 ? "" : "s"}
+      </div>
+      {rows.map((row, i) => (
+        <div
+          key={`${row.invoice_no}-${i}`}
+          className="border-b border-reco-row py-2.5 last:border-b-0"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="font-mono text-[11.5px] text-reco-t1">{row.invoice_no}</span>
+            <span className="font-mono text-[11.5px] text-reco-t2">
+              {formatRupees(row.books_tax ?? 0)}
+            </span>
+          </div>
+          <div className="text-[11px] text-reco-t4">{row.supplier_name ?? "—"}</div>
+          {row.difference !== 0 && (
+            <div className="mt-0.5 font-mono text-[10.5px] text-reco-bad">
+              differs by {formatRupees(Math.abs(row.difference))}
+            </div>
+          )}
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -386,60 +464,6 @@ function Ladder({ rows }: { readonly rows: readonly ReconRow[] }) {
   );
 }
 
-/** Where the credit actually stands. The `pending` vs `blocked` split is the
- *  point: one is deferred and recoverable by chasing the supplier, the other
- *  is gone whatever anyone does. */
-function ItcPositionPanel({ itc }: { readonly itc: Reconciliation["itc"] }) {
-  const classes = [
-    { key: "confirmed", label: "CONFIRMED", colour: "#2f6b4d", hint: "matched — claim it" },
-    { key: "pending", label: "PENDING", colour: "#a86a2c", hint: "deferred until the supplier files" },
-    { key: "under_review", label: "UNDER REVIEW", colour: "#c9803a", hint: "the disagreement only" },
-    { key: "blocked", label: "BLOCKED", colour: "#a13f28", hint: "s.17(5) — lost" },
-    { key: "unclaimed", label: "UNCLAIMED", colour: "#41508f", hint: "on the portal, not in books" },
-  ] as const;
-
-  return (
-    <div className="mb-3.5 rounded-[10px] border border-reco-line bg-white p-4">
-      <div className="mb-3 flex items-baseline justify-between">
-        <span className="font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">ITC POSITION</span>
-        <span className="text-[11.5px] text-reco-t5">
-          pending is deferred, not lost — blocked is lost
-        </span>
-      </div>
-      <div className="grid grid-cols-5 gap-3">
-        {classes.map((c) => (
-          <div key={c.key}>
-            <div className="font-mono text-[9px] tracking-[0.1em] text-reco-t5">{c.label}</div>
-            <div className="mt-1 font-mono text-[17px]" style={{ color: c.colour }}>
-              {formatRupees(itc[c.key])}
-            </div>
-            <div className="mt-0.5 text-[10.5px] leading-snug text-reco-t5">{c.hint}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-
-/** Every rule, in one of three states.
- *
- *  A check that never ran and a check that found nothing are opposite claims
- *  and used to render identically as "no issues". For a statutory test —
- *  Rule 37, s.16(2)(b), s.17(5) — that difference is a client's money.
- *
- *  So the three states are **separate blocks with their own headings**, not
- *  one list distinguished by the colour of a tick. A reviewer skimming this
- *  panel should be unable to mistake "not evaluated" for "passed" without
- *  reading the marks, and Not evaluated comes first because it is the state
- *  that silently reads as good news.
- *
- *  The states come from **graph-owl's own execution record**, not from
- *  inspecting which files were uploaded. The engine probes each rule's
- *  declared requirements before running it and reports what it found; this
- *  renders that. "Could not evaluate, and here is what was missing" is
- *  evidence about the run, and it belongs in the engine.
- */
 function RulePanel({
   outcomes,
   unsupported,
