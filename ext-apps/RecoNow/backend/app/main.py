@@ -9,7 +9,7 @@ import os
 import threading
 import hashlib
 import uuid
-from datetime import date
+from datetime import date, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -19,11 +19,12 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import agent_runtime, ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, notice_defence, reconciliation as rc, repo, sample_data, vocabulary, working_paper
+from . import agent_runtime, agents, ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, notice_defence, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
 import json
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from urllib.parse import quote
 from decimal import Decimal
 
@@ -1060,12 +1061,26 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
             existing.add(case["dedup_key"])
             created += 1
 
+    # Plan 123 §5: the reconciliation finishing is an **event**, not just a
+    # return value. Every agent subscribed to it now actually runs — reads the
+    # period's cases, decides something, and leaves a trace of both. Nothing
+    # subscribed before, which is why every agent in this product had to be
+    # clicked.
+    woken = wake_agents(
+        "reconciliation.finished",
+        cases=await _cases_for(client_id, period_id),
+        client_id=client_id,
+        period_id=period_id,
+        findings=result.found,
+    )
+
     return {
         "ok": True,
         "ingested": ingested,
         "evaluated": result.evaluated,
         "found": result.found,
         "cases_created": created,
+        "agents_woken": woken,
     }
 
 
@@ -1453,24 +1468,192 @@ MAX_REFUSALS_HELD = 200
 #: implementation here.
 AGENT_REGISTRY = agent_runtime.default_registry()
 
+#: What every agent is told before anything else. Stated once so two agents
+#: cannot be given different instructions about the same rule.
+AGENT_SYSTEM_PROMPT = (
+    "You are a precise Indian indirect-tax assistant working inside a GST "
+    "reconciliation tool. You never invent, compute, round or introduce a "
+    "figure. Every number you use must appear verbatim in what you are given."
+)
+
+#: Agents start with the grants their work needs. Deny-by-default still holds —
+#: these are granted explicitly here, and revoking one from the UI takes effect
+#: on the very next write because every write re-checks.
+for _agent in ("triage", "vendor", "explainer"):
+    AGENT_REGISTRY.grant(_agent, "propose")
+
 #: Runs this process has performed, newest last.
 AGENT_RUNS: list[dict] = []
 
 
-def wake_agents(event: str, **context) -> list[str]:
-    """Fire an event and record which agents woke.
+async def _cases_for(client_id: str, period_id: str) -> list[dict]:
+    """The period's cases, for an agent to work on.
+
+    Its own read rather than a parameter threaded through every caller: an
+    agent's inputs should not depend on which route happened to fire the event,
+    or two callers of one event would wake the same agent with different data.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        return await repo.list_cases(conn, client_id=client_id, period_id=period_id)
+
+
+def wake_agents(event: str, cases: list[dict] | None = None, **context) -> list[str]:
+    """Fire an event and **actually run** every agent subscribed to it.
+
+    **This used to record that an agent would have run.** It created an
+    `AgentRun`, took its empty summary, and appended it — no agent read
+    anything, decided anything or produced anything, and the activity screen
+    faithfully reported that nothing had happened.
+
+    Each run now keeps its full trace: what it read, what it decided and why,
+    every model call with whether the answer was grounded, and every refused
+    write. That trace is the deliverable — an agent whose reasoning cannot be
+    inspected afterwards is one nobody can be accountable for.
 
     **An event nobody subscribes to is not an error.** Most events have no
-    listener, and treating that as a failure fills the log with noise that
-    trains everyone to ignore it.
+    listener, and treating that as a failure fills the log with noise.
     """
     woken = AGENT_REGISTRY.woken_by(event)
+    model = (lambda prompt: ai.chat(AGENT_SYSTEM_PROMPT, prompt)) if ai.is_available() else None
+
     for agent in woken:
-        run = agent_runtime.AgentRun(registry=AGENT_REGISTRY, agent=agent, event=event)
-        AGENT_RUNS.append({**run.summary(), "context": context})
+        implementation = agents.AGENTS.get(agent)
+        if implementation is None:
+            # Subscribed but not yet built. Recorded as skipped rather than
+            # silently dropped: a subscription with no implementation is a gap
+            # somebody should see, not a no-op.
+            AGENT_RUNS.append(
+                {
+                    "id": uuid.uuid4().hex[:12],
+                    "agent": agent,
+                    "event": event,
+                    "status": "skipped",
+                    "error": "no implementation for this agent yet",
+                    "spans": [],
+                    "context": context,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            continue
+        try:
+            run = implementation(
+                cases=cases or [], registry=AGENT_REGISTRY, model=model, context=context
+            )
+            record = {**run.summary(), "spans": run.spans, "writes": run.writes,
+                      "refusals": run.refusals, "context": context}
+        except Exception as exc:  # noqa: BLE001
+            # An agent that throws must not take the request with it, and the
+            # failure has to be visible — a run that vanished is worse than one
+            # that failed.
+            record = {
+                "id": uuid.uuid4().hex[:12], "agent": agent, "event": event,
+                "status": "failed", "error": str(exc), "spans": [], "context": context,
+            }
+        record["started_at"] = datetime.now(timezone.utc).isoformat()
+        AGENT_RUNS.append(record)
+
     if len(AGENT_RUNS) > MAX_REFUSALS_HELD:
         del AGENT_RUNS[: len(AGENT_RUNS) - MAX_REFUSALS_HELD]
     return woken
+
+
+@app.get("/api/agents/runs")
+async def agent_runs_route(agent: str | None = None, status: str | None = None) -> dict:
+    """Every agent run this process has performed, newest first.
+
+    **The screen that did not exist.** There was no history of what an agent
+    did, no way to see what was running, and nothing to report on.
+
+    Each entry carries its span *counts* rather than its spans — a list view
+    that ships every trace is a list view nobody can load. The full trace is
+    one call away at `/api/agents/runs/{id}`.
+    """
+    runs = list(reversed(AGENT_RUNS))
+    if agent:
+        runs = [r for r in runs if r.get("agent") == agent]
+    if status:
+        runs = [r for r in runs if r.get("status") == status]
+
+    return {
+        "runs": [{k: v for k, v in r.items() if k != "spans"} for r in runs],
+        "running": [r["id"] for r in runs if r.get("status") == "running"],
+        "counts": {
+            s: sum(1 for r in AGENT_RUNS if r.get("status") == s)
+            for s in ("completed", "failed", "running", "skipped")
+        },
+        "scope": "this process only — a durable record belongs in graph-owl agent activity",
+    }
+
+
+@app.get("/api/agents/runs/{run_id}")
+async def agent_run_detail_route(run_id: str) -> dict:
+    """One run's full trace: every step, in order, with what went in and out.
+
+    The hierarchy current agent-observability practice asks for — tool calls
+    and decisions, not only the model calls. A trace of model calls alone
+    cannot answer the question anyone actually asks after a bad outcome, which
+    is *what did it look at before it decided that*.
+    """
+    run = next((r for r in AGENT_RUNS if r.get("id") == run_id), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such run")
+    return run
+
+
+@app.get("/api/agents/runs/{run_id}/report")
+async def agent_run_report_route(run_id: str) -> dict:
+    """What this agent did, as prose a person can read or send.
+
+    **Assembled from the trace, never from the model.** A report about what an
+    agent did that was itself written by a model is two claims stacked on each
+    other, and the one underneath is the one you needed. Every line here is
+    rendered from a recorded span.
+    """
+    run = next((r for r in AGENT_RUNS if r.get("id") == run_id), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such run")
+
+    lines = [
+        f"Agent: {run.get('agent')}",
+        f"Woken by: {run.get('event')}",
+        f"Outcome: {run.get('status')}"
+        + (f" — {run['error']}" if run.get("error") else ""),
+        f"Took: {run.get('ms')} ms" if run.get("ms") is not None else "Took: not recorded",
+        "",
+        "What it did, step by step:",
+    ]
+    for index, span in enumerate(run.get("spans") or [], start=1):
+        detail = span.get("because") or span.get("error") or ""
+        lines.append(
+            f"  {index}. [{span.get('kind')}] {span.get('name')} — {span.get('status')}"
+            f" ({span.get('ms')} ms){' · ' + detail if detail else ''}"
+        )
+    if not run.get("spans"):
+        lines.append("  (no steps recorded)")
+
+    writes = run.get("writes") or []
+    lines += ["", f"Proposed: {len(writes)} write(s)."]
+    for write in writes:
+        payload = write.get("payload") or {}
+        summary = ", ".join(f"{k}: {len(v) if isinstance(v, list) else v}" for k, v in payload.items())
+        lines.append(f"  - {write.get('capability')} — {summary}")
+
+    refusals = run.get("refusals") or []
+    if refusals:
+        lines += ["", f"Refused: {len(refusals)}."]
+        for refusal in refusals:
+            lines.append(f"  - {refusal.get('capability')}: {refusal.get('reason')}")
+
+    tokens, cost = run.get("tokens"), run.get("cost")
+    lines += [
+        "",
+        # `None`, never 0 — a cost of zero claims the run was free.
+        f"Model usage: {tokens if tokens is not None else 'not measured'} tokens, "
+        f"{cost if cost is not None else 'not measured'} cost.",
+    ]
+
+    return {"run_id": run_id, "report": "\n".join(lines), "generated_from": "the run's own trace"}
 
 
 @app.get("/api/agents/subscriptions")

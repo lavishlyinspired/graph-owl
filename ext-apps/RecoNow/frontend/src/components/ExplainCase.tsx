@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { fetchCaseExplanation, type CaseExplanation } from "../lib/api";
+import { GeneratedBadge } from "./GeneratedBadge";
 
 /** "Why did this fire, for this invoice?" — answered from the real row.
  *
@@ -69,23 +70,19 @@ export function ExplainCase({
         <span className="font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
           Why this fired
         </span>
-        <span
-          className={`rounded px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${
-            explanation.source === "model"
-              ? "bg-reco-accent/10 text-reco-accent"
-              : "bg-reco-line text-reco-t4"
-          }`}
-          title={
-            explanation.source === "model"
-              ? "Written by an inference model from your own data. Every figure in it was checked against your row."
-              : "Computed directly from your data — no model was involved."
-          }
-        >
-          {explanation.source === "model" ? "model" : "computed"}
-        </span>
+        <GeneratedBadge source={explanation.source} />
       </div>
 
-      <p className="text-[12.5px] leading-relaxed text-reco-t2">{explanation.text}</p>
+      {/* Generated prose is tinted as well as badged: on a dense screen the
+          badge is easy to miss, and the reader most likely to be misled is the
+          one skimming. */}
+      <p
+        className={`text-[12.5px] leading-relaxed ${
+          explanation.source === "model" ? "text-violet-900" : "text-reco-t2"
+        }`}
+      >
+        {explanation.text}
+      </p>
 
       {explanation.note && (
         <p className="mt-2 text-[11.5px] leading-relaxed text-reco-t4">{explanation.note}</p>

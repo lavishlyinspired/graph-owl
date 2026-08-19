@@ -407,6 +407,57 @@ export function fetchCaseExplanation(
   );
 }
 
+/** One step an agent took. Typed, so a reader can tell what it *did* from
+ *  what it *decided* — the distinction that makes a trace argueable. */
+export interface AgentSpan {
+  readonly kind: "tool" | "model" | "decision" | "refusal";
+  readonly name: string;
+  readonly status: string;
+  readonly ms: number;
+  readonly input?: unknown;
+  readonly output?: unknown;
+  readonly because?: string;
+  readonly error?: string;
+  readonly grounded?: boolean;
+}
+
+export interface AgentRun {
+  readonly id: string;
+  readonly agent: string;
+  readonly event: string;
+  readonly status: "running" | "completed" | "failed" | "skipped";
+  readonly ms: number | null;
+  readonly error: string | null;
+  readonly started_at?: string;
+  readonly span_counts?: Readonly<Record<string, number>>;
+  readonly writes?: readonly { readonly capability: string }[];
+  readonly refusals?: readonly unknown[];
+  /** `null`, never 0 — a cost of zero claims the run was free. */
+  readonly tokens: number | null;
+  readonly cost: number | null;
+}
+
+export interface AgentRunDetail extends AgentRun {
+  readonly spans: readonly AgentSpan[];
+}
+
+export function fetchAgentRuns(): Promise<{
+  readonly runs: readonly AgentRun[];
+  readonly running: readonly string[];
+  readonly counts: Readonly<Record<string, number>>;
+  readonly scope: string;
+}> {
+  return apiFetch("/api/agents/runs");
+}
+
+export function fetchAgentRun(runId: string): Promise<AgentRunDetail> {
+  return apiFetch(`/api/agents/runs/${encodeURIComponent(runId)}`);
+}
+
+export function fetchAgentReport(runId: string): Promise<{ readonly report: string }> {
+  return apiFetch(`/api/agents/runs/${encodeURIComponent(runId)}/report`);
+}
+
 export interface AtRiskSupplier {
   readonly gstin: string;
   readonly name: string | null;
