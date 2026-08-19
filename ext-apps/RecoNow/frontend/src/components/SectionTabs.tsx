@@ -27,7 +27,9 @@ export function SectionTabs({
       aria-label="Sections"
       className="flex gap-1 overflow-x-auto border-b border-reco-line px-6"
     >
-      {sectionsFor(route).map((section) => {
+      {sectionsFor(route)
+        .filter((section) => section.label)
+        .map((section) => {
         const selected = section.capability === active;
         return (
           <button

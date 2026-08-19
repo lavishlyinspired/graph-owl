@@ -38,11 +38,14 @@ describe("consolidating 30 screens into the five stages", () => {
     }
   });
 
-  it("names every section, because a nameless tab cannot be navigated to", () => {
+  it("names every section that renders a tab", () => {
+    // An unlabelled section is a capability reached another way — case detail,
+    // via the drawer. It is still listed so the coverage test above sees it,
+    // and deliberately renders no tab: the tab it used to have read a
+    // selection nothing set, so it was permanently empty.
     for (const [route, sections] of Object.entries(SECTIONS)) {
-      for (const section of sections) {
-        expect(section.label, `${route} has an unlabelled section`).toBeTruthy();
-      }
+      const labelled = sections.filter((s) => s.label);
+      expect(labelled.length, `${route} renders no tab at all`).toBeGreaterThan(0);
     }
   });
 

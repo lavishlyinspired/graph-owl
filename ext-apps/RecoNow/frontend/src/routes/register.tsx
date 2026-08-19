@@ -3,7 +3,6 @@ import { SectionTabs } from "../components/SectionTabs";
 import { sectionsFor } from "../lib/sections";
 import type { Capability } from "../lib/sections";
 import RegisterMainPanel from "../panels/registerMain";
-import CasePanel from "../panels/case";
 import ExceptionsPanel from "../panels/exceptions";
 import QueuePanel from "../panels/queue";
 
@@ -20,7 +19,6 @@ import QueuePanel from "../panels/queue";
  *  screen. */
 const PANELS: Partial<Record<Capability, React.ComponentType>> = {
   register: RegisterMainPanel,
-  "case-detail": CasePanel,
   exceptions: ExceptionsPanel,
   "review-queue": QueuePanel,
 };

@@ -458,6 +458,19 @@ export function fetchAgentReport(runId: string): Promise<{ readonly report: stri
   return apiFetch(`/api/agents/runs/${encodeURIComponent(runId)}/report`);
 }
 
+export interface ClientReport {
+  readonly report: string;
+  readonly source: "model" | "computed";
+  readonly note: string | null;
+  readonly refusal?: string;
+}
+
+export function fetchClientReport(clientId: string, periodId: string): Promise<ClientReport> {
+  return apiFetch<ClientReport>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/client-report`,
+  );
+}
+
 export interface AtRiskSupplier {
   readonly gstin: string;
   readonly name: string | null;
@@ -678,6 +691,9 @@ export interface ReconRow {
   readonly portal_tax: number;
   readonly difference: number;
   readonly labels: readonly string[];
+  /** The case this invoice's findings produced, if any — what the row's
+   *  drawer asks for an explanation of. `null` where nothing was flagged. */
+  readonly case_id?: string | null;
   readonly blocked: boolean;
 }
 

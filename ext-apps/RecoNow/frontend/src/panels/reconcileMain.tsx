@@ -10,6 +10,7 @@ import {
 import { formatRupees } from "../lib/format";
 import { WhyPopover } from "../components/WhyPopover";
 import { DetailDrawer } from "../components/DetailDrawer";
+import { ExplainCase } from "../components/ExplainCase";
 import type { FigureExplanation } from "../lib/api";
 import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
@@ -42,6 +43,12 @@ export default function ReconcileRoute() {
   // **The drawer replaces "filter a table the reader must then scroll to".**
   // A click whose result is off-screen reads as a click that did nothing.
   const [drawerRule, setDrawerRule] = useState<string | null>(null);
+  // A row's own drawer: everything about *this invoice*, including the model's
+  // reading of it. The rule drawer answers "what did this check find"; this
+  // answers "what is going on with this invoice", and they are different
+  // questions a reviewer asks at different moments.
+  const [drawerRow, setDrawerRow] = useState<ReconRow | null>(null);
+  const [search, setSearch] = useState("");
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -68,8 +75,20 @@ export default function ReconcileRoute() {
   );
 
   const visible = useMemo(
-    () => (data ? visibleRows(data.rows, filter, ruleFilter) : []),
-    [data, filter, ruleFilter],
+    () => {
+      const rows = data ? visibleRows(data.rows, filter, ruleFilter) : [];
+      const needle = search.trim().toLowerCase();
+      if (!needle) return rows;
+      // GSTIN, supplier or invoice number — the three things a reviewer has
+      // in hand when they come looking for one row.
+      return rows.filter(
+        (r) =>
+          (r.invoice_no ?? "").toLowerCase().includes(needle) ||
+          (r.supplier_name ?? "").toLowerCase().includes(needle) ||
+          (r.supplier_gstin ?? "").toLowerCase().includes(needle),
+      );
+    },
+    [data, filter, ruleFilter, search],
   );
 
   if (!clientId || !periodId) {
@@ -160,6 +179,33 @@ export default function ReconcileRoute() {
         })}
       </div>
 
+      {/* Search and export, from the delivered mockup. A reviewer who already
+          knows which invoice they want should not have to scan for it, and a
+          working paper that cannot leave the screen is not a working paper. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by GSTIN, supplier or invoice number…"
+          aria-label="Search invoices"
+          className="min-w-[240px] flex-1 rounded border border-reco-line bg-white px-3 py-1.5 text-[12.5px] text-reco-t1 placeholder:text-reco-t5"
+        />
+        <button
+          type="button"
+          onClick={() => exportCsv(visible)}
+          className="rounded border border-reco-line px-3 py-1.5 text-[12px] text-reco-t2 hover:border-reco-accent hover:text-reco-accent"
+        >
+          Export CSV
+        </button>
+        <a
+          href={`/workingpaper`}
+          className="rounded border border-reco-line px-3 py-1.5 text-[12px] text-reco-t2 hover:border-reco-accent hover:text-reco-accent"
+        >
+          Working paper
+        </a>
+      </div>
+
       {/* **The table comes before the checks now.** It used to sit below the
           statutory-check blocks, the ITC panel and the ladder — so clicking
           "2 findings" filtered a table the reader then had to scroll to find.
@@ -233,7 +279,10 @@ export default function ReconcileRoute() {
                       ? formatRupees(Math.abs(row.difference))
                       : "—"}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2.5">
+                  <td
+                    className="cursor-pointer whitespace-nowrap px-3 py-2.5"
+                    onClick={() => setDrawerRow(row)}
+                  >
                     <span
                       className="rounded border px-1.5 py-0.5 font-mono text-[9.5px]"
                       style={{
@@ -272,6 +321,17 @@ export default function ReconcileRoute() {
           is two places to keep in step, and the headline cards above already
           carry the two numbers this screen needs. */}
       <Ladder rows={visible} />
+
+      <DetailDrawer
+        open={drawerRow !== null}
+        title={drawerRow?.invoice_no ?? ""}
+        subtitle={drawerRow?.supplier_name ?? undefined}
+        onClose={() => setDrawerRow(null)}
+      >
+        {drawerRow && (
+          <RowDrawerBody row={drawerRow} titles={titles} clientId={clientId} periodId={periodId} />
+        )}
+      </DetailDrawer>
 
       <DetailDrawer
         open={drawerRule !== null}
@@ -333,6 +393,94 @@ function HeadlineCard({
   );
 }
 
+/** Everything about one invoice, including the model's reading of it.
+ *
+ *  Reached by clicking the row's state or reason — the two cells a reader
+ *  looks at when they want to know *why* a row is where it is. */
+function RowDrawerBody({
+  row,
+  titles,
+  clientId,
+  periodId,
+}: {
+  readonly row: ReconRow;
+  readonly titles: Record<string, string>;
+  readonly clientId: string;
+  readonly periodId: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <span
+          className="inline-block rounded border px-1.5 py-[1px] font-mono text-[10px] uppercase"
+          style={{
+            color: BUCKET_META[row.bucket].colour,
+            borderColor: BUCKET_META[row.bucket].colour + "55",
+          }}
+        >
+          {BUCKET_META[row.bucket].label}
+        </span>
+        <span className="ml-2 text-[11.5px] text-reco-t4">{BUCKET_META[row.bucket].hint}</span>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-[12px]">
+        <Amount label="Books taxable" value={row.books_taxable} />
+        <Amount label="Portal taxable" value={row.portal_taxable} />
+        <Amount label="Books tax" value={row.books_tax} />
+        <Amount label="Portal tax" value={row.portal_tax} />
+        {row.difference !== 0 && (
+          <Amount label="Difference" value={Math.abs(row.difference)} tone="bad" />
+        )}
+      </dl>
+
+      {row.labels.length > 0 && (
+        <div>
+          <div className="mb-1.5 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+            What was found
+          </div>
+          {row.labels.map((label) => (
+            <div key={label} className="border-b border-reco-row py-1.5 last:border-b-0">
+              <div className="text-[12px] text-reco-t1">{titles[label] ?? label}</div>
+              <div className="font-mono text-[9.5px] text-reco-t5">{label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* The model reads this whole row — both sides, tax heads, dates — and
+          says what is notable. Grounded, so a figure your data does not carry
+          is refused and the computed sentence shown instead. */}
+      {clientId && periodId && row.case_id && (
+        <ExplainCase clientId={clientId} periodId={periodId} caseId={row.case_id} />
+      )}
+      {!row.case_id && (
+        <p className="text-[11.5px] text-reco-t4">
+          Nothing was flagged on this invoice, so there is no case to explain.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Amount({
+  label,
+  value,
+  tone,
+}: {
+  readonly label: string;
+  readonly value: number | null | undefined;
+  readonly tone?: "bad";
+}) {
+  return (
+    <div>
+      <dt className="font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">{label}</dt>
+      <dd className={`font-mono text-[12.5px] ${tone === "bad" ? "text-reco-bad" : "text-reco-t1"}`}>
+        {value == null ? "—" : formatRupees(value)}
+      </dd>
+    </div>
+  );
+}
+
 /** What one rule found, in the drawer: why it fired, what to do, and every
  *  invoice it named — without leaving the screen. */
 function RuleDrawerBody({
@@ -389,6 +537,37 @@ function RuleDrawerBody({
       ))}
     </>
   );
+}
+
+/** The filtered rows as CSV.
+ *
+ *  **What is on screen, not the whole period.** A reviewer who has filtered to
+ *  one rule and exports expects that filter to hold; an export that silently
+ *  widened would be a different document from the one they were looking at. */
+function exportCsv(rows: readonly ReconRow[]) {
+  const header = [
+    "Invoice", "Supplier", "GSTIN", "Bucket",
+    "Books taxable", "Portal taxable", "Books tax", "Portal tax", "Difference", "Findings",
+  ];
+  const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+  const body = rows.map((r) =>
+    [
+      r.invoice_no ?? "", r.supplier_name ?? "", r.supplier_gstin ?? "", r.bucket,
+      r.books_taxable, r.portal_taxable, r.books_tax, r.portal_tax, r.difference,
+      r.labels.join("; "),
+    ]
+      .map((cell) => escape(String(cell)))
+      .join(","),
+  );
+  const blob = new Blob([[header.map(escape).join(","), ...body].join("\n")], {
+    type: "text/csv;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "reconciliation.csv";
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function Header({ rate, total }: { readonly rate: number; readonly total: number }) {
@@ -632,6 +811,14 @@ function StateBlock({
   );
 }
 
+/** One rule, on one line — the delivered mockup's "Mismatch Classification"
+ *  shape: dot, title, count, the citation as a chip, the action inline, and
+ *  the money on the right.
+ *
+ *  **It replaces three stacked lines per rule.** Twenty-one rules at three
+ *  lines each is a page of scrolling before the reader reaches anything they
+ *  can act on, and the thing they came for — how much and what to do — was the
+ *  part pushed furthest down. */
 function RuleLine({
   outcome,
   colour,
@@ -644,59 +831,61 @@ function RuleLine({
   readonly onPick: (label: string) => void;
 }) {
   const missing = outcome.unmet.map((u) => u.split("#").pop()).join(", ");
-  const clickable = outcome.status === "flagged";
+  const flagged = outcome.status === "flagged";
 
-  const right =
-    outcome.status === "flagged"
-      ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
-      : outcome.status === "passed"
-        ? "checked, clean"
-        : missing
-          ? `no ${missing} in this period`
-          : "could not run";
+  const right = flagged
+    ? `${outcome.found} finding${outcome.found === 1 ? "" : "s"}`
+    : outcome.status === "passed"
+      ? "checked, clean"
+      : missing
+        ? `no ${missing} in this period`
+        : "could not run";
 
-  return (
-    <div
-      className={`grid grid-cols-[1.25fr_150px_110px] items-baseline gap-3 rounded py-[4px] ${
-        active ? "bg-white/70" : ""
-      }`}
-    >
-      <div>
-        <span className="text-[12.5px] text-reco-t1">
-          {outcome.title ?? outcome.label}
-          <WhyPopover
-            title={outcome.title ?? outcome.label}
-            explanation={{
-              meaning: outcome.meaning ?? outcome.summary,
-              next_action: outcome.next_action,
-            }}
-          />
-        </span>
-        {/* The rule's own identifier, kept: a CA defending a position needs it,
-            and so does anyone reading a log. */}
-        <div className="font-mono text-[9.5px] text-reco-t5">{outcome.label}</div>
-        {/* The rule's own words. A label alone tells a reviewer nothing about
-            what was or was not checked. */}
-        {outcome.summary && (
-          <div className="mt-[1px] text-[11px] leading-snug text-reco-t4">{outcome.summary}</div>
+  const body = (
+    <>
+      <span className="mt-[6px] h-[6px] w-[6px] shrink-0 rounded-full" style={{ background: colour }} />
+
+      <span className="min-w-0 flex-1">
+        <span className="text-[12.5px] text-reco-t1">{outcome.title ?? outcome.label}</span>
+        {/* The rule's own identifier stays reachable — a CA defending a
+            position needs it — without taking a line of its own. */}
+        <WhyPopover
+          title={outcome.title ?? outcome.label}
+          explanation={{
+            meaning: outcome.meaning ?? outcome.summary,
+            next_action: outcome.next_action,
+          }}
+        />
+        {outcome.next_action && (
+          <span className="ml-2 text-[11.5px] text-reco-t4">{outcome.next_action}</span>
         )}
-      </div>
-      <span className="font-mono text-[10.5px] text-reco-t5">{outcome.governed_by ?? ""}</span>
-      {clickable ? (
-        <button
-          type="button"
-          onClick={() => onPick(outcome.label)}
-          className="text-left text-[11px] underline decoration-dotted underline-offset-2"
-          style={{ color: colour }}
-          title={active ? "Show all invoices" : "Show the invoices behind this"}
-        >
-          {right} {active ? "▾" : "›"}
-        </button>
-      ) : (
-        <span className="text-[11px]" style={{ color: colour }}>
-          {right}
+      </span>
+
+      {outcome.governed_by && (
+        <span className="shrink-0 rounded border border-reco-line px-1.5 py-[1px] font-mono text-[10px] text-reco-t5">
+          {outcome.governed_by}
         </span>
       )}
-    </div>
+
+      <span
+        className="w-[110px] shrink-0 text-right text-[11.5px]"
+        style={{ color: flagged ? colour : undefined }}
+      >
+        {right}
+        {flagged && " ›"}
+      </span>
+    </>
+  );
+
+  const className = `flex w-full items-start gap-2 rounded px-1 py-[5px] text-left ${
+    active ? "bg-white/70" : ""
+  } ${flagged ? "hover:bg-white/60" : ""}`;
+
+  return flagged ? (
+    <button type="button" onClick={() => onPick(outcome.label)} className={className}>
+      {body}
+    </button>
+  ) : (
+    <div className={className}>{body}</div>
   );
 }

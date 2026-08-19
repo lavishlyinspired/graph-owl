@@ -2136,6 +2136,18 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
     result = reconcile_buckets(rows_for("books"), rows_for("gstr2b"), findings)
     position = compute_itc_position(result)
 
+    # One case id per invoice, so a row's drawer can ask for its explanation.
+    # An invoice with two findings has two cases; the first is enough to
+    # explain the invoice, and the row already lists every label.
+    case_by_invoice: dict[str, str] = {}
+    for case in cases:
+        key = graphowl_client.normalize_invoice_no(case["invoice_no"])
+        case_by_invoice.setdefault(key, str(case["id"]))
+    for row in result.rows:
+        row["case_id"] = case_by_invoice.get(
+            graphowl_client.normalize_invoice_no(row.get("invoice_no"))
+        )
+
     return {
         # Every figure on this screen, with how it was derived and what to do
         # about it — Plan 123, the "show your working" pass. Sent with the
@@ -2193,6 +2205,11 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
                 "difference": float(r["books_taxable"] - r["portal_taxable"]),
                 "labels": r["labels"],
                 "blocked": r["blocked"],
+                # What the row's drawer asks to have explained. `None` where
+                # nothing was flagged — an invoice with no finding has no case,
+                # and the drawer says so rather than offering an explanation of
+                # nothing.
+                "case_id": r.get("case_id"),
             }
             for r in result.rows
         ],

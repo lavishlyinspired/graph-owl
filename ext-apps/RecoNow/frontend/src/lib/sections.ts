@@ -42,11 +42,13 @@ export const CAPABILITIES = [
   "authority",
   "obligations",
   "deliverables",
+  "client-report",
   // Settings
   "rules",
   "gstins",
   "users",
   "new-session",
+  "client-report",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -105,22 +107,25 @@ export const SECTIONS: Partial<Record<RouteName, readonly Section[]>> = {
   register: [
     {
       capability: "register",
-      label: "Findings",
       // **Renamed from "All invoices", which was wrong and confusing.** The
       // Reconcile screen's "All invoices" lists every *invoice* on either side
       // — 17 of them, in four buckets. This lists every *finding* — 12 of
-      // them, one per problem, and an invoice with two problems appears
-      // twice. Two screens both labelled "all invoices" showing different
-      // counts is the product looking broken while both are correct.
+      // them, one per problem, so an invoice with two problems appears twice.
+      // Two screens both labelled "all invoices" showing different counts is
+      // the product looking broken while both are correct.
+      label: "All findings",
       because: "the stage's own purpose",
     },
     {
+      // **Case detail has no tab.** It had one, and it was permanently empty:
+      // it read a selection nothing ever set, so it told the reader to open a
+      // case from a list that offered no way to. The drawer *is* the case
+      // detail now — click a finding and it opens beside the list, which is
+      // where you were already looking. Listed without a label so the
+      // coverage test still sees the capability and no dead tab is rendered.
       capability: "case-detail",
-      label: "Case detail",
-      // Merged in: a case is reached by clicking a finding, so it belongs
-      // beside the list rather than on its own route where arriving without a
-      // selection shows an empty screen.
-      because: "you open a case *from* the list, so it belongs beside it",
+      label: "",
+      because: "reached by clicking a finding, not by a tab",
     },
     {
       capability: "exceptions",
@@ -190,7 +195,12 @@ export const SECTIONS: Partial<Record<RouteName, readonly Section[]>> = {
     },
   ],
   deliverables: [
-    { capability: "deliverables", label: "Deliverables", because: "its own surface" },
+    { capability: "deliverables", label: "Exports", because: "the stage's own purpose" },
+    {
+      capability: "client-report",
+      label: "Client report",
+      because: "the month's reconciliation written up is a deliverable like any other",
+    },
   ],
   settings: [
     { capability: "rules", label: "Rules", because: "the stage's own purpose" },
@@ -215,5 +225,8 @@ export function sectionsFor(route: RouteName): readonly Section[] {
  *  A single-capability route renders none — a strip with one tab is chrome
  *  that costs vertical space and tells a reader nothing. */
 export function hasTabs(route: RouteName): boolean {
-  return sectionsFor(route).length > 1;
+  // Counts *labelled* sections: a capability reached another way — case detail,
+  // via the drawer — is still listed here so the coverage test sees it, and
+  // must not conjure a tab nobody can use.
+  return sectionsFor(route).filter((s) => s.label).length > 1;
 }

@@ -1,43 +1,24 @@
-import { useEffect, useState } from "react";
-import { useOutletContext } from "react-router-dom";
-import GenericScreen from "../components/GenericScreen";
-import { screenConfig } from "../lib/screenConfigs";
-import type { RowData, KpiItem } from "../lib/screenConfigs";
-import { fetchDeliverables, type Deliverable } from "../lib/api";
+import { useState } from "react";
+import { SectionTabs } from "../components/SectionTabs";
+import { sectionsFor } from "../lib/sections";
+import type { Capability } from "../lib/sections";
+import DeliverablesPanel from "../panels/deliverablesMain";
+import ClientReportPanel from "../panels/clientReport";
+
+const PANELS: Partial<Record<Capability, React.ComponentType>> = {
+  deliverables: DeliverablesPanel,
+  "client-report": ClientReportPanel,
+};
 
 export default function DeliverablesRoute() {
-  const { clientId, periodId } = useOutletContext<{ clientId: string; periodId: string }>();
-  const [rows, setRows] = useState<readonly Deliverable[]>([]);
-  const [loading, setLoading] = useState(true);
+  const sections = sectionsFor("deliverables");
+  const [active, setActive] = useState<Capability>(sections[0]!.capability);
+  const Panel = PANELS[active] ?? DeliverablesPanel;
 
-  useEffect(() => {
-    if (!clientId || !periodId) return;
-    setLoading(true);
-    fetchDeliverables(clientId, periodId)
-      .then(setRows)
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [clientId, periodId]);
-
-  const tableRows: readonly RowData[] = rows.map((d) => ({
-    cells: [
-      { t: d.kind },
-      { t: d.status, color: d.status === "drafted" ? "amber" : "green" },
-      { t: new Date(d.generated_at).toLocaleDateString() },
-    ],
-  }));
-
-  const kpis: readonly KpiItem[] = [
-    { label: "Total Deliverables", value: String(rows.length), sub: "", color: "blue" },
-    { label: "Drafted", value: String(rows.filter((d) => d.status === "drafted").length), sub: "", color: "amber" },
-    { label: "Final", value: String(rows.filter((d) => d.status === "final").length), sub: "", color: "green" },
-    { label: "Export Ready", value: String(rows.filter((d) => d.status !== "drafted").length), sub: "", color: "green" },
-  ];
-
-  // Headings describe the cells this route builds, not the mockup's
-  // own column shape — see GenericScreen's liveCols.
-  const cols = ["DELIVERABLE", "STATUS", "GENERATED"] as const;
-  const grid = "1.5fr 120px 140px";
-
-  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("deliverables")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  return (
+    <div>
+      <SectionTabs route="deliverables" active={active} onSelect={setActive} />
+      <Panel />
+    </div>
+  );
 }
