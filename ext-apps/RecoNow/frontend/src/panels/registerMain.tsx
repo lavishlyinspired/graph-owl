@@ -36,7 +36,11 @@ export default function RegisterRoute() {
     <div className="p-6">
       <div className="mb-4 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[20px] font-bold text-reco-t1">Reconciliation register</h1>
+          <h1 className="mb-1 text-[20px] font-bold text-reco-t1">Findings</h1>
+          <p className="mb-1 text-[12.5px] text-reco-t4">
+            What needs attention and why. Not every mismatch is a finding, and not every
+            finding is a mismatch — blocked credit sits on invoices that match perfectly.
+          </p>
           {reasonCode && (
             <p className="text-[12.5px] text-reco-t4">
               Filtered to <span className="font-mono text-reco-t2">{reasonCode}</span> —{" "}

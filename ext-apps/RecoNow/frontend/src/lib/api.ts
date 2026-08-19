@@ -458,6 +458,23 @@ export function fetchAgentReport(runId: string): Promise<{ readonly report: stri
   return apiFetch(`/api/agents/runs/${encodeURIComponent(runId)}/report`);
 }
 
+export interface WorkingPaperReport {
+  readonly report: string;
+  readonly filename: string;
+  readonly source: "model" | "computed";
+  readonly note: string | null;
+  readonly refusal?: string;
+}
+
+export function fetchWorkingPaperReport(
+  clientId: string,
+  periodId: string,
+): Promise<WorkingPaperReport> {
+  return apiFetch<WorkingPaperReport>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/working-paper/report`,
+  );
+}
+
 export interface ClientReport {
   readonly report: string;
   readonly source: "model" | "computed";

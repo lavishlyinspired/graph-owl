@@ -5,20 +5,21 @@ import type { Capability } from "../lib/sections";
 import DeliverablesPanel from "../panels/deliverablesMain";
 import ClientReportPanel from "../panels/clientReport";
 
-const PANELS: Partial<Record<Capability, React.ComponentType>> = {
-  deliverables: DeliverablesPanel,
-  "client-report": ClientReportPanel,
-};
-
 export default function DeliverablesRoute() {
   const sections = sectionsFor("deliverables");
   const [active, setActive] = useState<Capability>(sections[0]!.capability);
-  const Panel = PANELS[active] ?? DeliverablesPanel;
 
   return (
     <div>
       <SectionTabs route="deliverables" active={active} onSelect={setActive} />
-      <Panel />
+      {active === "client-report" ? (
+        <ClientReportPanel />
+      ) : (
+        // The header's two buttons were inert. They now go where their labels
+        // say: the primary to the client report this screen already hosts, the
+        // secondary to the working paper screen that builds Table 4.
+        <DeliverablesPanel onGenerateReport={() => setActive("client-report")} />
+      )}
     </div>
   );
 }

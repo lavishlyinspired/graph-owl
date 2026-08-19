@@ -576,7 +576,18 @@ function Header({ rate, total }: { readonly rate: number; readonly total: number
       <div>
         <h1 className="mb-1 text-[20px] font-bold tracking-tight text-reco-t1">Reconcile</h1>
         <p className="text-[12.5px] text-reco-t4">
-          Every invoice on either side, in exactly one state.
+          What happened when your books were compared with GSTR-2B. Every invoice on either
+          side, in exactly one state.
+        </p>
+        {/* **Says out loud why this screen is not the Findings screen.** The
+            two were genuinely redundant while any finding forced an invoice
+            into Review — bucket and findings were perfectly correlated, so
+            this could only restate what that one said. They now answer
+            different questions, and the copy has to make that legible or a
+            reader still sees two exception tables. */}
+        <p className="mt-1 text-[11.5px] text-reco-t5">
+          A state here is about <em>agreement</em>, not compliance — an invoice can match
+          perfectly and still carry a finding.
         </p>
       </div>
       {total > 0 && (

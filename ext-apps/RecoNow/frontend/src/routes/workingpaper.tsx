@@ -5,6 +5,8 @@ import { formatRupees } from "../lib/format";
 import { WhyPopover } from "../components/WhyPopover";
 import type { FigureExplanation } from "../lib/api";
 import { loadStateFor } from "../lib/loadState";
+import { GeneratedBadge } from "../components/GeneratedBadge";
+import { fetchWorkingPaperReport, type WorkingPaperReport } from "../lib/api";
 import type { WorkspaceState } from "../lib/workspace";
 
 const DIRECTION: Record<
@@ -37,6 +39,8 @@ export default function WorkingPaperRoute() {
   const { clientId, periodId } = useOutletContext<WorkspaceState>();
   const [paper, setPaper] = useState<WorkingPaper | null>(null);
   const [loading, setLoading] = useState(true);
+  const [writeUp, setWriteUp] = useState<WorkingPaperReport | null>(null);
+  const [writing, setWriting] = useState(false);
 
   useEffect(() => {
     if (!clientId || !periodId) return;
@@ -70,13 +74,65 @@ export default function WorkingPaperRoute() {
 
   return (
     <div className="space-y-6 p-6">
-      <header>
+      <header className="flex items-start justify-between gap-4">
+        <div>
         <h1 className="text-[19px] font-medium text-reco-t1">GSTR-3B working paper</h1>
         <p className="mt-1 text-[13px] text-reco-t4">
           Every figure below names where it came from. A number a reviewer cannot trace is
           one they have to take on trust.
         </p>
+        </div>
+        {/* The document a partner or an officer receives. A working paper that
+            cannot leave the screen is not a working paper. */}
+        <button
+          type="button"
+          disabled={writing}
+          onClick={() => {
+            if (!clientId || !periodId) return;
+            setWriting(true);
+            fetchWorkingPaperReport(clientId, periodId)
+              .then(setWriteUp)
+              .catch(() => setWriteUp(null))
+              .finally(() => setWriting(false));
+          }}
+          className="shrink-0 rounded border border-reco-line px-3 py-1.5 text-[12px] text-reco-t2 hover:border-reco-accent hover:text-reco-accent disabled:opacity-50"
+        >
+          {writing ? "Writing up…" : "Write up & download"}
+        </button>
       </header>
+
+      {writeUp && (
+        <section className="rounded border border-reco-line p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <GeneratedBadge source={writeUp.source} />
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => {
+                const blob = new Blob([writeUp.report], { type: "text/plain;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = writeUp.filename;
+                link.click();
+                URL.revokeObjectURL(url);
+              }}
+              className="rounded border border-reco-line px-3 py-1 text-[11.5px] text-reco-t2 hover:border-reco-accent hover:text-reco-accent"
+            >
+              Download {writeUp.filename}
+            </button>
+          </div>
+          {writeUp.note && (
+            <p className="mb-2 text-[11.5px] leading-relaxed text-reco-t4">
+              {writeUp.note}
+              {writeUp.refusal && <span className="mt-1 block">Refused: {writeUp.refusal}</span>}
+            </p>
+          )}
+          <pre className="overflow-x-auto whitespace-pre-wrap text-[11.5px] leading-relaxed text-reco-t2">
+            {writeUp.report}
+          </pre>
+        </section>
+      )}
 
       {!paper.complete && (
         <p className="rounded border-2 border-reco-amber/40 bg-reco-amber/5 px-4 py-3 text-[12px] leading-relaxed text-reco-t2">

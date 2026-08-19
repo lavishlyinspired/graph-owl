@@ -242,7 +242,14 @@ class TestFindingsWithoutGstin:
               "supplier_gstin": None}],
         )
 
-        assert result.counts[BUCKET_REVIEW] == 1
+        # **Updated when the bucket stopped being decided by findings.** This
+        # test is about a finding *attaching* to its invoice when the GSTIN is
+        # missing — the bucket assertion was incidental, and asserted the old
+        # conflation: both sides report identical figures here, so the invoice
+        # is Matched. The credit being blocked is a separate statement, and it
+        # is the one this test actually cares about.
+        assert result.counts[BUCKET_MATCHED] == 1
+        assert result.rows[0]["labels"] == ["gst:ITCNotAvailable"]
         assert result.rows[0]["blocked"] is True
 
     def test_blocked_credit_is_quantified_when_the_finding_omits_the_gstin(self):

@@ -27,6 +27,16 @@ interface GenericScreenProps {
   readonly liveGrid?: string;
   readonly loading?: boolean;
   readonly error?: string | null;
+  /** What the header's two buttons do.
+   *
+   *  **They did nothing at all until now.** The labels come from the mockup
+   *  config, so every generic screen rendered a primary and a secondary
+   *  action that looked live and was inert — the worst kind of broken,
+   *  because a button that does nothing is indistinguishable from one whose
+   *  work has not finished. A screen that supplies no handler now renders no
+   *  button rather than a decorative one. */
+  readonly onPrimary?: () => void;
+  readonly onSecondary?: () => void;
 }
 
 /** The screen config supplies *layout* — titles, column headings, grid widths,
@@ -49,6 +59,8 @@ export default function GenericScreen({
   liveGrid,
   loading,
   error,
+  onPrimary,
+  onSecondary,
 }: GenericScreenProps) {
   const effectiveRows = liveRows ?? [];
   const effectiveKpis = liveKpis ?? [];
@@ -85,18 +97,27 @@ export default function GenericScreen({
           <p className="text-[12.5px] text-reco-t4">{config.desc}</p>
         </div>
         <div className="flex gap-2">
-          <button
-            type="button"
-            className="rounded-[7px] border border-reco-line-3 bg-white px-3.5 py-[7px] text-[12.5px] text-reco-t1 hover:border-reco-t5"
-          >
-            {config.secondary}
-          </button>
-          <button
-            type="button"
-            className="rounded-[7px] bg-reco-t0 px-3.5 py-[7px] text-[12.5px] font-semibold text-white"
-          >
-            {config.primary}
-          </button>
+          {/* Rendered only where the screen supplied a handler. An inert
+              button is worse than an absent one: it promises an action and
+              swallows the click. */}
+          {onSecondary && (
+            <button
+              type="button"
+              onClick={onSecondary}
+              className="rounded-[7px] border border-reco-line-3 bg-white px-3.5 py-[7px] text-[12.5px] text-reco-t1 hover:border-reco-t5"
+            >
+              {config.secondary}
+            </button>
+          )}
+          {onPrimary && (
+            <button
+              type="button"
+              onClick={onPrimary}
+              className="rounded-[7px] bg-reco-t0 px-3.5 py-[7px] text-[12.5px] font-semibold text-white"
+            >
+              {config.primary}
+            </button>
+          )}
         </div>
       </div>
 

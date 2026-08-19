@@ -40,6 +40,9 @@ export default function AgentsRoute() {
   const [scope, setScope] = useState("");
   const [open, setOpen] = useState<AgentRunDetail | null>(null);
   const [report, setReport] = useState<string | null>(null);
+  // Populated from whichever run is open — a list row carries span counts, not
+  // span names, so the tool identities only exist once a run is expanded.
+  const [mcpNames, setMcpNames] = useState<string[]>([]);
 
   const refresh = () =>
     fetchAgentRuns()
@@ -58,9 +61,35 @@ export default function AgentsRoute() {
     return () => clearInterval(timer);
   }, []);
 
+  // Aggregated across every run held. `tokens` stays null rather than 0 when
+  // nothing was measured — a zero claims the fleet was free.
+  const totals = runs.reduce(
+    (acc, run) => {
+      const counts = run.span_counts ?? {};
+      acc.model += counts.model ?? 0;
+      acc.refusals += counts.refusal ?? 0;
+      if (run.tokens !== null) acc.tokens = (acc.tokens ?? 0) + run.tokens;
+      return acc;
+    },
+    { mcp: 0, model: 0, refusals: 0, tokens: null as number | null },
+  );
+  // MCP calls are tool spans whose name carries the `mcp:` prefix, so the
+  // count is of graph calls specifically rather than of every tool step.
+  const mcpTools = [...new Set(mcpNames)];
+  totals.mcp = mcpNames.length;
+
   const openRun = (id: string) => {
     setReport(null);
-    fetchAgentRun(id).then(setOpen).catch(() => setOpen(null));
+    fetchAgentRun(id)
+      .then((detail) => {
+        setOpen(detail);
+        setMcpNames(
+          detail.spans
+            .filter((span) => span.name.startsWith("mcp:"))
+            .map((span) => span.name.slice(4)),
+        );
+      })
+      .catch(() => setOpen(null));
   };
 
   return (
@@ -71,6 +100,33 @@ export default function AgentsRoute() {
           Every run, what it looked at, what it decided, and what it was refused.
         </p>
       </header>
+
+      {/* **What the fleet is actually made of.** The run list showed status
+          counts and step counts, which told a reader an agent ran but nothing
+          about what it reached for. These three are the questions asked after
+          an incident: did it call the graph, did it call a model, and was it
+          ever refused. */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Tile
+          label="MCP tool calls"
+          value={totals.mcp}
+          hint={mcpTools.length ? mcpTools.join(" · ") : "no graph calls yet"}
+        />
+        <Tile
+          label="Model calls"
+          value={totals.model}
+          hint={
+            totals.tokens === null
+              ? "usage not measured"
+              : `${totals.tokens.toLocaleString()} tokens`
+          }
+        />
+        <Tile
+          label="Refused writes"
+          value={totals.refusals}
+          hint="a grant not held at the moment of the write"
+        />
+      </div>
 
       <div className="flex gap-2 text-[11px]">
         {Object.entries(counts).map(([status, n]) => (
@@ -163,6 +219,27 @@ export default function AgentsRoute() {
           )}
         </section>
       )}
+    </div>
+  );
+}
+
+
+function Tile({
+  label,
+  value,
+  hint,
+}: {
+  readonly label: string;
+  readonly value: number;
+  readonly hint: string;
+}) {
+  return (
+    <div className="rounded border border-reco-line bg-white p-3">
+      <div className="font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">{label}</div>
+      <div className="font-mono text-[20px] text-reco-t1">{value}</div>
+      <div className="mt-0.5 truncate text-[10.5px] text-reco-t5" title={hint}>
+        {hint}
+      </div>
     </div>
   );
 }

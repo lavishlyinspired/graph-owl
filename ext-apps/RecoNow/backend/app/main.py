@@ -29,7 +29,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import case_explainer, case_narrative, client_report, explain, follow_ups, rule_guidance
+from . import case_explainer, case_narrative, client_report, explain, follow_ups, rule_guidance, working_paper_report
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -2012,6 +2012,45 @@ async def follow_up_drafts_route(client_id: str, period_id: str) -> dict:
         # every model call, and anything it was refused.
         "run_id": run.id,
     }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/working-paper/report")
+async def working_paper_report_route(client_id: str, period_id: str) -> dict:
+    """The working paper written up as a document, with a filename to save it under.
+
+    A table of five figures answers "what is the number". A working paper has
+    to answer *how did you get there, and what did you leave out* — the
+    question a partner or an officer actually asks.
+
+    Grounded like every other generated text here. A working paper is filed
+    evidence: a figure invented in one is worse than having no working paper.
+    """
+    paper = await working_paper_route(client_id, period_id)
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        period = await repo.get_period(conn, client_id=client_id, period_id=period_id)
+
+    label = f"{(period or {}).get('month', '')} {(period or {}).get('year', '')}".strip() or "this period"
+    filename, computed = working_paper_report.downloadable(paper, period=label)
+
+    if not ai.is_available():
+        return {"report": computed, "filename": filename, "source": "computed",
+                "note": "No inference model is reachable, so this is the computed write-up."}
+
+    drafted = ai.chat(AGENT_SYSTEM_PROMPT, working_paper_report.build_prompt(computed))
+    if not drafted:
+        return {"report": computed, "filename": filename, "source": "computed", "note": None}
+
+    # Every figure the computed document prints, so a faithful rewrite cannot
+    # be refused — the same contract the client report uses.
+    supplied = {f"line_{i}": line for i, line in enumerate(computed.splitlines()) if line.strip()}
+    checked = grounding.ground_draft(draft=drafted, supplied=supplied, log=AGENT_REFUSALS)
+    if not checked["grounded"]:
+        return {"report": computed, "filename": filename, "source": "computed",
+                "note": "The model's write-up stated a figure this paper does not carry, so it "
+                "was refused. This is the computed version.",
+                "refusal": checked["reason"]}
+    return {"report": drafted.strip(), "filename": filename, "source": "model", "note": None}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/client-report")

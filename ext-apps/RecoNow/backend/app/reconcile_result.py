@@ -162,7 +162,24 @@ def reconcile_buckets(
             # data it needs — and nine of thirteen rules in this pack are
             # currently starved of input. Found live: INV-MAR-003, books
             # 54,000 against portal 42,000, reported as matched.
-            bucket = BUCKET_REVIEW if (labels or _differs(book_row, portal_row)) else BUCKET_MATCHED
+            # **The bucket is decided by the comparison alone.** It used to be
+            # `labels or _differs(...)`, so *any* finding forced Review — and a
+            # perfectly matched invoice carrying a s.17(5) blocked-credit
+            # finding was reported as a value disagreement, which it is not.
+            #
+            # That conflated two different questions. The bucket answers "do
+            # these records agree"; a finding answers "what does this mean, and
+            # must someone act". Blocked credit, goods not yet received and a
+            # supplier unpaid past 180 days all agree perfectly with the portal
+            # and none of them is claimable — and on real data the two were
+            # perfectly correlated, so the reconciliation could only restate
+            # what the findings already said.
+            #
+            # The finding is still attached to the row; only the bucket
+            # changed. Where the money is counted did not: `blocked` is still
+            # derived from the labels, so `itc_position` routes blocked credit
+            # away from confirmed regardless of which bucket it sits in.
+            bucket = BUCKET_REVIEW if _differs(book_row, portal_row) else BUCKET_MATCHED
         elif book_row is not None:
             bucket = BUCKET_ONLY_BOOKS
         else:

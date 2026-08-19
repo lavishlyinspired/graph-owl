@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { useNavigate, useOutletContext } from "react-router-dom";
 import GenericScreen from "../components/GenericScreen";
 import { screenConfig } from "../lib/screenConfigs";
 import type { RowData, KpiItem } from "../lib/screenConfigs";
 import { fetchDeliverables, type Deliverable } from "../lib/api";
 
-export default function DeliverablesPanel() {
+export default function DeliverablesPanel({
+  onGenerateReport,
+}: {
+  readonly onGenerateReport?: () => void;
+} = {}) {
+  const navigate = useNavigate();
   const { clientId, periodId } = useOutletContext<{ clientId: string; periodId: string }>();
   const [rows, setRows] = useState<readonly Deliverable[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,5 +44,16 @@ export default function DeliverablesPanel() {
   const cols = ["DELIVERABLE", "STATUS", "GENERATED"] as const;
   const grid = "1.5fr 120px 140px";
 
-  return <GenericScreen liveCols={cols} liveGrid={grid} config={screenConfig("deliverables")} liveRows={tableRows} liveKpis={kpis} loading={loading} />;
+  return (
+    <GenericScreen
+      liveCols={cols}
+      liveGrid={grid}
+      config={screenConfig("deliverables")}
+      liveRows={tableRows}
+      liveKpis={kpis}
+      loading={loading}
+      onPrimary={onGenerateReport}
+      onSecondary={() => navigate("/workingpaper")}
+    />
+  );
 }
