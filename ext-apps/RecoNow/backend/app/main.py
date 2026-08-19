@@ -28,6 +28,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
+from . import explain, rule_guidance
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1751,6 +1752,9 @@ async def working_paper_route(client_id: str, period_id: str) -> dict:
     paper = working_paper.build_working_paper(
         gstr2b=portal, findings=findings, gstr3b=gstr3b
     )
+    paper["explain"] = explain.WORKING_PAPER
+    # Says out loud why this total differs from the ITC position screen's.
+    paper["compare_note"] = explain.ITC_VS_WORKING_PAPER
     return _decimals_to_floats(paper)
 
 
@@ -1797,6 +1801,17 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
     position = compute_itc_position(result)
 
     return {
+        # Every figure on this screen, with how it was derived and what to do
+        # about it — Plan 123, the "show your working" pass. Sent with the
+        # data rather than hardcoded in the component, so a figure and its
+        # stated derivation are one edit.
+        "explain": explain.BUCKETS,
+        # Every rule label carries its authored title, meaning and next action
+        # — `gst:AmountMismatch` means nothing to a business reader. The
+        # guidance lives in the pack, never here: a healthcare or banking pack
+        # names entirely different findings.
+        "guidance": _pack_guidance(),
+        "explain_itc": explain.ITC_POSITION,
         # What each rule concluded, as **graph-owl reported it** — passed,
         # flagged, or not evaluated because a declared requirement had no
         # instances. Not inferred here from which files exist: that was a
@@ -1805,7 +1820,7 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
         # `checks_disabled` is kept as the pre-reconciliation view: before a
         # run there are no outcomes, and a reviewer still needs to know which
         # checks the uploaded files can support.
-        "rule_outcomes": outcomes,
+        "rule_outcomes": rule_guidance.decorate(outcomes, _pack_guidance()),
         "checks_disabled": checks_disabled(set(by_kind)) if not outcomes else {
             o["label"]: CHECK_REASONS.get(o["label"], "")
             for o in outcomes if o["status"] == "notEvaluated"
@@ -2467,32 +2482,53 @@ async def list_suppliers(client_id: str, period_id: str):
     ]
 
 
+#: The pack's per-finding guidance, fetched once per process.
+#:
+#: Cached because every screen wants it and it changes only when a pack is
+#: reinstalled — a fetch per request would put a graph-owl round trip in front
+#: of every render, for data that is effectively static.
+_GUIDANCE_CACHE: dict[str, dict] = {}
+
+
+def _pack_guidance(pack: str = "gst") -> dict:
+    if pack not in _GUIDANCE_CACHE:
+        _GUIDANCE_CACHE[pack] = graphowl_client.console_guidance(GRAPH_OWL_SERVER, pack)
+    return _GUIDANCE_CACHE[pack]
+
+
 @app.get("/api/clients/{client_id}/periods/{period_id}/itc")
 async def itc_position(client_id: str, period_id: str):
-    pool = _require_db_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT 
-                COALESCE(SUM(COALESCE(books_amount, 0)), 0) as total_books_amount,
-                COALESCE(SUM(COALESCE(portal_amount, 0)), 0) as total_portal_amount,
-                COALESCE(SUM(
-                    ABS(COALESCE(books_amount, 0) - COALESCE(portal_amount, COALESCE(books_amount, 0)))
-                ), 0) as total_exposure,
-                COUNT(*) as total_cases,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_cases
-            FROM case_record
-            WHERE client_id = $1 AND period_id = $2
-            """,
-            client_id,
-            period_id,
-        )
+    """Where the period's input tax credit stands — **the same five classes the
+    reconcile screen reports**, from the same computation.
+
+    **This route used to disagree with that screen, and the disagreement was
+    the product lying.** It summed `case_record`: only the *flagged* invoices,
+    double-counting any invoice carrying two findings, excluding every clean
+    one — then labelled the result `books_amount`, `portal_amount` and
+    `exposure` as though they were period totals. On real data it reported an
+    "exposure" of ₹14,750 that could not be derived from anything else on any
+    screen.
+
+    Those keys are **removed rather than silently redefined**: a caller still
+    reading `exposure` should break loudly rather than quietly get a different
+    number.
+
+    Every figure carries its own derivation, what it means in a business
+    reader's terms, and what to do about it — because "blocked" and "pending"
+    are the same size of number and opposite situations, and a figure without
+    its remedy is half an answer.
+    """
+    recon = await reconciliation_route(client_id, period_id)
+    position = recon["itc"]
+
     return {
-        "books_amount": float(row["total_books_amount"]),
-        "portal_amount": float(row["total_portal_amount"]),
-        "exposure": float(row["total_exposure"]),
-        "case_count": row["total_cases"],
-        "pending_count": row["pending_cases"],
+        "position": position,
+        "counts": recon["counts"],
+        "explain": explain.ITC_POSITION,
+        # Two correct numbers measuring different populations look like a bug
+        # unless each says what it counted. This is the most confusing pair of
+        # screens in the product.
+        "compare_note": explain.ITC_VS_WORKING_PAPER,
     }
 
 

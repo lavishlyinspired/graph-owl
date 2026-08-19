@@ -483,6 +483,69 @@ def rows_to_turtle(rows: list[dict], kind: str) -> str:
     return "\n".join(lines)
 
 
+def _request(
+    url: str,
+    *,
+    method: str = "GET",
+    body: bytes | None = None,
+    token: str | None = None,
+    content_type: str = "application/json",
+    timeout: int = 10,
+) -> dict:
+    """One JSON round trip to graph-owl.
+
+    **Added 19 August 2026 after four call sites used it without it
+    existing.** `console_guidance`, the memory write, the waiver write and the
+    explain read all called `graphowl_client._request(...)` — a name this
+    module never defined or imported — and every one of them sat inside a bare
+    `except Exception`, so the `NameError` was swallowed and each feature
+    silently did nothing. The guidance fetch is what surfaced it: every rule
+    rendered a fallback title, which looked like missing pack data rather than
+    a broken call.
+
+    The lesson is the bare except, not the missing function: an `except
+    Exception` around a call that can fail for *programming* reasons as well as
+    network ones cannot tell the two apart, and reports both as "graph-owl was
+    unavailable".
+
+    # Raises
+
+    `IngestError` on refusal, unreachability or timeout — the same error every
+    other call in this module raises, so a caller has one thing to catch.
+    """
+    request = urllib.request.Request(url, data=body, method=method)
+    if body is not None:
+        request.add_header("content-type", content_type)
+    if token:
+        request.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as refused:
+        detail = refused.read().decode("utf-8", errors="replace")
+        raise IngestError(f"{method} {url} failed: HTTP {refused.code} {detail}") from refused
+    except urllib.error.URLError as unreachable:
+        raise IngestError(f"{method} {url} was unreachable: {unreachable.reason}") from unreachable
+    except TimeoutError:
+        raise IngestError(f"{method} {url} timed out") from None
+
+
+def console_guidance(server: str, pack: str = "gst", token: str | None = None) -> dict:
+    """A pack's per-finding guidance — `GET /packs/{pack}/console`.
+
+    **Best-effort, and the failure mode is deliberate.** A graph-owl that is
+    unreachable costs readable titles, not the screen: `rule_guidance.decorate`
+    falls back to a readable phrase derived from the label, so the worst case
+    is a slightly worse noun rather than a raw IRI or an error page.
+    """
+    try:
+        config = _request(f"{server.rstrip('/')}/packs/{pack}/console", method="GET", token=token)
+    except Exception:  # noqa: BLE001
+        return {}
+    return (config or {}).get("guidance") or {}
+
+
 def record_alignments(*, server: str, requests: list[dict], token: str | None = None) -> int:
     """Post each alignment, returning how many landed — Plan 123 Slice G.
 
