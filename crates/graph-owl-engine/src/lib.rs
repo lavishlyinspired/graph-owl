@@ -162,6 +162,43 @@ pub trait TripleStore: Send + Sync {
     /// [`EngineError::Backend`] if the query fails.
     async fn count(&self, pattern: &TriplePattern) -> Result<u64, EngineError>;
 
+    /// How many **distinct subjects** match `pattern` — a node count, as
+    /// opposed to [`count`](Self::count)'s fact count.
+    ///
+    /// **Exists because the two are routinely confused and the confusion is
+    /// invisible.** A console tile reading "graph nodes" reported zero against
+    /// a store holding 724 facts, because the count behind it matched flakes
+    /// carrying one specific type predicate — which only projected catalog
+    /// assets have. Every subject an RDF import had ever landed was uncounted,
+    /// and nothing said so: a plausible number, quietly wrong
+    /// (`plans/123-reconow-agentic-reconciliation.md` §9).
+    ///
+    /// A subject is counted once however many flakes it carries, and
+    /// regardless of which vocabulary typed it — or whether anything typed it
+    /// at all.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the query fails.
+    async fn count_distinct_subjects(&self, pattern: &TriplePattern) -> Result<u64, EngineError>;
+
+    /// How many facts are **edges** — those whose object references another
+    /// subject rather than holding a literal.
+    ///
+    /// Exists for the same reason [`count_distinct_subjects`] does, and was
+    /// found by the same investigation: a console tile labelled "edges"
+    /// counted one specific predicate that only *projected catalog
+    /// relationships* carry, so a store full of imported RDF reported zero
+    /// edges beside hundreds of nodes. An edge is a reference, whatever
+    /// predicate names it.
+    ///
+    /// [`count_distinct_subjects`]: Self::count_distinct_subjects
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the query fails.
+    async fn count_edges(&self) -> Result<u64, EngineError>;
+
     /// Reserve the next transaction time.
     ///
     /// Every flake in one logical change shares the `t` this returns, which is

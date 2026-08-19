@@ -10324,7 +10324,7 @@ mod inbox_merge {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchResult {
-    /// "asset" | "glossary-term" | "business-metric".
+    /// "asset" | "glossary-term" | "business-metric" | "graph-subject".
     kind: &'static str,
     id: String,
     label: String,
@@ -10437,7 +10437,28 @@ async fn search(
     let mut metrics = catalog.search_metrics(&query.q).await?;
     metrics.truncate(limit);
 
-    Ok(Json(merge_search(assets, terms, metrics)))
+    // Plan 123 Slice I: graph subjects, which search could not previously
+    // reach at all. A pack's imported flakes have no asset representation, so
+    // every one of them was invisible to the console's main entry point.
+    let subjects = catalog.search_graph_subjects(&query.q, limit).await?;
+
+    let mut merged = merge_search(assets, terms, metrics);
+    merged.extend(
+        subjects
+            .into_iter()
+            .map(|(subject, predicate)| SearchResult {
+                kind: "graph-subject",
+                id: subject.to_string(),
+                label: subject.id.clone(),
+                fqn: subject.to_string(),
+                // Which predicate carried the matching value, so a caller can show
+                // *why* this is a hit rather than a bare identifier — the same reason
+                // an asset hit carries a snippet.
+                detail: Some(format!("matched on {predicate}")),
+                asset_kind: None,
+            }),
+    );
+    Ok(Json(merged))
 }
 
 #[cfg(test)]

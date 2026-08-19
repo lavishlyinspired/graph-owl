@@ -2221,11 +2221,25 @@ pub struct GraphSize {
     /// is behind the entity store, which is the projection-lag signal
     /// `93-console-overview.md` decision 4 asks for.
     pub nodes: u64,
-    /// How many relationships are projected — counted by `fromEntity`,
-    /// which every reified relationship gets exactly one of
-    /// ([`graph_owl_core::projection::relationship_to_flakes`]). The same
-    /// predicate `project_entity` already uses to tell a relationship node
-    /// from an ordinary one, not a new convention.
+    /// How many facts are **edges** — those whose object references another
+    /// subject rather than holding a literal.
+    ///
+    /// **Predicate-agnostic since Plan 123 Slice I.** This was counted by
+    /// `fromEntity`, which only a *projected catalog relationship* carries, so
+    /// a store full of imported RDF reported zero edges beside hundreds of
+    /// nodes — the same defect, in the same tile, as [`Self::nodes`].
+    ///
+    /// Two consequences worth stating rather than discovering. A reified
+    /// relationship is a node carrying `fromEntity` **and** `toEntity`, which
+    /// is two references, so it contributes 2 where a reader might say "one
+    /// relationship". And a **type assertion is an edge** — `x rdf:type C`
+    /// references the class node — so typing counts here too.
+    ///
+    /// Both could be special-cased away by naming the predicates involved.
+    /// Neither is, because naming one predicate as special is precisely the
+    /// mistake that made this count read zero for every pack that ever
+    /// imported anything. Over-counting a shape is a stated consequence;
+    /// missing an entire class of data was a silent one.
     pub edges: u64,
 }
 
@@ -11459,6 +11473,73 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
+    /// Graph subjects carrying `query` as a literal value — Plan 123 Slice I.
+    ///
+    /// **The console's Explore screen could not reach the data the console
+    /// held.** `GET /search?q=INV-MAR-011` returned `[]` while
+    /// `/graph/context` on the same subject returned its whole neighbourhood:
+    /// search covered assets, glossary terms and business metrics, and a
+    /// pack's imported flakes have no asset representation at all. Explore is
+    /// the main screen and its only entry point was a search that could not
+    /// see the graph.
+    ///
+    /// **Exact literal match, deliberately, and stated rather than implied.**
+    /// This is not a substring or fuzzy search and does not pretend to be: it
+    /// answers "which subject carries exactly this value", which is what an
+    /// invoice number, a GSTIN or a document id actually is. A real
+    /// text-search index over literals is a larger piece of work
+    /// (`graph-owl-search` exists as a port for it); shipping an exact match
+    /// that says so beats shipping a fuzzy one whose misses nobody can
+    /// explain.
+    ///
+    /// Returns each matching subject once, with the predicate that matched, so
+    /// a caller can show *why* a hit is a hit rather than a bare identifier.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if the graph query fails. Returns an empty
+    /// list, not an error, when no graph engine is configured — a deployment
+    /// without one has no graph subjects rather than a broken search.
+    pub async fn search_graph_subjects(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(Sid, Sid)>, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Ok(Vec::new());
+        };
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                o: Some(graph_owl_core::flake::FlakeValue::String(
+                    query.trim().to_string(),
+                )),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(format!("{e:?}"))))?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+        for flake in flakes {
+            if hits.len() >= limit {
+                break;
+            }
+            if seen.insert(flake.s.id.clone()) {
+                hits.push((flake.s, flake.p));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Business metrics whose name or definition matches `query`.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if the search fails.
     pub async fn search_metrics(
         &self,
         query: &str,
@@ -15659,20 +15740,27 @@ impl Catalog {
                     .count(&graph_owl_core::flake::TriplePattern::default())
                     .await
                     .unwrap_or(0);
+                // **Distinct subjects, not `dsc:type` flakes — Plan 123
+                // Slice I.** The old count matched one specific type
+                // predicate, which only *projected catalog assets* carry. A
+                // console tile labelled "graph nodes" therefore read 0
+                // against a store holding 724 facts of imported RDF, because
+                // a pack types its subjects with its own vocabulary's
+                // `rdf:type` and nothing here looked for that.
+                //
+                // The label was never wrong about what a reader wants. The
+                // query was wrong about what the label says: a node is a
+                // subject, however it was typed and whether or not it was.
                 let nodes = graph
-                    .count(&graph_owl_core::flake::TriplePattern {
-                        p: Some(Sid::dsc("type")),
-                        ..Default::default()
-                    })
+                    .count_distinct_subjects(&graph_owl_core::flake::TriplePattern::default())
                     .await
                     .unwrap_or(0);
-                let edges = graph
-                    .count(&graph_owl_core::flake::TriplePattern {
-                        p: Some(Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY)),
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap_or(0);
+                // Same defect as `nodes`, in the same tile: the old count
+                // named `fromEntity`, which only a *projected catalog
+                // relationship* carries, so a store full of imported RDF
+                // reported zero edges beside hundreds of nodes. An edge is a
+                // reference-valued fact, whatever predicate names it.
+                let edges = graph.count_edges().await.unwrap_or(0);
                 Some(GraphSize {
                     flakes,
                     nodes,
@@ -28002,6 +28090,31 @@ mod projection_isolation_tests {
             Ok(self.resolve(pattern).len() as u64)
         }
 
+        /// Reference-valued facts, through the same resolution as the rows.
+        async fn count_edges(&self) -> Result<u64, EngineError> {
+            let pattern = TriplePattern::default();
+            Ok(self
+                .resolve(&pattern)
+                .into_iter()
+                .filter(|flake| matches!(flake.o, FlakeValue::Ref(_)))
+                .count() as u64)
+        }
+
+        /// Distinct subjects, through the same resolution as the rows — for
+        /// the same reason `count` shares it.
+        async fn count_distinct_subjects(
+            &self,
+            pattern: &TriplePattern,
+        ) -> Result<u64, EngineError> {
+            self.queried.lock().expect("lock").push(pattern.clone());
+            let subjects: std::collections::HashSet<String> = self
+                .resolve(pattern)
+                .into_iter()
+                .map(|flake| flake.s.id)
+                .collect();
+            Ok(subjects.len() as u64)
+        }
+
         /// A real advancing clock, so successive writes land at different `t`.
         /// A double that returned a constant would make `as_of` unobservable —
         /// every fact would sit at the same instant and no historical query
@@ -39092,6 +39205,68 @@ mod overview_graph_size_tests {
         Sid::dsc(id)
     }
 
+    /// **Plan 123 Slice I.** The console reported `GRAPH FACTS 724, GRAPH
+    /// NODES 0` against real reconciled data — the count was `dsc:type`
+    /// flakes, which only projected *catalog assets* carry. Imported RDF uses
+    /// its own vocabulary's `rdf:type`, so every subject a pack ever landed
+    /// was invisible to a tile labelled "graph nodes".
+    ///
+    /// The label was not wrong about what a reader wants; the query was wrong
+    /// about what the label says. A node is a distinct subject.
+    #[tokio::test]
+    async fn graph_size_counts_every_subject_not_only_projected_catalog_assets() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let rdf_type = Sid::from_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+            .unwrap_or_else(|| Sid::dsc("rdfType"));
+
+        graph
+            .assert_flakes(&[
+                // A projected catalog asset — carries `dsc:type`.
+                Flake::assert(
+                    dsc("table-1"),
+                    Sid::dsc("type"),
+                    FlakeValue::String("table".into()),
+                    0,
+                ),
+                // Two imported RDF subjects — no `dsc:type` anywhere. These are
+                // what a pack lands, and what the old count could never see.
+                Flake::assert(
+                    dsc("gst-invoice-1"),
+                    rdf_type.clone(),
+                    FlakeValue::String("PurchaseInvoice".into()),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("gst-invoice-1"),
+                    Sid::dsc("invoiceNumber"),
+                    FlakeValue::String("INV-1".into()),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("gst-supplier-1"),
+                    rdf_type,
+                    FlakeValue::String("Supplier".into()),
+                    0,
+                ),
+            ])
+            .await
+            .expect("seed");
+
+        let overview = catalog
+            .overview(&graph_owl_core::Principal::system())
+            .await
+            .expect("overview");
+        let size = overview.graph.expect("graph configured");
+
+        // Three distinct subjects, not one. A subject is counted once however
+        // many flakes it carries — `gst-invoice-1` has two.
+        assert_eq!(size.nodes, 3, "{size:?}");
+        assert_eq!(size.flakes, 4, "{size:?}");
+    }
+
     #[tokio::test]
     async fn graph_size_counts_nodes_and_edges_distinctly_from_the_flake_total() {
         let storage = Arc::new(InMemoryStorage::default());
@@ -39151,8 +39326,23 @@ mod overview_graph_size_tests {
             .expect("overview");
 
         let graph_size = overview.graph.expect("graph configured");
-        assert_eq!(graph_size.nodes, 2, "{graph_size:?}");
-        assert_eq!(graph_size.edges, 1, "{graph_size:?}");
+        // Three distinct subjects: `table-1`, `table-2` and the relationship
+        // node carrying `fromEntity`. Under the old `dsc:type` count this read
+        // 2, because a reified relationship carries no `dsc:type` — which is
+        // the same blind spot that made every imported RDF subject invisible.
+        assert_eq!(graph_size.nodes, 3, "{graph_size:?}");
+        // **Two, not one, and the difference is a deliberate reading.** An
+        // edge is a reference-valued fact. A *reified* relationship — the
+        // shape the catalog's own projection uses — is a node carrying
+        // `fromEntity` and `toEntity`, which is genuinely two references, so
+        // it contributes 2 here where a user might say "one relationship".
+        //
+        // The alternative was to keep counting `fromEntity` alone, and that
+        // is what reported **0 edges** against a store full of imported RDF,
+        // where an edge is a single direct reference and no reification
+        // exists. Over-counting one shape by a factor of two is a stated
+        // consequence; missing an entire class of data was a silent one.
+        assert_eq!(graph_size.edges, 2, "{graph_size:?}");
         assert_eq!(graph_size.flakes, 6, "{graph_size:?}");
     }
 

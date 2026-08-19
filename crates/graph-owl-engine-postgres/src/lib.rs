@@ -514,6 +514,39 @@ impl TripleStore for PostgresTripleStore {
         u64::try_from(count).map_err(|_| EngineError::Backend(format!("negative count {count}")))
     }
 
+    async fn count_edges(&self) -> Result<u64, EngineError> {
+        // A reference-valued fact is an edge. `value_ref_ns IS NOT NULL` is
+        // the storage-level spelling of that, and it is predicate-agnostic on
+        // purpose: the count this replaced named one predicate and therefore
+        // saw only what the catalog's own projection wrote.
+        let all = TriplePattern::default();
+        let mut builder = Self::current_state_query(&all, "COUNT(*)", "");
+        builder.push(" AND value_ref_ns IS NOT NULL");
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| EngineError::Backend(e.to_string()))?;
+        let count: i64 = row.get(0);
+        u64::try_from(count).map_err(|_| EngineError::Backend(format!("negative count {count}")))
+    }
+
+    async fn count_distinct_subjects(&self, pattern: &TriplePattern) -> Result<u64, EngineError> {
+        // Same builder as `count` and `query_pattern`, with the projection
+        // changed and nothing else — a distinct-subject count computed by a
+        // separate path could disagree with the rows it claims to summarise,
+        // and the disagreement would surface far from here.
+        let mut builder =
+            Self::current_state_query(pattern, "COUNT(DISTINCT (namespace_s, sid_s))", "");
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| EngineError::Backend(e.to_string()))?;
+        let count: i64 = row.get(0);
+        u64::try_from(count).map_err(|_| EngineError::Backend(format!("negative count {count}")))
+    }
+
     #[tracing::instrument(name = "engine.next_time", skip_all)]
     async fn next_time(&self) -> Result<i64, EngineError> {
         // A single UPDATE ... RETURNING is atomic on its own row, so
