@@ -48,6 +48,11 @@ export const ROUTES = [
   "agents",
   "mcp-tools",
   "admin",
+  "tasks",
+  "quality",
+  "privacy",
+  "security",
+  "api-keys",
 ] as const;
 
 export type RouteName = (typeof ROUTES)[number];

@@ -19,11 +19,12 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
+from . import agent_runtime, ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, notice_defence, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
 import json
 from datetime import datetime
+from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
@@ -1437,6 +1438,70 @@ AGENT_REFUSALS: list[dict] = []
 MAX_REFUSALS_HELD = 200
 
 
+#: The live trigger bus. In-process, like `AGENT_REFUSALS` and for the same
+#: reason: this is the *shape* of the runtime, and a durable subscription
+#: store belongs in graph-owl's own `graph-owl-events` rather than in a second
+#: implementation here.
+AGENT_REGISTRY = agent_runtime.default_registry()
+
+#: Runs this process has performed, newest last.
+AGENT_RUNS: list[dict] = []
+
+
+def wake_agents(event: str, **context) -> list[str]:
+    """Fire an event and record which agents woke.
+
+    **An event nobody subscribes to is not an error.** Most events have no
+    listener, and treating that as a failure fills the log with noise that
+    trains everyone to ignore it.
+    """
+    woken = AGENT_REGISTRY.woken_by(event)
+    for agent in woken:
+        run = agent_runtime.AgentRun(registry=AGENT_REGISTRY, agent=agent, event=event)
+        AGENT_RUNS.append({**run.summary(), "context": context})
+    if len(AGENT_RUNS) > MAX_REFUSALS_HELD:
+        del AGENT_RUNS[: len(AGENT_RUNS) - MAX_REFUSALS_HELD]
+    return woken
+
+
+@app.get("/api/agents/subscriptions")
+async def agent_subscriptions_route() -> dict:
+    """Which agent wakes on which event, and what each may do.
+
+    An agent fleet whose wiring is not inspectable is one nobody can reason
+    about after an incident.
+    """
+    return {
+        "subscriptions": [
+            {"agent": s.agent, "event": s.event}
+            for s in sorted(agent_runtime.DEFAULT_SUBSCRIPTIONS, key=lambda s: (s.event, s.agent))
+        ],
+        "grants": sorted(
+            {"agent": a, "capability": c} for a, c in AGENT_REGISTRY._grants
+        )
+        if AGENT_REGISTRY._grants
+        else [],
+    }
+
+
+@app.post("/api/agents/{agent}/grant/{capability}")
+async def grant_route(agent: str, capability: str) -> dict:
+    AGENT_REGISTRY.grant(agent, capability)
+    return {"agent": agent, "capability": capability, "granted": True}
+
+
+@app.delete("/api/agents/{agent}/grant/{capability}")
+async def revoke_route(agent: str, capability: str) -> dict:
+    """Revoke a grant, effective immediately — including mid-run.
+
+    Every write re-checks, which is what makes this meaningful: a grant
+    checked only at dispatch cannot be revoked at all, because the run is
+    already past the check by the time anyone clicks.
+    """
+    AGENT_REGISTRY.revoke(agent, capability)
+    return {"agent": agent, "capability": capability, "granted": False}
+
+
 @app.get("/api/agents/activity")
 async def agent_activity_route() -> dict:
     """What the model was refused, and why — Plan 123 Slice F.
@@ -1451,11 +1516,64 @@ async def agent_activity_route() -> dict:
         del AGENT_REFUSALS[: len(AGENT_REFUSALS) - MAX_REFUSALS_HELD]
     return {
         "refusals": list(reversed(AGENT_REFUSALS)),
+        "runs": list(reversed(AGENT_RUNS)),
         "held": len(AGENT_REFUSALS),
         "cap": MAX_REFUSALS_HELD,
         # Stated so a reader does not mistake this for an audit trail.
         "scope": "this process only — a durable record belongs in graph-owl agent activity",
     }
+
+
+@app.get("/api/clients/{client_id}/cases/{case_id}/defence")
+async def case_defence_route(client_id: str, case_id: str) -> dict:
+    """Everything an officer would ask about one case — Plan 123 Slice E.
+
+    figure → finding → provision → derivation → source. The derivation comes
+    from graph-owl's `/reasoning/explain`, which has existed since Epic 6 and
+    which nothing asked for until now: Reco Now had the finding and the
+    citation and stopped there, so "why was this credit treated this way"
+    could be answered only with "the system flagged it".
+
+    **A graph-owl that is unreachable degrades the chain rather than failing
+    it.** A defence pack missing its derivation step, and saying so, is more
+    use than a 502 — the other four links are still the best available answer.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+        if case is None:
+            raise HTTPException(status_code=404, detail="no such case")
+        uploads = await repo.list_dataset_uploads(
+            conn, client_id=client_id, period_id=case["period_id"]
+        )
+
+    explanation: dict = {}
+    if case.get("subject"):
+        try:
+            query = notice_defence.explain_query(
+                case, predicate="gst:taxAmount", value=str(case.get("books_amount") or "")
+            )
+            explanation = graphowl_client._request(
+                f"{GRAPH_OWL_SERVER.rstrip('/')}/reasoning/explain"
+                f"?s={quote(query['s'], safe='')}&p={quote(query['p'], safe='')}"
+                f"&o={quote(query['o'], safe='')}",
+                method="GET",
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            print(f"[graphowl] explain unavailable — {exc}")
+
+    books = next((u for u in uploads if u["kind"] == "books"), None)
+    upload = (
+        {
+            "filename": books.get("filename"),
+            "uploaded_at": str(books.get("uploaded_at") or ""),
+            "row": None,
+        }
+        if books
+        else None
+    )
+
+    return notice_defence.defence_chain(case=case, explanation=explanation, upload=upload)
 
 
 @app.get("/api/clients/{client_id}/suppliers/{gstin}/memory")

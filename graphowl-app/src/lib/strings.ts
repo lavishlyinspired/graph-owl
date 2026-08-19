@@ -526,4 +526,21 @@ export const strings = {
   adminChartSubtitle: "agent identities are audited exactly like people",
   adminCalloutTitle: "AGENT ACTIONS ARE AUDITED LIKE USERS",
   adminCalloutBody: "Every MCP call is attributed to an agent identity with the same audit trail a person gets, including denials.",
+
+  // ---- PLATFORM — Tasks, Quality, Privacy, Security, API Keys ----
+  tasksTitle: "Tasks",
+  tasksDescription: "Open action items from contradictions, drift alerts, proposals, and agent grounding issues.",
+
+  qualityTitle: "Quality",
+  qualityDescription: "Graph health metrics — entity resolution precision, citation coverage, ontology completeness.",
+
+  privacyTitle: "Privacy",
+  privacyDescription: "PII tagging, masking policies, row-level security, and erasure request tracking.",
+
+  securityTitle: "Security",
+  securityDescription: "Auth events, access denials, token rotations, and policy changes.",
+
+  apiKeysTitle: "API Keys",
+  apiKeysDescription: "Manage API keys for external integrations, CI/CD pipelines, and service accounts.",
+  apiKeysGenerate: "Generate key",
 } as const;

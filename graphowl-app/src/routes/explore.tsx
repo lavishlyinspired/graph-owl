@@ -4,6 +4,8 @@ import { GraphCanvas, type CanvasSelection } from "../graph/GraphCanvas";
 import { GRAPH_COLORS } from "../lib/graph/graphColors";
 import { edgeId as toEdgeId, type Picture } from "../lib/graph/graphModel";
 import { expand, seed, type GraphModel } from "../lib/graph/model";
+import { seedsFromFindings, type ExploreSeed } from "../lib/exploreSeeds";
+import { fetchFindings } from "../lib/api";
 import { knownKinds, filterParam } from "../lib/graph/edgeFilter";
 import { fetchAssetGraph, pinToInvestigation, type GraphEdge, type GraphNode } from "../lib/api";
 import { resolveInitialTheme } from "../lib/theme";
@@ -98,7 +100,7 @@ export default function ExploreRoute() {
   };
 
   if (!id) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.exploreNoSeed}</div>;
+    return <SeedPicker />;
   }
   if (error) {
     return <div className="p-8 text-[13px] text-gowl-bad">{strings.exploreError}</div>;
@@ -223,6 +225,74 @@ export default function ExploreRoute() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+/** What Explore shows before anything has been searched for — Plan 123 §9.
+ *
+ *  It used to show one sentence and nothing else, which made the console's
+ *  main screen unreachable while search could not see the graph. Search is
+ *  fixed; this removes the dead end that remained.
+ *
+ *  Seeded from **findings** rather than recent subjects: a finding is a
+ *  subject somebody has a reason to look at, where recency says only that
+ *  something was written. */
+function SeedPicker() {
+  const [seeds, setSeeds] = useState<readonly ExploreSeed[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchFindings()
+      .then((findings) => {
+        if (!cancelled) setSeeds(seedsFromFindings(findings));
+      })
+      .catch(() => {
+        if (!cancelled) setSeeds([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="p-8">
+      <p className="text-[13px] text-gowl-t5">{strings.exploreNoSeed}</p>
+
+      {seeds === null && <p className="mt-4 text-[12px] text-gowl-t5">Looking for somewhere to start…</p>}
+
+      {seeds !== null && seeds.length === 0 && (
+        // An empty graph and an unreachable one are different, and only one of
+        // them means the user should upload something.
+        <p className="mt-4 text-[12px] text-gowl-t5">
+          Nothing has been flagged yet, so there is no obvious starting point. Import data or
+          run a pack's rules.
+        </p>
+      )}
+
+      {seeds !== null && seeds.length > 0 && (
+        <div className="mt-6">
+          <h2 className="text-[10.5px] uppercase tracking-wider text-gowl-t5">
+            Flagged subjects — a reason to look
+          </h2>
+          <ul className="mt-2 space-y-1">
+            {seeds.map((s) => (
+              <li key={s.id}>
+                <a
+                  href={`/explore?id=${encodeURIComponent(s.id)}`}
+                  className="flex items-baseline justify-between gap-4 rounded px-2 py-1 text-[12.5px] hover:bg-gowl-hover"
+                >
+                  <span className="truncate font-mono text-gowl-t2">{s.id}</span>
+                  <span className="shrink-0 text-gowl-t5">
+                    {s.label} · {s.findings} finding{s.findings === 1 ? "" : "s"}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

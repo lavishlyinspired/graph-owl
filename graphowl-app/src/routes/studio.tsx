@@ -4,7 +4,9 @@ import { GlossaryTab } from "./studio/GlossaryTab";
 import { BusinessTab } from "./studio/BusinessTab";
 import { GraphTab } from "./studio/GraphTab";
 import { SparqlTab } from "./studio/SparqlTab";
-import { NotYetBuilt } from "./studio/NotYetBuilt";
+import { ProposalsTab } from "./studio/ProposalsTab";
+import { ValidateTab } from "./studio/ValidateTab";
+import { ExportTab } from "./studio/ExportTab";
 import { createGlossary, fetchGlossaries, type Glossary } from "../lib/api";
 import { strings } from "../lib/strings";
 
@@ -129,11 +131,11 @@ export default function StudioRoute() {
           {tab === "build" && <BuildTab glossaryId={selectedGlossaryId} />}
           {tab === "glossary" && <GlossaryTab glossaryId={selectedGlossaryId} />}
           {tab === "business" && <BusinessTab glossaryId={selectedGlossaryId} />}
-          {tab === "proposals" && <NotYetBuilt body={strings.studioNotYetBuiltProposals} />}
+          {tab === "proposals" && <ProposalsTab glossaryId={selectedGlossaryId} />}
           {tab === "graph" && <GraphTab glossaryId={selectedGlossaryId} />}
-          {tab === "validate" && <NotYetBuilt body={strings.studioNotYetBuiltValidate} />}
+          {tab === "validate" && <ValidateTab glossaryId={selectedGlossaryId} />}
           {tab === "sparql" && <SparqlTab />}
-          {tab === "export" && <NotYetBuilt body={strings.studioNotYetBuiltExport} />}
+          {tab === "export" && <ExportTab glossaryId={selectedGlossaryId} />}
         </>
       )}
     </div>

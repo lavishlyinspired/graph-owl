@@ -68,6 +68,11 @@ export const NAV: readonly NavGroup[] = [
       { label: "Agents", route: "agents" },
       { label: "MCP", route: "mcp-tools" },
       { label: "Admin", route: "admin" },
+      { label: "Tasks", route: "tasks" },
+      { label: "Quality", route: "quality" },
+      { label: "Privacy", route: "privacy" },
+      { label: "Security", route: "security" },
+      { label: "API Keys", route: "api-keys" },
     ],
   },
 ];

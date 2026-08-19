@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { fetchWorkingPaper, type WorkingPaper, type WorkingPaperLine } from "../lib/api";
 import { formatRupees } from "../lib/format";
+import { loadStateFor } from "../lib/loadState";
 import type { WorkspaceState } from "../lib/workspace";
 
 const DIRECTION: Record<
@@ -50,8 +51,20 @@ export default function WorkingPaperRoute() {
     [filed],
   );
 
-  if (loading) return <div className="p-6 text-[13px] text-reco-t4">Loading…</div>;
-  if (!paper) return <div className="p-6 text-[13px] text-reco-t4">No working paper for this period.</div>;
+  const state = loadStateFor({ clientId, periodId, loading, data: paper });
+  if (state === "no-workspace")
+    return (
+      <div className="p-6 text-[13px] text-reco-t4">
+        Choose a client and a period to build a working paper.
+      </div>
+    );
+  if (state === "loading") return <div className="p-6 text-[13px] text-reco-t4">Loading…</div>;
+  if (state === "empty" || !paper)
+    return (
+      <div className="p-6 text-[13px] text-reco-t4">
+        No data for this period yet — upload a GSTR-2B to start the chain.
+      </div>
+    );
 
   return (
     <div className="space-y-6 p-6">
