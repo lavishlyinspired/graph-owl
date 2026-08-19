@@ -393,6 +393,38 @@ export function fetchWorkingPaper(clientId: string, periodId: string): Promise<W
  *  unreachable, returned nothing, or stated a figure the data does not carry —
  *  in which case `refusal` says what it tried to claim. A reader deciding how
  *  much to trust a sentence needs to know which produced it. */
+export interface GraphNode {
+  readonly id: string;
+  readonly label: string;
+  readonly badge: string;
+  readonly type_line: string | null;
+  readonly is_seed: boolean;
+}
+
+export interface GraphEdge {
+  readonly from: string;
+  readonly to: string;
+  readonly label: string;
+  readonly style: "solid" | "dashed";
+  readonly highlighted: boolean;
+}
+
+export interface CaseGraph {
+  readonly seed: string | null;
+  readonly nodes: readonly GraphNode[];
+  readonly edges: readonly GraphEdge[];
+}
+
+export function fetchCaseGraph(
+  clientId: string,
+  periodId: string,
+  caseId: string,
+): Promise<CaseGraph> {
+  return apiFetch<CaseGraph>(
+    `/api/clients/${encodeURIComponent(clientId)}/periods/${encodeURIComponent(periodId)}/cases/${encodeURIComponent(caseId)}/graph`,
+  );
+}
+
 export interface CaseExplanation {
   readonly text: string;
   readonly source: "model" | "computed";

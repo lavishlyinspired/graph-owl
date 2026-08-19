@@ -29,7 +29,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import case_explainer, case_narrative, client_report, explain, follow_ups, rule_guidance, working_paper_report
+from . import case_explainer, case_graph, case_narrative, client_report, explain, follow_ups, rule_guidance, working_paper_report
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1723,6 +1723,52 @@ async def agent_activity_route() -> dict:
         # Stated so a reader does not mistake this for an audit trail.
         "scope": "this process only — a durable record belongs in graph-owl agent activity",
     }
+
+
+@app.get("/api/clients/{client_id}/periods/{period_id}/cases/{case_id}/graph")
+async def case_graph_route(client_id: str, period_id: str, case_id: str) -> dict:
+    """The invoice's own neighbourhood — the same visual pattern the GraphOWL
+    console's Explore screen uses, seeded on this case's subject.
+
+    Reuses graph-owl's real `/graph/context`, the same call Explore itself
+    makes — this is not a second graph rendering pipeline, it is the one that
+    already exists, reshaped for an SVG panel instead of a canvas one.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="no such case")
+
+    seed = case.get("subject")
+    if not seed:
+        # No recorded subject — nothing to seed the walk from. An empty
+        # picture, not an error: the case explanation above this panel still
+        # works without it.
+        return {"seed": None, "nodes": [], "edges": []}
+
+    context = graphowl_client.graph_context(GRAPH_OWL_SERVER, seed)
+    nodes = context.get("nodes") or []
+    # graph-owl's own node ids are the Sid's local id, not the full IRI we
+    # seeded with — the node the walk started from is found by matching the
+    # `iri` it also returns, rather than reproducing Sid encoding here.
+    seed_local = next((n["id"] for n in nodes if n.get("iri") == seed), seed)
+
+    # The class per node, for the badge. `/graph/context`'s own `sources`
+    # field names import graphs, not RDF classes — resolved separately, keyed
+    # by IRI, then re-keyed by the local id `build_picture` uses.
+    by_iri = graphowl_client.node_classes(
+        GRAPH_OWL_SERVER, [n["iri"] for n in nodes if n.get("iri")]
+    )
+    classes = {
+        n["id"]: by_iri[n["iri"]]
+        for n in nodes
+        if n.get("iri") in by_iri
+    }
+
+    return case_graph.build_picture(
+        seed=seed_local, nodes=nodes, edges=context.get("edges") or [], classes=classes
+    )
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/cases/{case_id}/explain")

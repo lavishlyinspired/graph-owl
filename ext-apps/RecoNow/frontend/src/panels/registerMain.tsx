@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useOutletContext, useSearchParams } from "react-router-dom";
 import { fetchRegister, type Register } from "../lib/api";
 import { ExplainCase } from "../components/ExplainCase";
+import { CaseExplorer } from "../components/CaseExplorer";
 import { groupFindings } from "../lib/findingGroups";
 import { DetailDrawer } from "../components/DetailDrawer";
 import type { WorkspaceState } from "../lib/workspace";
@@ -165,7 +166,15 @@ export default function RegisterRoute() {
             )}
 
             {clientId && periodId && (
-              <ExplainCase clientId={clientId} periodId={periodId} caseId={selected.id} />
+              <>
+                <ExplainCase clientId={clientId} periodId={periodId} caseId={selected.id} />
+                <div>
+                  <div className="mb-1.5 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+                    Neighbourhood
+                  </div>
+                  <CaseExplorer clientId={clientId} periodId={periodId} caseId={selected.id} />
+                </div>
+              </>
             )}
           </div>
         )}

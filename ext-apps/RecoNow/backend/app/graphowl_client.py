@@ -573,6 +573,68 @@ def record_alignments(*, server: str, requests: list[dict], token: str | None = 
     return landed
 
 
+def graph_context(
+    server: str, seed: str, *, hops: int = 2, max_nodes: int = 40, token: str | None = None
+) -> dict:
+    """`POST /graph/context` seeded on one subject — the same call the
+    console's own Explore screen makes.
+
+    **Best-effort.** A case's own explanation still renders without its graph
+    neighbourhood; a graph-owl that is unreachable costs a panel, not the
+    screen.
+    """
+    try:
+        return _request(
+            f"{server.rstrip('/')}/graph/context",
+            method="POST",
+            token=token,
+            body=json.dumps(
+                {"seed": seed, "direction": "both", "hops": hops, "maxNodes": max_nodes}
+            ).encode(),
+        )
+    except Exception:  # noqa: BLE001
+        return {"nodes": [], "edges": [], "truncated": False}
+
+
+def node_classes(server: str, iris: list[str], *, token: str | None = None) -> dict[str, str]:
+    """`{node id -> its rdf:type}` for a set of subjects.
+
+    **Not the same thing as `/graph/context`'s own `sources` field**, which
+    names the import graphs a subject appears in rather than its class — using
+    that for a badge produced the same generic label for every node.
+
+    A `VALUES` clause rather than one call per node: the proven-safe idiom in
+    this pack (`period-diff.sparql`'s own two-row `VALUES`), and one round
+    trip for the whole walk rather than one per node.
+
+    Best-effort: a subject with no resolvable class is simply absent from the
+    returned map, and the caller falls back to a generic badge for it.
+    """
+    if not iris:
+        return {}
+    values = " ".join(f"<{iri}>" for iri in iris)
+    query = (
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n"
+        f"SELECT ?s ?class WHERE {{ VALUES ?s {{ {values} }} "
+        "GRAPH ?g { ?s rdf:type ?class } }"
+    )
+    try:
+        result = _request(
+            f"{server.rstrip('/')}/sparql", method="POST", token=token,
+            body=json.dumps({"query": query}).encode(),
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+
+    classes: dict[str, str] = {}
+    for row in result.get("rows") or []:
+        subject = row.get("s", "").strip("<>")
+        class_iri = row.get("class", "").strip("<>")
+        if subject and class_iri:
+            classes[subject] = "gst:" + class_iri.rsplit("#", 1)[-1]
+    return classes
+
+
 def import_document(
     server: str, source: str, turtle: str, token: str | None = None
 ) -> dict:

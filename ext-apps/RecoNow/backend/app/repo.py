@@ -10,6 +10,7 @@ the isolation tests in `test_repo_isolation.py` exist to kill.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 import asyncpg
@@ -113,6 +114,15 @@ async def supplier_observations(
 
 
 async def get_case(conn: asyncpg.Connection, *, client_id: str, case_id: str) -> dict[str, Any] | None:
+    # `case_id` is a `uuid` column; asyncpg raises rather than returning no
+    # rows for a value that cannot parse as one, so a malformed id in a URL
+    # (a stale link, a typo) crashed with a 500 before a caller's own 404
+    # check ever ran. Not found is the honest answer to "does this exist",
+    # whatever shape the id has.
+    try:
+        uuid.UUID(case_id)
+    except ValueError:
+        return None
     row = await conn.fetchrow(
         f"SELECT {_CASE_COLUMNS}, period_id FROM case_record WHERE client_id = $1 AND id = $2",
         client_id, case_id,

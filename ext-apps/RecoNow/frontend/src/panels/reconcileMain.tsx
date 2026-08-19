@@ -11,6 +11,7 @@ import { formatRupees } from "../lib/format";
 import { WhyPopover } from "../components/WhyPopover";
 import { DetailDrawer } from "../components/DetailDrawer";
 import { ExplainCase } from "../components/ExplainCase";
+import { CaseExplorer } from "../components/CaseExplorer";
 import type { FigureExplanation } from "../lib/api";
 import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
@@ -451,7 +452,15 @@ function RowDrawerBody({
           says what is notable. Grounded, so a figure your data does not carry
           is refused and the computed sentence shown instead. */}
       {clientId && periodId && row.case_id && (
-        <ExplainCase clientId={clientId} periodId={periodId} caseId={row.case_id} />
+        <>
+          <ExplainCase clientId={clientId} periodId={periodId} caseId={row.case_id} />
+          <div>
+            <div className="mb-1.5 font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
+              Neighbourhood
+            </div>
+            <CaseExplorer clientId={clientId} periodId={periodId} caseId={row.case_id} />
+          </div>
+        </>
       )}
       {!row.case_id && (
         <p className="text-[11.5px] text-reco-t4">
