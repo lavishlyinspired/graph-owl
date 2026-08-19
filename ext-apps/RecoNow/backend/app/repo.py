@@ -85,6 +85,23 @@ async def list_cases(conn: asyncpg.Connection, *, client_id: str, period_id: str
     return [dict(row) for row in rows]
 
 
+async def supplier_observations(
+    conn: asyncpg.Connection, *, client_id: str, gstin: str
+) -> list[dict[str, Any]]:
+    """Every finding raised against one supplier, across **every** period.
+
+    Deliberately not period-scoped: the whole point is to see across periods,
+    and a query that took a period_id could only ever report an incident.
+    """
+    rows = await conn.fetch(
+        "SELECT c.reason_code, c.supplier_name, p.month || '-' || p.year AS period "
+        "FROM case_record c JOIN period p ON p.id = c.period_id "
+        "WHERE c.client_id = $1 AND c.supplier_gstin = $2",
+        client_id, gstin,
+    )
+    return [dict(row) for row in rows]
+
+
 async def get_case(conn: asyncpg.Connection, *, client_id: str, case_id: str) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         f"SELECT {_CASE_COLUMNS}, period_id FROM case_record WHERE client_id = $1 AND id = $2",

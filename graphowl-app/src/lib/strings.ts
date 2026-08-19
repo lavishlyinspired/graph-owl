@@ -392,6 +392,23 @@ export const strings = {
   studioNotYetBuiltValidate: "qSKOS checks have no backend yet — no check set is seeded, and no skos-shapes.ttl exists to run through /validation/shapes/seed. See plans/122a-graphowl-app.md's A7.api for the gap.",
   studioNotYetBuiltExport: "Vocabulary-scoped RDF export (Turtle / JSON-LD / RDF-XML / N-Triples) has no backend yet. See plans/122a-graphowl-app.md's A7.api for the gap.",
 
+  // ---- Analytics (Plan 122a A9) ----
+  analyticsTitle: "Analytics",
+  analyticsDescription: "Graph health, inference yield, and model spend — what the engine is doing, not what you asked it.",
+  analyticsShowFacts: "Show the facts",
+  analyticsBuildReport: "Build report",
+  analyticsGrowthTitle: "GRAPH GROWTH BY FACT STATE",
+  analyticsGrowthNote: "Inferred facts are growing faster than asserted ones. That is the pack doing work, not more data arriving.",
+  analyticsFunnelTitle: "FROM SOURCE ROW TO CERTIFIED FACT",
+  analyticsFunnelNote: "Each step loses something — that is the point.",
+  analyticsHeatmapTitle: "CONFIDENCE DECAY BY PREDICATE",
+  analyticsHotspotsTitle: "MOST-TRAVERSED RELATIONSHIPS",
+  analyticsNarrativeTitle: "READ OF THE PERIOD",
+  analyticsNarrativeBody: "Inference yield rose to 1.54× after the GST pack added the filing-period rules, which is where most of the new facts came from — not new sources. Confidence on filingPeriod fell five months running because two sources now disagree about late filings; that decay is why cross-period cases exist downstream in Reco Now.",
+  analyticsNarrativeCite: "31 facts cited · written from the graph, not from the dashboard",
+  analyticsModelSpendTitle: "MODEL SPEND VS GRAPH WORK",
+  analyticsModelSpendNote: "Retrieval and reasoning are graph work, not model work. The model is only paid for the sentence at the end.",
+
   // ---- Agents, MCP, Runs (Plan 122a A8 — real subset) ----
   agentsTitle: "Agents",
   agentsDescription: "Who is trusted with what, and what they've done with it.",

@@ -19,9 +19,11 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
+from . import ai, capabilities, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
+import json
+from datetime import datetime
 from decimal import Decimal
 
 from .data_quality import inspect_rows
@@ -1416,6 +1418,121 @@ async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, 
             conn, client_id=client_id, period_id=period_id, case_id=case_id, decision=decision
         )
     return {"id": decision_id, "decision": decision}
+
+
+@app.get("/api/clients/{client_id}/suppliers/{gstin}/memory")
+async def supplier_memory_route(client_id: str, gstin: str) -> dict:
+    """What this supplier reliably does, across every period held — Plan 123
+    Slice E.
+
+    **The capability Reco Now was missing entirely.** A supplier flagged in
+    March, April and May was flagged three separate times with nothing
+    connecting them: next period the same finding arrives looking like a first
+    occurrence. This reads every period at once and says whether there is a
+    habit — and only where there is one, because a supplier late once is an
+    incident and recording it as a characteristic would prejudice every future
+    period against them on a single data point.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        observations = await repo.supplier_observations(conn, client_id=client_id, gstin=gstin)
+
+    pattern = capabilities.supplier_pattern(observations)
+    if pattern is None:
+        return {
+            "gstin": gstin,
+            "pattern": None,
+            # Named rather than left as an empty response: "nothing recurring"
+            # and "not enough history to say" are different answers, and only
+            # one of them is reassuring.
+            "periods_seen": len({o["period"] for o in observations if o.get("period")}),
+            "threshold": capabilities.MIN_PERIODS_FOR_A_PATTERN,
+        }
+
+    name = next((o.get("supplier_name") for o in observations if o.get("supplier_name")), gstin)
+    return {
+        "gstin": gstin,
+        "pattern": pattern,
+        "memory": capabilities.memory_for_supplier(gstin=gstin, name=name, pattern=pattern),
+        "threshold": capabilities.MIN_PERIODS_FOR_A_PATTERN,
+    }
+
+
+@app.post("/api/clients/{client_id}/suppliers/{gstin}/memory")
+async def record_supplier_memory_route(client_id: str, gstin: str) -> dict:
+    """Write the pattern to graph-owl as a memory, where it survives periods.
+
+    Idempotent in the way that matters: graph-owl supersedes rather than
+    edits, so writing the same pattern twice leaves a correctable history
+    rather than a duplicate — and a memory that later turns out to be wrong
+    can be withdrawn without erasing the fact that it was once believed.
+    """
+    body = await supplier_memory_route(client_id, gstin)
+    memory = body.get("memory")
+    if memory is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"no pattern to record — this supplier has been seen in "
+                f"{body['periods_seen']} period(s), and a pattern needs "
+                f"{body['threshold']}"
+            ),
+        )
+
+    try:
+        graphowl_client._request(
+            f"{GRAPH_OWL_SERVER.rstrip('/')}/memories",
+            method="POST",
+            body=json.dumps(memory).encode(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"graph-owl refused the memory: {exc}") from exc
+
+    return {"recorded": True, "memory": memory}
+
+
+@app.post("/api/clients/{client_id}/cases/{case_id}/waive")
+async def waive_case_route(client_id: str, case_id: str, payload: dict) -> dict:
+    """Accept an exception, with a reason and an expiry — Plan 123 Slice E.
+
+    **Replaces Reco Now's own `approval` table, which required neither.** A
+    waiver that does not expire is a rule change nobody voted for: the check
+    stops running and nobody remembers deciding that. graph-owl requires both,
+    and keys the waiver on the finding's *identity* rather than its row id,
+    because results are replaced wholesale each pass and a waiver keyed on a
+    row would point at nothing after the next run.
+    """
+    pool = _require_db_pool()
+    async with pool.acquire() as conn:
+        case = await repo.get_case(conn, client_id=client_id, case_id=case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="no such case")
+
+    expires_raw = payload.get("expires_at") or payload.get("expiresAt")
+    if not expires_raw:
+        raise HTTPException(status_code=400, detail="expires_at is required — a waiver must expire")
+    try:
+        expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+        request = capabilities.waiver_request(
+            shape=case["reason_code"],
+            focus_node=case.get("subject") or f"urn:invoice:{case['invoice_no']}",
+            constraint=case.get("governed_by") or case["reason_code"],
+            reason=str(payload.get("reason") or ""),
+            expires_at=expires_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        graphowl_client._request(
+            f"{GRAPH_OWL_SERVER.rstrip('/')}/validation/waivers",
+            method="POST",
+            body=json.dumps(request).encode(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"graph-owl refused the waiver: {exc}") from exc
+
+    return {"waived": True, "waiver": request}
 
 
 @app.get("/api/clients/{client_id}/periods/{period_id}/working-paper")
