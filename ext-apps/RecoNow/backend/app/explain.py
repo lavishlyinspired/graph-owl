@@ -94,9 +94,12 @@ ITC_POSITION: dict[str, dict[str, str]] = {
 #: **The single most confusing pair of screens in the product**, and the reason
 #: is legitimate: they count different populations. Two correct numbers that
 #: differ look like a bug unless each says what it counted.
+#: Plain text, not markdown — this string is rendered directly and asterisks
+#: showed up literally on screen. Emphasis that needs a renderer is emphasis
+#: that will eventually be shown raw somewhere.
 ITC_VS_WORKING_PAPER = (
-    "This screen classifies your **books-side** credit into where each rupee stands. "
-    "The GSTR-3B working paper starts from the **portal-side** total GSTR-2B made "
+    "This screen classifies your books-side credit into where each rupee stands. "
+    "The GSTR-3B working paper starts from the portal-side total that GSTR-2B made "
     "available and subtracts statutory reversals. They count different populations, "
     "so the totals differ legitimately — use this screen to decide what to chase, "
     "and the working paper to decide what to file."

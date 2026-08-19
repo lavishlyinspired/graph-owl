@@ -8,6 +8,7 @@ import {
   type RuleOutcome,
 } from "../lib/api";
 import { formatRupees } from "../lib/format";
+import { WhyPopover } from "../components/WhyPopover";
 import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -105,8 +106,13 @@ export default function ReconcileRoute() {
                 active ? "border-reco-t0" : "border-reco-line hover:border-reco-line-3"
               }`}
             >
-              <div className="mb-2 font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">
+              <div className="mb-2 flex items-center font-mono text-[9.5px] tracking-[0.12em] text-reco-t4">
                 {meta.label.toUpperCase()}
+                {/* Every figure says how it was worked out and what to do — the
+                    explanation travels with the data rather than living in this
+                    component, so one number cannot be explained two ways on two
+                    screens. */}
+                <WhyPopover title={meta.label} explanation={data.explain?.[bucket]} />
               </div>
               <div className="font-mono text-[26px]" style={{ color: meta.colour }}>
                 {data.counts[bucket]}
@@ -548,7 +554,19 @@ function RuleLine({
       }`}
     >
       <div>
-        <span className="font-mono text-[11.5px] text-reco-t1">{outcome.label}</span>
+        <span className="text-[12.5px] text-reco-t1">
+          {outcome.title ?? outcome.label}
+          <WhyPopover
+            title={outcome.title ?? outcome.label}
+            explanation={{
+              meaning: outcome.meaning ?? outcome.summary,
+              next_action: outcome.next_action,
+            }}
+          />
+        </span>
+        {/* The rule's own identifier, kept: a CA defending a position needs it,
+            and so does anyone reading a log. */}
+        <div className="font-mono text-[9.5px] text-reco-t5">{outcome.label}</div>
         {/* The rule's own words. A label alone tells a reviewer nothing about
             what was or was not checked. */}
         {outcome.summary && (

@@ -103,23 +103,35 @@ export const SECTIONS: Partial<Record<RouteName, readonly Section[]>> = {
     },
   ],
   register: [
-    { capability: "register", label: "All invoices", because: "the stage's own purpose" },
+    {
+      capability: "register",
+      label: "Findings",
+      // **Renamed from "All invoices", which was wrong and confusing.** The
+      // Reconcile screen's "All invoices" lists every *invoice* on either side
+      // — 17 of them, in four buckets. This lists every *finding* — 12 of
+      // them, one per problem, and an invoice with two problems appears
+      // twice. Two screens both labelled "all invoices" showing different
+      // counts is the product looking broken while both are correct.
+      because: "the stage's own purpose",
+    },
+    {
+      capability: "case-detail",
+      label: "Case detail",
+      // Merged in: a case is reached by clicking a finding, so it belongs
+      // beside the list rather than on its own route where arriving without a
+      // selection shows an empty screen.
+      because: "you open a case *from* the list, so it belongs beside it",
+    },
     {
       capability: "exceptions",
       label: "Exceptions",
-      because: "a filter over the register, which is what it always was",
+      because: "a filter over the findings, which is what it always was",
     },
     {
       capability: "review-queue",
       label: "Review queue",
       because: "the same rows, filtered to what a second pair of eyes owes a decision on",
     },
-  ],
-  // A single-purpose route still *is* a capability — it simply has one, so it
-  // renders no tab strip. Listing it here is what keeps the "every capability
-  // has a home" invariant honest rather than special-cased.
-  case: [
-    { capability: "case-detail", label: "Case", because: "reached by clicking a row, not by nav" },
   ],
   itc: [
     { capability: "itc-position", label: "Position", because: "the stage's own purpose" },

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { fetchWorkingPaper, type WorkingPaper, type WorkingPaperLine } from "../lib/api";
 import { formatRupees } from "../lib/format";
+import { WhyPopover } from "../components/WhyPopover";
+import type { FigureExplanation } from "../lib/api";
 import { loadStateFor } from "../lib/loadState";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -96,7 +98,7 @@ export default function WorkingPaperRoute() {
           </thead>
           <tbody>
             {paper.lines.map((line) => (
-              <Line key={line.key} line={line} />
+              <Line key={line.key} line={line} explain={paper.explain} />
             ))}
           </tbody>
         </table>
@@ -121,6 +123,12 @@ export default function WorkingPaperRoute() {
             ))}
           </ul>
         </section>
+      )}
+
+      {paper.compare_note && (
+        <p className="rounded border border-reco-line bg-reco-panel-2 px-4 py-3 text-[12px] leading-relaxed text-reco-t3">
+          {paper.compare_note}
+        </p>
       )}
 
       {filed && direction && (
@@ -160,7 +168,13 @@ export default function WorkingPaperRoute() {
   );
 }
 
-function Line({ line }: { readonly line: WorkingPaperLine }) {
+function Line({
+  line,
+  explain,
+}: {
+  readonly line: WorkingPaperLine;
+  readonly explain: Record<string, FigureExplanation> | undefined;
+}) {
   const emphasis =
     line.kind === "closing"
       ? "border-t-2 border-reco-line font-medium text-reco-t1"
@@ -172,6 +186,7 @@ function Line({ line }: { readonly line: WorkingPaperLine }) {
     <tr className={`border-b border-reco-line/60 ${emphasis}`}>
       <td className="px-4 py-2">
         {line.kind === "deduction" ? `less  ${line.label}` : line.label}
+        <WhyPopover title={line.label} explanation={explain?.[line.key]} />
       </td>
       <td className="px-4 py-2 text-right font-mono">
         {line.kind === "deduction" && line.amount > 0 ? "−" : ""}

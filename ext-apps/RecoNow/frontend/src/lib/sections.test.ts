@@ -53,14 +53,18 @@ describe("consolidating 30 screens into the five stages", () => {
     expect(sectionsFor("reconcile")[0]?.capability).toBe("reconcile");
     expect(sectionsFor("itc")[0]?.capability).toBe("itc-position");
     expect(sectionsFor("register")[0]?.capability).toBe("register");
+    // Case detail is a *section* of the findings list now, not its own route:
+    // you open a case from the list, and a route arrived at without a
+    // selection shows an empty screen.
+    expect(sectionsFor("register").map((s) => s.capability)).toContain("case-detail");
   });
 
   it("renders no tab strip for a single-capability route", () => {
     // A strip with one tab is chrome that costs vertical space and tells a
     // reader nothing. The capability is still listed — that is what keeps the
     // "every capability has a home" invariant honest rather than special-cased.
-    expect(sectionsFor("case")).toHaveLength(1);
-    expect(hasTabs("case")).toBe(false);
+    expect(sectionsFor("agents")).toHaveLength(1);
+    expect(hasTabs("agents")).toBe(false);
     expect(hasTabs("pipeline")).toBe(true);
   });
 

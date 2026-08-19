@@ -309,11 +309,11 @@ export function fetchSuppliers(clientId: string, periodId: string): Promise<read
 }
 
 export interface ItcPosition {
-  readonly books_amount: number;
-  readonly portal_amount: number;
-  readonly exposure: number;
-  readonly case_count: number;
-  readonly pending_count: number;
+  readonly position: Readonly<Record<string, number>>;
+  readonly counts: Readonly<Record<string, number>>;
+  readonly explain?: Readonly<Record<string, FigureExplanation>>;
+  /** Why this screen's total legitimately differs from the working paper's. */
+  readonly compare_note?: string;
 }
 
 export function fetchItcPosition(clientId: string, periodId: string): Promise<ItcPosition> {
@@ -355,6 +355,9 @@ export interface WorkingPaperFiled {
 
 export interface WorkingPaper {
   readonly lines: readonly WorkingPaperLine[];
+  readonly explain?: Readonly<Record<string, FigureExplanation>>;
+  /** Why this total legitimately differs from the ITC position screen's. */
+  readonly compare_note?: string;
   /** Whether every deduction the chain names could be sized. A paper with an
    *  unquantified line is still the best available position; it just is not
    *  the final one. */
@@ -612,7 +615,31 @@ export interface ItcPositionBreakdown {
  *  it belongs in the engine's record, not in a banner. */
 export type RuleStatus = "passed" | "flagged" | "notEvaluated";
 
+/** What a rule means in a business reader's terms, and what to do about it.
+ *  Authored in `packs/gst`'s own `[findings.guidance]`, never here — a
+ *  healthcare or banking pack names entirely different findings. */
+export interface RuleGuidance {
+  readonly title: string | null;
+  readonly meaning: string | null;
+  readonly next_action: string | null;
+  readonly tone: string | null;
+}
+
+/** How a figure was derived, what it means, and what to do about it. */
+export interface FigureExplanation {
+  readonly means: string;
+  readonly formula: string;
+  readonly action: string;
+  readonly source: string;
+}
+
 export interface RuleOutcome {
+  /** The rule's authored human title. `gst:AmountMismatch` means nothing to a
+   *  business reader; this does. Falls back to a readable phrase derived from
+   *  the label when a pack has authored none. */
+  readonly title?: string | null;
+  readonly meaning?: string | null;
+  readonly next_action?: string | null;
   readonly label: string;
   readonly governed_by: string | null;
   /** The rule's own one-line statement of what it looks for. A label alone
@@ -627,6 +654,9 @@ export interface RuleOutcome {
 }
 
 export interface Reconciliation {
+  /** How each figure on this screen was derived, what it means and what to do.
+   *  Sent with the data so a figure and its stated derivation are one edit. */
+  readonly explain?: Readonly<Record<string, FigureExplanation>>;
   /** What each rule concluded on the last run, from the engine's own
    *  execution record. Empty before a reconciliation has been run. */
   readonly rule_outcomes: readonly RuleOutcome[];

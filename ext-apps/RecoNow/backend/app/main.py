@@ -28,7 +28,7 @@ from urllib.parse import quote
 from decimal import Decimal
 
 from .data_quality import inspect_rows
-from . import explain, rule_guidance
+from . import case_narrative, explain, rule_guidance
 from .reconcile_result import itc_position as compute_itc_position
 from .reconcile_result import reconcile_buckets
 
@@ -1821,6 +1821,19 @@ async def reconciliation_route(client_id: str, period_id: str) -> dict:
         # run there are no outcomes, and a reviewer still needs to know which
         # checks the uploaded files can support.
         "rule_outcomes": rule_guidance.decorate(outcomes, _pack_guidance()),
+        # Per-case: what is wrong with *this* invoice, computed from its own
+        # figures. The pack's guidance says what the rule means; this says what
+        # happened here. Computed rather than generated — a sentence stating an
+        # amount must never be able to state a wrong one.
+        "case_detail": [
+            {
+                **row,
+                "narrative": case_narrative.narrate(row),
+            }
+            for row in rule_guidance.decorate(
+                [dict(c) for c in cases], _pack_guidance()
+            )
+        ],
         "checks_disabled": checks_disabled(set(by_kind)) if not outcomes else {
             o["label"]: CHECK_REASONS.get(o["label"], "")
             for o in outcomes if o["status"] == "notEvaluated"
