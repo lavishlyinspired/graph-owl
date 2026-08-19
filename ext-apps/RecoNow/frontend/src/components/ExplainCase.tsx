@@ -66,23 +66,14 @@ export function ExplainCase({
 
   return (
     <div className="rounded border border-reco-line bg-reco-panel-2 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-[9.5px] uppercase tracking-wider text-reco-t5">
-          Why this fired
-        </span>
+      <div className="mb-2">
         <GeneratedBadge source={explanation.source} />
       </div>
 
-      {/* Generated prose is tinted as well as badged: on a dense screen the
-          badge is easy to miss, and the reader most likely to be misled is the
-          one skimming. */}
-      <p
-        className={`text-[12.5px] leading-relaxed ${
-          explanation.source === "model" ? "text-violet-900" : "text-reco-t2"
-        }`}
-      >
-        {explanation.text}
-      </p>
+      {/* The badge carries the distinction; the prose reads as prose. Tinting
+          the body text made generated content look like a warning rather than
+          an explanation. */}
+      <p className="text-[12.5px] leading-relaxed text-reco-t2">{explanation.text}</p>
 
       {explanation.note && (
         <p className="mt-2 text-[11.5px] leading-relaxed text-reco-t4">{explanation.note}</p>

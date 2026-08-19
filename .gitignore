@@ -108,3 +108,11 @@ research
 .stryker-tmp/
 /ext-apps/RecoNow/backend/mutants/
 /ext-apps/RecoNow/backend/.mutmut-cache
+
+# Saved web pages dropped in for reference. **Never commit these.** A saved
+# page bundles the site's own JavaScript, and GitHub push protection caught a
+# live Groq key and a live OpenAI key inside one — third-party secrets that
+# would have been published by committing a folder wholesale. Screenshots are
+# fine and are what the reference is actually read from.
+samples/**/*_files/
+samples/**/Matcha*.html

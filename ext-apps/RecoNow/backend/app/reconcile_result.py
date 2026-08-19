@@ -200,7 +200,9 @@ def itc_position(result: Reconciliation) -> dict[str, Decimal]:
     - **blocked** — s.17(5) or reverse charge. Lost, and no amount of chasing
       changes that.
     - **under_review** — a matched pair whose values disagree. Only the
-      *difference* is in doubt, not the whole invoice.
+      *difference* is in doubt, not the whole invoice, and the agreed
+      remainder is counted under `confirmed` — every rupee of a disputed
+      invoice lands in exactly one class.
     - **unclaimed** — on the portal, not in the books. Credit that is
       available and nobody recorded the purchase for. Not confirmed: claiming
       it without an invoice is how a notice starts.
@@ -219,6 +221,22 @@ def itc_position(result: Reconciliation) -> dict[str, Decimal]:
         elif row["bucket"] == BUCKET_MATCHED:
             position["confirmed"] += row["books_tax"]
         elif row["bucket"] == BUCKET_REVIEW:
+            # **A disputed invoice is mostly agreed, and the agreed part is
+            # claimable.** Books say ₹1,80,000, portal says ₹1,80,500: ₹1,80,000
+            # is agreed by both sides and claimable now, and only ₹500 is in
+            # doubt.
+            #
+            # This used to add only the difference, so the agreed portion was
+            # counted in **no class at all** — ₹2,10,760 of one real period's
+            # credit, missing from the position entirely, and the reason the
+            # ITC screen and the working paper differed by far more than their
+            # different populations explain.
+            #
+            # The agreed part is the **lower** of the two sides, never the
+            # higher: claiming the portal's larger figure when your own books
+            # support less is an excess claim, and claiming your own larger
+            # figure when the portal supports less is one the portal rejects.
+            position["confirmed"] += min(row["books_tax"], row["portal_tax"])
             position["under_review"] += abs(row["books_tax"] - row["portal_tax"])
         elif row["bucket"] == BUCKET_ONLY_BOOKS:
             position["pending"] += row["books_tax"]

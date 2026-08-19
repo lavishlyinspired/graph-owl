@@ -20,7 +20,9 @@ import {
  *  before it decided that*. */
 const KIND_STYLE: Record<string, string> = {
   tool: "bg-sky-100 text-sky-800",
-  model: "bg-violet-100 text-violet-700",
+  // Amber wherever a model was involved, matching GeneratedBadge — one
+  // concept, one colour, across every screen.
+  model: "bg-amber-100 text-amber-800",
   decision: "bg-amber-100 text-amber-800",
   refusal: "bg-red-100 text-red-700",
 };

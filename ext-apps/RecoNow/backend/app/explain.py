@@ -97,12 +97,18 @@ ITC_POSITION: dict[str, dict[str, str]] = {
 #: Plain text, not markdown — this string is rendered directly and asterisks
 #: showed up literally on screen. Emphasis that needs a renderer is emphasis
 #: that will eventually be shown raw somewhere.
+#: **The relationship is exact, and stating it that way is the point.** A vague
+#: "they count different populations" was true and was covering for a bug: the
+#: agreed portion of every disputed invoice was counted in no class at all, so
+#: the two totals differed by far more than the populations explain. With that
+#: fixed the difference is precisely the only-books credit, which is checkable
+#: — and a reader who can check a relationship will notice when it breaks.
 ITC_VS_WORKING_PAPER = (
-    "This screen classifies your books-side credit into where each rupee stands. "
-    "The GSTR-3B working paper starts from the portal-side total that GSTR-2B made "
-    "available and subtracts statutory reversals. They count different populations, "
-    "so the totals differ legitimately — use this screen to decide what to chase, "
-    "and the working paper to decide what to file."
+    "This screen classifies your books-side credit; the GSTR-3B working paper starts "
+    "from the portal-side total GSTR-2B made available. The two reconcile exactly: "
+    "this screen's total, less Pending (credit in your books that no GSTR-2B carries), "
+    "equals the working paper's ITC available. Use this screen to decide what to "
+    "chase, and the working paper to decide what to file."
 )
 
 #: Buckets on the reconcile screen.

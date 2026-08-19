@@ -30,7 +30,7 @@ export function GeneratedBadge({
 
   return (
     <span
-      className="rounded bg-violet-100 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-violet-700"
+      className="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-800"
       title={
         grounded
           ? "Written by an inference model from your own data. Every figure in it was checked against your rows — a figure your data does not carry would have been refused."

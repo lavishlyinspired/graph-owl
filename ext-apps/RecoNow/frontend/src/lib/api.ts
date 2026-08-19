@@ -740,6 +740,8 @@ export interface Reconciliation {
   /** How each figure on this screen was derived, what it means and what to do.
    *  Sent with the data so a figure and its stated derivation are one edit. */
   readonly explain?: Readonly<Record<string, FigureExplanation>>;
+  /** The same, for the ITC classes shown in the headline cards. */
+  readonly explain_itc?: Readonly<Record<string, FigureExplanation>>;
   /** What each rule concluded on the last run, from the engine's own
    *  execution record. Empty before a reconciliation has been run. */
   readonly rule_outcomes: readonly RuleOutcome[];

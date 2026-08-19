@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { formatRupees } from "../lib/format";
 import { WhyPopover } from "../components/WhyPopover";
+import type { FigureExplanation } from "../lib/api";
 import { visibleRows } from "../lib/rows";
 import type { WorkspaceState } from "../lib/workspace";
 
@@ -50,6 +51,17 @@ export default function ReconcileRoute() {
       cancelled = true;
     };
   }, [clientId, periodId]);
+
+  // One lookup for the whole table, built from the same guidance the rule
+  // panel uses — two places rendering one rule differently is worse than
+  // neither rendering it well.
+  const titles = useMemo(
+    () =>
+      Object.fromEntries(
+        (data?.rule_outcomes ?? []).map((o) => [o.label, o.title ?? o.label]),
+      ) as Record<string, string>,
+    [data],
+  );
 
   const visible = useMemo(
     () => (data ? visibleRows(data.rows, filter, ruleFilter) : []),
@@ -93,6 +105,27 @@ export default function ReconcileRoute() {
     <div className="p-6 pb-11">
       <Header rate={data.match_rate} total={data.total} />
 
+      {/* The two numbers a reviewer opens this screen for, before the counts.
+          Taken from the delivered mockup, which leads with them for the same
+          reason: "7 matched" is a fact about rows, and these are facts about
+          money. */}
+      <div className="mb-3.5 grid gap-3 sm:grid-cols-2">
+        <HeadlineCard
+          tone="good"
+          label="ITC confirmed safe"
+          amount={data.itc.confirmed}
+          hint={`${data.counts.matched} matched — claim with confidence`}
+          explanation={data.explain_itc?.confirmed}
+        />
+        <HeadlineCard
+          tone="bad"
+          label="ITC at risk"
+          amount={data.itc.blocked + data.itc.under_review}
+          hint="blocked outright, plus the part still in dispute"
+          explanation={data.explain_itc?.blocked}
+        />
+      </div>
+
       <div className="mb-3.5 grid grid-cols-4 gap-3">
         {BUCKET_ORDER.map((bucket) => {
           const meta = BUCKET_META[bucket];
@@ -123,21 +156,12 @@ export default function ReconcileRoute() {
         })}
       </div>
 
-      <RulePanel
-        outcomes={data.rule_outcomes}
-        unsupported={data.checks_disabled}
-        active={ruleFilter}
-        onPick={(label) => {
-          setRuleFilter((current) => (current === label ? null : label));
-          setFilter(null);
-        }}
-      />
-
-      <ItcPositionPanel itc={data.itc} />
-
-      <Ladder rows={visible} />
-
-      <div className="mt-3.5 overflow-hidden rounded-[10px] border border-reco-line bg-white">
+      {/* **The table comes before the checks now.** It used to sit below the
+          statutory-check blocks, the ITC panel and the ladder — so clicking
+          "2 findings" filtered a table the reader then had to scroll to find.
+          A filter whose result is off-screen reads as a filter that did
+          nothing. */}
+      <div className="mb-3.5 overflow-hidden rounded-[10px] border border-reco-line bg-white">
         <div className="flex items-center justify-between border-b border-reco-line px-[18px] py-2.5">
           <span className="text-[13px] font-semibold text-reco-t1">
             {ruleFilter ?? (filter ? BUCKET_META[filter].label : "All invoices")}
@@ -217,7 +241,13 @@ export default function ReconcileRoute() {
                     </span>
                   </td>
                   <td className="px-3 py-2.5 font-mono text-[10.5px] text-reco-t4">
-                    {row.labels.length > 0 ? row.labels.join(", ") : "—"}
+                    {/* Titles, not IRIs. `gst:PaymentOverdue` is a label a
+                        rule author chose; the reader needs to know what is
+                        wrong. Falls back to the IRI only where the pack has
+                        authored no title. */}
+                    {row.labels.length > 0
+                      ? row.labels.map((l) => titles[l] ?? l).join(", ")
+                      : "—"}
                   </td>
                 </tr>
               ))}
@@ -225,6 +255,60 @@ export default function ReconcileRoute() {
           </table>
         </div>
       </div>
+
+      <RulePanel
+        outcomes={data.rule_outcomes}
+        unsupported={data.checks_disabled}
+        active={ruleFilter}
+        onPick={(label) => {
+          setRuleFilter((current) => (current === label ? null : label));
+          setFilter(null);
+        }}
+      />
+
+      <ItcPositionPanel itc={data.itc} />
+
+      <Ladder rows={visible} />
+    </div>
+  );
+}
+
+/** One of the two headline figures. Large, because they are the answer; the
+ *  bucket counts below are how the answer was arrived at. */
+function HeadlineCard({
+  tone,
+  label,
+  amount,
+  hint,
+  explanation,
+}: {
+  readonly tone: "good" | "bad";
+  readonly label: string;
+  readonly amount: number;
+  readonly hint: string;
+  readonly explanation: FigureExplanation | undefined;
+}) {
+  const good = tone === "good";
+  return (
+    <div
+      className={`rounded-[10px] border p-4 ${
+        good ? "border-emerald-200 bg-emerald-50/60" : "border-red-200 bg-red-50/50"
+      }`}
+    >
+      <div className="mb-1.5 flex items-center font-mono text-[9.5px] tracking-[0.12em]">
+        <span className={good ? "text-emerald-800" : "text-red-800"}>
+          {label.toUpperCase()}
+        </span>
+        <WhyPopover title={label} explanation={explanation} />
+      </div>
+      <div
+        className={`font-mono text-[30px] leading-none ${
+          good ? "text-emerald-700" : "text-red-700"
+        }`}
+      >
+        {formatRupees(amount)}
+      </div>
+      <div className="mt-2 text-[11.5px] text-reco-t4">{hint}</div>
     </div>
   );
 }

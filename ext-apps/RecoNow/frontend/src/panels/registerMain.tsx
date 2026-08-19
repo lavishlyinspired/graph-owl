@@ -11,7 +11,7 @@ function formatRupees(amount: number): string {
 
 export default function RegisterRoute() {
   const { clientId, periodId } = useOutletContext<WorkspaceState>();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const reasonCode = params.get("reason_code") ?? undefined;
   const [register, setRegister] = useState<Register | null>(null);
   // Case detail is merged in here rather than living on its own route: you
@@ -68,7 +68,18 @@ export default function RegisterRoute() {
           <button
             type="button"
             aria-expanded={openCase === row.id}
-            onClick={() => setOpenCase(openCase === row.id ? null : row.id)}
+            onClick={() => {
+              const next = openCase === row.id ? null : row.id;
+              setOpenCase(next);
+              // Also record the selection in the URL, so the Case detail tab
+              // has something to show. It read `?id=` and nothing set it, so
+              // that tab was permanently empty and told the reader to open a
+              // case from a list that offered no way to.
+              const updated = new URLSearchParams(params);
+              if (next) updated.set("id", next);
+              else updated.delete("id");
+              setParams(updated, { replace: true });
+            }}
             className="grid w-full grid-cols-[130px_1fr_120px_120px_110px_140px] items-center gap-3 px-4 py-2.5 text-left text-[12.5px] hover:bg-reco-panel-2"
           >
             <span className="font-mono text-reco-t1">{row.invoice_no}</span>
