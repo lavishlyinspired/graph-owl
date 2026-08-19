@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
-from . import ai, capabilities, db, exporters, graphowl_client, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
+from . import ai, capabilities, db, exporters, graphowl_client, grounding, native_findings, reconciliation as rc, repo, sample_data, vocabulary, working_paper
 # Aliased: main.py already defines an `itc_position` *route handler*, which
 # would shadow this import.
 import json
@@ -1420,6 +1420,44 @@ async def case_ims_decision_route(client_id: str, period_id: str, case_id: str, 
     return {"id": decision_id, "decision": decision}
 
 
+#: Every model output this process refused, and why — Plan 123 Slice F.
+#:
+#: **For an agentic product the record of what an agent tried and was refused
+#: is worth more than the record of what it produced.** A refusal nobody
+#: counts is a safety property nobody can audit, and the first question after
+#: an incident is "has this happened before".
+#:
+#: In-process and bounded: this is an observability surface, not an audit log,
+#: and a genuine audit trail belongs in graph-owl's own agent activity rather
+#: than in a list that dies with the worker.
+AGENT_REFUSALS: list[dict] = []
+
+#: Above this the oldest are dropped. A refusal ledger that grows without
+#: bound is a memory leak wearing the clothes of a safety feature.
+MAX_REFUSALS_HELD = 200
+
+
+@app.get("/api/agents/activity")
+async def agent_activity_route() -> dict:
+    """What the model was refused, and why — Plan 123 Slice F.
+
+    Reports refusals rather than successes on purpose. A list of things that
+    worked tells a reviewer nothing they cannot see on the screens themselves;
+    a list of figures an agent tried to state and could not support is the
+    only place the fact-citation rule becomes visible as something that is
+    actually running.
+    """
+    if len(AGENT_REFUSALS) > MAX_REFUSALS_HELD:
+        del AGENT_REFUSALS[: len(AGENT_REFUSALS) - MAX_REFUSALS_HELD]
+    return {
+        "refusals": list(reversed(AGENT_REFUSALS)),
+        "held": len(AGENT_REFUSALS),
+        "cap": MAX_REFUSALS_HELD,
+        # Stated so a reader does not mistake this for an audit trail.
+        "scope": "this process only — a durable record belongs in graph-owl agent activity",
+    }
+
+
 @app.get("/api/clients/{client_id}/suppliers/{gstin}/memory")
 async def supplier_memory_route(client_id: str, gstin: str) -> dict:
     """What this supplier reliably does, across every period held — Plan 123
@@ -2152,6 +2190,26 @@ def generate_follow_ups() -> dict:
                 itc=row["itc"],
                 period=period,
             )
+            # **Plan 123 Slice F — the control the prompt only asks for.**
+            # `draft_follow_up`'s system prompt says "no invented figures";
+            # that is a request. This checks, against the figures the prompt
+            # was actually given, and drops a draft that states any other —
+            # this document goes to a third party, and a confident wrong
+            # amount in it is worse than no draft at all. The deterministic
+            # fallback below is what the reader gets instead.
+            if drafted:
+                checked = grounding.ground_draft(
+                    draft=drafted,
+                    supplied={
+                        "itc": row["itc"],
+                        "invoice_no": book["invoice_no"],
+                        "gstin": book["gstin"],
+                        "year": period.get("year"),
+                    },
+                    log=AGENT_REFUSALS,
+                )
+                if not checked["grounded"]:
+                    drafted = None
             messages.append(
                 {
                     "supplier": book["supplier"],
