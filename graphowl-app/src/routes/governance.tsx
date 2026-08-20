@@ -73,10 +73,10 @@ export default function GovernanceRoute() {
   useEffect(load, []);
 
   if (error) {
-    return <div className="p-8 text-[13px] text-gowl-bad">{strings.governError}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.governError}</div>;
   }
   if (!policies || certified === null || unowned === null || deprecated === null || retired === null) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.governLoading}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.governLoading}</div>;
   }
 
   const draftWithRoles: PolicyDraft = {
@@ -139,8 +139,8 @@ export default function GovernanceRoute() {
     <div className="p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.governanceTitle}</h1>
-          <p className="text-[12.5px] text-gowl-t5">{strings.governanceDescription}</p>
+          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.governanceTitle}</h1>
+          <p className="text-[14px] text-gowl-t5">{strings.governanceDescription}</p>
         </div>
         <button
           type="button"
@@ -150,7 +150,7 @@ export default function GovernanceRoute() {
             setRolesInput("");
             setDryRun(null);
           }}
-          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[12px] font-semibold text-gowl-accent-on"
+          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
         >
           {strings.governanceNewPolicy}
         </button>
@@ -171,13 +171,13 @@ export default function GovernanceRoute() {
             value={draft.name}
             onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
             placeholder={strings.governancePolicyName}
-            className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12.5px] text-gowl-t1"
+            className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[14px] text-gowl-t1"
           />
           <input
             value={rolesInput}
             onChange={(e) => setRolesInput(e.target.value)}
             placeholder={strings.governanceRoles}
-            className="mb-3 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+            className="mb-3 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
           />
 
           {draft.rules.map((rule, index) => (
@@ -186,14 +186,14 @@ export default function GovernanceRoute() {
                 value={rule.name}
                 onChange={(e) => updateRule(index, { name: e.target.value })}
                 placeholder={strings.governanceRuleName}
-                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
               />
               <div className="mb-2 flex gap-2">
                 <select
                   value={rule.effect}
                   onChange={(e) => updateRule(index, { effect: e.target.value as PolicyEffect })}
                   aria-label={strings.governanceEffect}
-                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
                 >
                   {EFFECTS.map((effect) => (
                     <option key={effect} value={effect}>
@@ -205,7 +205,7 @@ export default function GovernanceRoute() {
                   value={rule.resourceType}
                   onChange={(e) => updateRule(index, { resourceType: e.target.value as ResourceMatcher["type"] })}
                   aria-label={strings.governanceResourceType}
-                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
                 >
                   {RESOURCE_TYPES.map((type) => (
                     <option key={type} value={type}>
@@ -218,13 +218,13 @@ export default function GovernanceRoute() {
                     value={rule.resourceValue}
                     onChange={(e) => updateRule(index, { resourceValue: e.target.value })}
                     placeholder={strings.governanceResourceValue}
-                    className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                    className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
                   />
                 )}
               </div>
               <div className="flex flex-wrap gap-2">
                 {OPERATIONS.map((op) => (
-                  <label key={op} className="flex items-center gap-1 text-[11px] text-gowl-t3">
+                  <label key={op} className="flex items-center gap-1 text-[12.5px] text-gowl-t3">
                     <input
                       type="checkbox"
                       checked={rule.operations.includes(op)}
@@ -239,7 +239,7 @@ export default function GovernanceRoute() {
           <button
             type="button"
             onClick={() => setDraft((prev) => ({ ...prev, rules: [...prev.rules, emptyRule()] }))}
-            className="mb-3 text-[12px] text-gowl-accent"
+            className="mb-3 text-[13.5px] text-gowl-accent"
           >
             {strings.governanceAddRule}
           </button>
@@ -249,7 +249,7 @@ export default function GovernanceRoute() {
               type="button"
               disabled={busy || draftIncomplete(draftWithRoles)}
               onClick={runDryRun}
-              className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[12px] text-gowl-t2 disabled:opacity-40"
+              className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
             >
               {strings.governanceDryRun}
             </button>
@@ -257,14 +257,14 @@ export default function GovernanceRoute() {
               type="button"
               disabled={busy || draftIncomplete(draftWithRoles)}
               onClick={runSave}
-              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
             >
               {strings.governanceSave}
             </button>
             <button
               type="button"
               onClick={() => setComposing(false)}
-              className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[12px] text-gowl-t2"
+              className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2"
             >
               {strings.governCancel}
             </button>
@@ -272,7 +272,7 @@ export default function GovernanceRoute() {
 
           {dryRun && (
             <div className="mt-3 rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3">
-              <div className="mb-2 flex gap-6 font-mono text-[12px] text-gowl-t1">
+              <div className="mb-2 flex gap-6 font-mono text-[13.5px] text-gowl-t1">
                 <span>
                   {strings.governanceDryRunAdmitted} {dryRun.admitted}
                 </span>
@@ -284,10 +284,10 @@ export default function GovernanceRoute() {
                 </span>
               </div>
               {dryRun.admitsEverything && (
-                <p className="text-[12px] text-gowl-amber">{strings.governanceAdmitsEverything}</p>
+                <p className="text-[13.5px] text-gowl-amber">{strings.governanceAdmitsEverything}</p>
               )}
               {deniesEverything(dryRun) && (
-                <p className="text-[12px] text-gowl-amber">{strings.governanceDeniesEverything}</p>
+                <p className="text-[13.5px] text-gowl-amber">{strings.governanceDeniesEverything}</p>
               )}
             </div>
           )}
@@ -296,7 +296,7 @@ export default function GovernanceRoute() {
 
       <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
         {policies.length === 0 ? (
-          <div className="p-6 text-[12.5px] text-gowl-t5">{strings.governanceEmpty}</div>
+          <div className="p-6 text-[14px] text-gowl-t5">{strings.governanceEmpty}</div>
         ) : (
           policies.map((binding) => (
             <div
@@ -304,8 +304,8 @@ export default function GovernanceRoute() {
               className="flex items-center justify-between border-b border-gowl-row px-4 py-2.5 last:border-b-0"
             >
               <div>
-                <div className="text-[13px] text-gowl-t1">{binding.policy.name}</div>
-                <div className="text-[11px] text-gowl-t6">
+                <div className="text-[14.5px] text-gowl-t1">{binding.policy.name}</div>
+                <div className="text-[12.5px] text-gowl-t6">
                   {binding.policy.rules.length} {strings.governRulesSuffix} {strings.lineageChainSeparator}{" "}
                   {binding.roles.join(", ") || strings.governNoRoles}
                 </div>
@@ -314,7 +314,7 @@ export default function GovernanceRoute() {
                 type="button"
                 disabled={busy}
                 onClick={() => runDelete(binding.policy.name)}
-                className="text-[12px] text-gowl-bad"
+                className="text-[13.5px] text-gowl-bad"
               >
                 {strings.governanceDelete}
               </button>

@@ -54,10 +54,10 @@ export default function ValidationRoute() {
   }, [findings, selected]);
 
   if (error) {
-    return <div className="p-8 text-[13px] text-gowl-bad">{strings.governError}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.governError}</div>;
   }
   if (!findings) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.governLoading}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.governLoading}</div>;
   }
 
   const kpis = validationKpis(findings);
@@ -125,8 +125,8 @@ export default function ValidationRoute() {
   return (
     <div className="flex h-full">
       <div className="flex-1 overflow-y-auto p-8">
-        <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.validationTitle}</h1>
-        <p className="mb-5 text-[12.5px] text-gowl-t5">{strings.validationDescription}</p>
+        <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.validationTitle}</h1>
+        <p className="mb-5 text-[14px] text-gowl-t5">{strings.validationDescription}</p>
 
         <KpiGrid
           kpis={[
@@ -138,7 +138,7 @@ export default function ValidationRoute() {
         />
 
         <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
-          <div className="grid grid-cols-5 gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[9.5px] tracking-wider text-gowl-t6">
+          <div className="grid grid-cols-5 gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[11px] tracking-wider text-gowl-t6">
             <span>{strings.validationColShape}</span>
             <span>{strings.validationColFocusNode}</span>
             <span>{strings.validationColConstraint}</span>
@@ -146,7 +146,7 @@ export default function ValidationRoute() {
             <span>{strings.validationColStatus}</span>
           </div>
           {findings.length === 0 ? (
-            <div className="p-6 text-[12.5px] text-gowl-t5">{strings.validationEmpty}</div>
+            <div className="p-6 text-[14px] text-gowl-t5">{strings.validationEmpty}</div>
           ) : (
             findings.map((finding) => (
               <button
@@ -155,13 +155,13 @@ export default function ValidationRoute() {
                 onClick={() => setSelected(finding)}
                 className="grid w-full grid-cols-5 items-center gap-3 border-b border-gowl-row px-4 py-2.5 text-left last:border-b-0 hover:bg-gowl-row"
               >
-                <span className="truncate font-mono text-[11.5px] text-gowl-t2">{finding.shape}</span>
-                <span className="truncate text-[12.5px] text-gowl-t1">{finding.focusNode}</span>
-                <span className="truncate font-mono text-[11.5px] text-gowl-t2">{finding.constraint}</span>
-                <span className={`text-[12px] font-semibold ${SEVERITY_COLOR[finding.severity]}`}>
+                <span className="truncate font-mono text-[13px] text-gowl-t2">{finding.shape}</span>
+                <span className="truncate text-[14px] text-gowl-t1">{finding.focusNode}</span>
+                <span className="truncate font-mono text-[13px] text-gowl-t2">{finding.constraint}</span>
+                <span className={`text-[13.5px] font-semibold ${SEVERITY_COLOR[finding.severity]}`}>
                   {finding.severity}
                 </span>
-                <span className="text-[12px] text-gowl-t5">{statusOf(finding)}</span>
+                <span className="text-[13.5px] text-gowl-t5">{statusOf(finding)}</span>
               </button>
             ))
           )}
@@ -172,50 +172,50 @@ export default function ValidationRoute() {
         <div className="w-[380px] flex-none overflow-y-auto border-l border-gowl-line bg-gowl-panel p-5">
           <div className="mb-4 flex items-start justify-between">
             <div>
-              <div className="font-mono text-[11px] text-gowl-t6">{selected.shape}</div>
-              <div className="text-[15px] font-semibold text-gowl-t1">{selected.focusNode}</div>
+              <div className="font-mono text-[12.5px] text-gowl-t6">{selected.shape}</div>
+              <div className="text-[16.5px] font-semibold text-gowl-t1">{selected.focusNode}</div>
             </div>
-            <button type="button" onClick={() => setSelected(null)} className="text-[12px] text-gowl-t5">
+            <button type="button" onClick={() => setSelected(null)} className="text-[13.5px] text-gowl-t5">
               {strings.governClose}
             </button>
           </div>
-          <p className="mb-4 text-[12.5px] text-gowl-t3">{selected.message}</p>
+          <p className="mb-4 text-[14px] text-gowl-t3">{selected.message}</p>
           {selected.suggestion && (
-            <p className="mb-4 text-[12px] text-gowl-accent">{selected.suggestion}</p>
+            <p className="mb-4 text-[13.5px] text-gowl-accent">{selected.suggestion}</p>
           )}
 
           {selected.waiver && !selected.waiver.expired ? (
             <div className="mb-4 rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3">
-              <div className="mb-1 text-[11px] text-gowl-t5">{selected.waiver.reason}</div>
+              <div className="mb-1 text-[12.5px] text-gowl-t5">{selected.waiver.reason}</div>
               <button
                 type="button"
                 disabled={busy}
                 onClick={runRevokeWaiver}
-                className="text-[12px] text-gowl-accent"
+                className="text-[13.5px] text-gowl-accent"
               >
                 {strings.validationRevokeWaiver}
               </button>
             </div>
           ) : (
             <div className="mb-4 rounded-md border border-gowl-line-2 p-3">
-              <div className="mb-2 text-[11px] tracking-widest text-gowl-t6">{strings.validationWaiveTitle}</div>
+              <div className="mb-2 text-[12.5px] tracking-widest text-gowl-t6">{strings.validationWaiveTitle}</div>
               <input
                 value={waiveReason}
                 onChange={(e) => setWaiveReason(e.target.value)}
                 placeholder={strings.validationWaiveReason}
-                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
               />
               <input
                 type="date"
                 value={waiveExpiry}
                 onChange={(e) => setWaiveExpiry(e.target.value)}
-                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
               />
               <button
                 type="button"
                 disabled={busy || waiveReason.trim().length === 0}
                 onClick={runWaive}
-                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
               >
                 {strings.validationWaiveSubmit}
               </button>
@@ -224,25 +224,25 @@ export default function ValidationRoute() {
 
           {selected.assignment ? (
             <div className="rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3">
-              <div className="mb-1 text-[11px] text-gowl-t5">{selected.assignment.assignee}</div>
-              <button type="button" disabled={busy} onClick={runUnassign} className="text-[12px] text-gowl-accent">
+              <div className="mb-1 text-[12.5px] text-gowl-t5">{selected.assignment.assignee}</div>
+              <button type="button" disabled={busy} onClick={runUnassign} className="text-[13.5px] text-gowl-accent">
                 {strings.validationUnassign}
               </button>
             </div>
           ) : (
             <div className="rounded-md border border-gowl-line-2 p-3">
-              <div className="mb-2 text-[11px] tracking-widest text-gowl-t6">{strings.validationAssignTitle}</div>
+              <div className="mb-2 text-[12.5px] tracking-widest text-gowl-t6">{strings.validationAssignTitle}</div>
               <input
                 value={assignee}
                 onChange={(e) => setAssignee(e.target.value)}
                 placeholder={strings.validationAssigneePlaceholder}
-                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 font-mono text-[12px] text-gowl-t1"
+                className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 font-mono text-[13.5px] text-gowl-t1"
               />
               <button
                 type="button"
                 disabled={busy || assignee.trim().length === 0}
                 onClick={runAssign}
-                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
               >
                 {strings.validationAssignSubmit}
               </button>

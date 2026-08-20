@@ -13,11 +13,13 @@ export const GRAPH_COLORS: Record<"dark" | "light", StyleColors> = {
     primary: "#5cc7d8", // --gowl-accent
     border: "#232a33", // --gowl-line-2
     raised: "#12161b", // --gowl-panel-2
+    inferred: "#d3a35c", // --gowl-amber
   },
   light: {
     text: "#1b1a17", // --gowl-t1
     primary: "#0f7f92", // --gowl-accent
     border: "#dcd8d0", // --gowl-line-2
     raised: "#ffffff", // --gowl-panel-2
+    inferred: "#a3641a", // --gowl-amber
   },
 };

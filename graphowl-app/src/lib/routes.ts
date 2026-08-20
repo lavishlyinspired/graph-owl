@@ -11,16 +11,16 @@
  *  route absorbing many features through a config or a tab — the whole
  *  point of the five patterns (`00h`) the budget rewards.
  *
- *  Plan 122a A11: `home`, `lineage-view`, `drift-view` and `mcp-tools` are
- *  deliberately not `overview`/`lineage`/`drift`/`mcp` — those bare slugs
- *  collide with real `graph-owl-server` API paths (`GET /overview`,
- *  `POST /lineage`, `GET /drift`, `POST /mcp`), and axum resolves an exact
- *  path match before ever reaching this app's SPA fallback. Two of the four
- *  (`/overview`, `/drift`) share the API's own GET method, so the collision
- *  is silent — the browser gets the API's JSON, not the console's HTML, with
- *  no error at all. Renaming the console's own route slugs is the contained
- *  fix; the API surface is the versioned, documented, SDK-generating
- *  product surface and does not move for a client's convenience. Nav labels
+ *  Plan 122a A11: `home`, `drift-view` and `mcp-tools` are deliberately not
+ *  `overview`/`drift`/`mcp` — those bare slugs collide with real
+ *  `graph-owl-server` API paths (`GET /overview`, `GET /drift`,
+ *  `POST /mcp`), and axum resolves an exact path match before ever
+ *  reaching this app's SPA fallback. Two of the three (`/overview`,
+ *  `/drift`) share the API's own GET method, so the collision is silent —
+ *  the browser gets the API's JSON, not the console's HTML, with no error
+ *  at all. Renaming the console's own route slugs is the contained fix;
+ *  the API surface is the versioned, documented, SDK-generating product
+ *  surface and does not move for a client's convenience. Nav labels
  *  (`nav.ts`) are unchanged — only the URL segment differs from the label. */
 
 export const ROUTES = [
@@ -28,10 +28,6 @@ export const ROUTES = [
   "explore",
   "entity",
   "knowledge",
-  "lineage-view",
-  "paths",
-  "history",
-  "evidence",
   "validation",
   "contradictions",
   "resolution",
@@ -43,7 +39,6 @@ export const ROUTES = [
   "studio",
   "analytics",
   "runs",
-  "workbench",
   "packs",
   "agents",
   "mcp-tools",

@@ -20,21 +20,9 @@ export const NAV: readonly NavGroup[] = [
   { label: "HOME", items: [{ label: "Overview", route: "home" }] },
   {
     label: "UNDERSTAND",
-    items: [
-      { label: "Explore", route: "explore" },
-      { label: "Entity", route: "entity" },
-      { label: "Knowledge", route: "knowledge" },
-    ],
+    items: [{ label: "Explore", route: "explore" }],
   },
-  {
-    label: "TRACE",
-    items: [
-      { label: "Lineage", route: "lineage-view" },
-      { label: "Paths", route: "paths" },
-      { label: "History", route: "history" },
-      { label: "Evidence", route: "evidence" },
-    ],
-  },
+  { label: "VOCABULARY", items: [{ label: "Studio", route: "studio" }] },
   {
     label: "GOVERN",
     items: [
@@ -52,7 +40,6 @@ export const NAV: readonly NavGroup[] = [
       { label: "Connectors", route: "connectors" },
     ],
   },
-  { label: "VOCABULARY", items: [{ label: "Studio", route: "studio" }] },
   {
     label: "INSIGHT",
     items: [
@@ -63,7 +50,7 @@ export const NAV: readonly NavGroup[] = [
   {
     label: "PLATFORM",
     items: [
-      { label: "Workbench", route: "workbench" },
+      { label: "Knowledge packs", route: "knowledge" },
       { label: "Packs", route: "packs" },
       { label: "Agents", route: "agents" },
       { label: "MCP", route: "mcp-tools" },

@@ -20,7 +20,11 @@ describe("NAV", () => {
 
   it("covers every route except the ones reached contextually (not nav items)", () => {
     const navRoutes = new Set(NAV.flatMap((g) => g.items.map((i) => i.route)));
-    const contextual = new Set(["pipeline"]);
+    // `entity` is reached contextually too, as of the Explore/Entity
+    // merge: `/entity/:id` now only redirects to `/explore/:id?view=entity`
+    // (`openTargetFor`'s own target), never a nav destination in its own
+    // right.
+    const contextual = new Set(["pipeline", "entity"]);
     for (const route of ROUTES) {
       if (contextual.has(route)) continue;
       expect(navRoutes.has(route), `"${route}" is missing from NAV`).toBe(true);
@@ -33,7 +37,7 @@ describe("pageTitleForPath", () => {
   // screen — AppShell renders one (visually hidden) sourced from this, since
   // the console's own visual design has no on-screen page title.
   it("resolves a bare route to its nav label", () => {
-    expect(pageTitleForPath("/lineage-view")).toBe("Lineage");
+    expect(pageTitleForPath("/validation")).toBe("Validation");
   });
 
   it("resolves a route carrying a deep-linked id segment", () => {
@@ -41,7 +45,7 @@ describe("pageTitleForPath", () => {
   });
 
   it("resolves a route carrying a query string", () => {
-    expect(pageTitleForPath("/paths?from=a&to=b")).toBe("Paths");
+    expect(pageTitleForPath("/explore/some-entity-id?view=entity")).toBe("Explore");
   });
 
   it("resolves the bare root to the first route's label", () => {

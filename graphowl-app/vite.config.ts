@@ -31,19 +31,28 @@ export default defineConfig({
   // route and must stay local.
   server: {
     port: 5174,
-    proxy: Object.fromEntries(
-      [
-        "admin", "agents", "alignments", "assets", "auth", "business-metrics",
-        "change-proposals", "connectors", "context", "contradictions",
-        "custom-properties", "cypher", "drift", "extraction", "findings",
-        "glossaries", "glossary-terms", "graph", "health", "inbox", "ingest",
-        "lineage", "mcp", "me", "memories", "merges", "metrics", "namespaces",
-        "ontology", "ontology-packs", "overview", "packs", "policies", "posts",
-        "proposals", "ready", "reasoning", "relationships", "resolution",
-        "search", "sparql", "tables", "teams", "threads", "users", "validation",
-        "webhooks", "openapi.json",
-      ].map((p) => [`^/${p}(/|$|\\?)`, { target: "http://localhost:8080", changeOrigin: true }]),
-    ),
+    proxy: {
+      ...Object.fromEntries(
+        [
+          "admin", "agents", "alignments", "assets", "auth", "business-metrics",
+          "change-proposals", "connectors", "context", "contradictions",
+          "custom-properties", "cypher", "drift", "extraction", "findings",
+          "glossaries", "glossary-terms", "graph", "health", "inbox", "ingest",
+          "lineage", "mcp", "me", "memories", "merges", "metrics", "namespaces",
+          "ontology", "ontology-editor", "ontology-packs", "overview", "packs", "policies", "posts",
+          "proposals", "ready", "reasoning", "recertification-queue",
+          "relationships", "resolution", "search", "sparql", "tables", "teams",
+          "threads", "users", "validation", "webhooks", "openapi.json",
+        ].map((p) => [`^/${p}(/|$|\\?)`, { target: "http://localhost:8080", changeOrigin: true }]),
+      ),
+      // The "ask GraphOWL" bar — a separate, out-of-process Python service
+      // (`examples/gst-reconcile/ask_server.py`), never graph-owl-server
+      // itself: `plans/00j-language-boundaries.md` keeps agent/LLM
+      // orchestration outside the Rust binary on purpose. Run it with
+      // `python3 examples/gst-reconcile/ask_server.py` before this route
+      // is reachable — see `graphowl-app/plans/ask-graphowl.md`.
+      "^/ask(/|$|\\?)": { target: "http://localhost:8090", changeOrigin: true },
+    },
   },
   test: { exclude: ["**/node_modules/**", "**/dist/**", "tests/**"], environment: "jsdom" },
 });

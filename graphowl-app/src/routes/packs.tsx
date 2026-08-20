@@ -57,10 +57,10 @@ export default function PacksRoute() {
   }, [selected]);
 
   if (error) {
-    return <div className="p-8 text-[13px] text-gowl-bad">{strings.governError}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.governError}</div>;
   }
   if (!available || !installed) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.governLoading}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.governLoading}</div>;
   }
 
   const runInstall = async (pack: AvailablePack) => {
@@ -111,24 +111,24 @@ export default function PacksRoute() {
   return (
     <div className="flex h-full">
       <div className="flex-1 overflow-y-auto p-8">
-        <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.packsTitle}</h1>
-        <p className="mb-5 text-[12.5px] text-gowl-t5">{strings.packsDescription}</p>
+        <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.packsTitle}</h1>
+        <p className="mb-5 text-[14px] text-gowl-t5">{strings.packsDescription}</p>
 
         <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
           {available.length === 0 ? (
-            <div className="p-6 text-[12.5px] text-gowl-t5">{strings.packsEmpty}</div>
+            <div className="p-6 text-[14px] text-gowl-t5">{strings.packsEmpty}</div>
           ) : (
             available.map((pack) => (
               <div key={pack.id} className="flex items-center justify-between border-b border-gowl-row px-4 py-2.5 last:border-b-0">
                 <div>
-                  <div className="text-[13px] text-gowl-t1">{pack.id}</div>
-                  <div className="text-[11.5px] text-gowl-t5">{pack.description}</div>
+                  <div className="text-[14.5px] text-gowl-t1">{pack.id}</div>
+                  <div className="text-[13px] text-gowl-t5">{pack.description}</div>
                 </div>
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => runInstall(pack)}
-                  className="rounded-md bg-gowl-accent px-3 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+                  className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
                 >
                   {busy ? strings.packsInstalling : strings.packsInstall}
                 </button>
@@ -139,15 +139,15 @@ export default function PacksRoute() {
 
         {installResult && (
           <div className="mt-4 rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3">
-            <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-t6">{strings.packsInstallResult}</div>
-            <pre className="overflow-x-auto font-mono text-[11px] text-gowl-t2">{installResult}</pre>
+            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.packsInstallResult}</div>
+            <pre className="overflow-x-auto font-mono text-[12.5px] text-gowl-t2">{installResult}</pre>
           </div>
         )}
 
-        <div className="mb-2 mt-6 font-mono text-[9.5px] tracking-widest text-gowl-t6">{strings.packsInstalledTitle}</div>
+        <div className="mb-2 mt-6 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.packsInstalledTitle}</div>
         <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
           {installed.length === 0 ? (
-            <div className="p-6 text-[12.5px] text-gowl-t5">{strings.packsInstalledEmpty}</div>
+            <div className="p-6 text-[14px] text-gowl-t5">{strings.packsInstalledEmpty}</div>
           ) : (
             installed.map((pack) => (
               <button
@@ -157,13 +157,13 @@ export default function PacksRoute() {
                 className="flex w-full items-center justify-between border-b border-gowl-row px-4 py-2.5 text-left last:border-b-0 hover:bg-gowl-row"
               >
                 <div>
-                  <div className="text-[13px] text-gowl-t1">{pack.packId}</div>
-                  <div className="text-[11.5px] text-gowl-t5">
+                  <div className="text-[14.5px] text-gowl-t1">{pack.packId}</div>
+                  <div className="text-[13px] text-gowl-t5">
                     {strings.packsVersionPrefix}
                     {pack.version} {strings.lineageChainSeparator} {pack.termCount} {strings.packsTermsSuffix}
                   </div>
                 </div>
-                <span className="text-[12px] text-gowl-accent">{strings.packsInspect}</span>
+                <span className="text-[13.5px] text-gowl-accent">{strings.packsInspect}</span>
               </button>
             ))
           )}
@@ -173,26 +173,26 @@ export default function PacksRoute() {
       {selected && (
         <div className="w-[420px] flex-none overflow-y-auto border-l border-gowl-line bg-gowl-panel p-5">
           <div className="mb-4 flex items-start justify-between">
-            <div className="text-[15px] font-semibold text-gowl-t1">{selected.packId}</div>
-            <button type="button" onClick={() => setSelected(null)} className="text-[12px] text-gowl-t5">
+            <div className="text-[16.5px] font-semibold text-gowl-t1">{selected.packId}</div>
+            <button type="button" onClick={() => setSelected(null)} className="text-[13.5px] text-gowl-t5">
               {strings.governClose}
             </button>
           </div>
 
           <div className="mb-4">
-            <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-t6">{strings.packsTerms}</div>
+            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.packsTerms}</div>
             {terms?.map((view) => (
-              <div key={view.sourceIri} className="border-b border-gowl-row py-1 text-[12px] text-gowl-t2 last:border-b-0">
+              <div key={view.sourceIri} className="border-b border-gowl-row py-1 text-[13.5px] text-gowl-t2 last:border-b-0">
                 {view.term.name}
               </div>
             ))}
           </div>
 
           <div className="mb-4">
-            <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-t6">{strings.packsOverrides}</div>
-            {overrides && overrides.length === 0 && <p className="text-[12px] text-gowl-t5">{strings.packsOverridesEmpty}</p>}
+            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.packsOverrides}</div>
+            {overrides && overrides.length === 0 && <p className="text-[13.5px] text-gowl-t5">{strings.packsOverridesEmpty}</p>}
             {overrides?.map((override) => (
-              <div key={override.id} className="flex items-center justify-between border-b border-gowl-row py-1 text-[12px]">
+              <div key={override.id} className="flex items-center justify-between border-b border-gowl-row py-1 text-[13.5px]">
                 <span className="text-gowl-t2">
                   <span className="font-mono text-gowl-t6">{override.kind}</span> {override.termPath}
                 </span>
@@ -206,7 +206,7 @@ export default function PacksRoute() {
                 value={overrideKind}
                 onChange={(e) => setOverrideKind(e.target.value as PackOverrideKind)}
                 aria-label={strings.packsOverrideKind}
-                className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[11px] text-gowl-t1"
+                className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[12.5px] text-gowl-t1"
               >
                 {OVERRIDE_KINDS.map((kind) => (
                   <option key={kind} value={kind}>
@@ -218,13 +218,13 @@ export default function PacksRoute() {
                 value={termPath}
                 onChange={(e) => setTermPath(e.target.value)}
                 placeholder={strings.packsOverrideTermPath}
-                className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[11px] text-gowl-t1"
+                className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[12.5px] text-gowl-t1"
               />
               <button
                 type="button"
                 disabled={busy || termPath.trim().length === 0}
                 onClick={runAddOverride}
-                className="rounded-md border border-gowl-line-2 px-2 py-1 text-[11px] text-gowl-t2 disabled:opacity-40"
+                className="rounded-md border border-gowl-line-2 px-2 py-1 text-[12.5px] text-gowl-t2 disabled:opacity-40"
               >
                 {strings.packsAddOverride}
               </button>
@@ -232,26 +232,26 @@ export default function PacksRoute() {
           </div>
 
           <div>
-            <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-t6">{strings.packsUpgrade}</div>
+            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.packsUpgrade}</div>
             <input
               value={upgradeVersion}
               onChange={(e) => setUpgradeVersion(e.target.value)}
               placeholder={strings.packsUpgradeVersion}
-              className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[12px] text-gowl-t1"
+              className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
             />
             <textarea
               value={upgradeManifest}
               onChange={(e) => setUpgradeManifest(e.target.value)}
               placeholder={strings.packsUpgradeManifest}
               rows={4}
-              className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-2 font-mono text-[11px] text-gowl-t1"
+              className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-2 font-mono text-[12.5px] text-gowl-t1"
             />
             <div className="flex gap-2">
               <button
                 type="button"
                 disabled={busy || upgradeVersion.trim().length === 0}
                 onClick={() => runUpgrade(true)}
-                className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[12px] text-gowl-t2 disabled:opacity-40"
+                className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
               >
                 {strings.packsDryRun}
               </button>
@@ -259,13 +259,13 @@ export default function PacksRoute() {
                 type="button"
                 disabled={busy || upgradeVersion.trim().length === 0}
                 onClick={() => runUpgrade(false)}
-                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+                className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
               >
                 {strings.packsApply}
               </button>
             </div>
             {upgradeResult && (
-              <p className="mt-2 text-[12px] text-gowl-t3">
+              <p className="mt-2 text-[13.5px] text-gowl-t3">
                 {upgradeResult.applied ? strings.packsUpgradeApplied : strings.packsUpgradePreview}
               </p>
             )}

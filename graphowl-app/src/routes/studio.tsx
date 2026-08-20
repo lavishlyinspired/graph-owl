@@ -3,10 +3,11 @@ import { BuildTab } from "./studio/BuildTab";
 import { GlossaryTab } from "./studio/GlossaryTab";
 import { BusinessTab } from "./studio/BusinessTab";
 import { GraphTab } from "./studio/GraphTab";
-import { SparqlTab } from "./studio/SparqlTab";
+import { QueriesTab } from "./studio/QueriesTab";
 import { ProposalsTab } from "./studio/ProposalsTab";
 import { ValidateTab } from "./studio/ValidateTab";
 import { ExportTab } from "./studio/ExportTab";
+import { OntologyTab } from "./studio/OntologyTab";
 import { createGlossary, fetchGlossaries, type Glossary } from "../lib/api";
 import { strings } from "../lib/strings";
 
@@ -16,8 +17,9 @@ const TABS = [
   "business",
   "proposals",
   "graph",
+  "ontology",
   "validate",
-  "sparql",
+  "queries",
   "export",
 ] as const;
 type Tab = (typeof TABS)[number];
@@ -28,8 +30,9 @@ const TAB_LABEL: Record<Tab, string> = {
   business: strings.studioTabBusiness,
   proposals: strings.studioTabProposals,
   graph: strings.studioTabGraph,
+  ontology: strings.studioTabOntology,
   validate: strings.studioTabValidate,
-  sparql: strings.studioTabSparql,
+  queries: strings.studioTabQueries,
   export: strings.studioTabExport,
 };
 
@@ -53,10 +56,10 @@ export default function StudioRoute() {
   useEffect(load, []);
 
   if (error) {
-    return <div className="p-8 text-[13px] text-gowl-bad">{strings.studioError}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.studioError}</div>;
   }
   if (!glossaries) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.studioLoading}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>;
   }
 
   const runCreateGlossary = async () => {
@@ -73,49 +76,52 @@ export default function StudioRoute() {
   };
 
   return (
-    <div className="p-8">
-      <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.studioTitle}</h1>
-      <p className="mb-5 text-[12.5px] text-gowl-t5">{strings.studioDescription}</p>
-
-      <div className="mb-4 flex items-end gap-2">
+    <div className="p-8 pb-4">
+      <div className="mb-2 flex items-baseline justify-between gap-4">
         <div>
-          <div className="mb-1 text-[11px] text-gowl-t5">{strings.studioGlossaryPicker}</div>
-          <select
-            value={selectedGlossaryId ?? ""}
-            onChange={(e) => setSelectedGlossaryId(e.target.value || null)}
-            aria-label={strings.studioGlossaryPicker}
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[12.5px] text-gowl-t1"
-          >
-            {glossaries.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
+          <h1 className="text-[22.5px] font-semibold text-gowl-t1">{strings.studioTitle}</h1>
+          <p className="text-[14px] text-gowl-t5">{strings.studioDescription}</p>
         </div>
-        <input
-          value={newGlossaryName}
-          onChange={(e) => setNewGlossaryName(e.target.value)}
-          placeholder={strings.studioGlossaryNamePlaceholder}
-          className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[12px] text-gowl-t1"
-        />
-        <button
-          type="button"
-          disabled={busy || newGlossaryName.trim().length === 0}
-          onClick={runCreateGlossary}
-          className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[12px] text-gowl-t2 disabled:opacity-40"
-        >
-          {strings.studioNewGlossary}
-        </button>
+        <div className="flex items-end gap-2">
+          <div>
+            <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.studioGlossaryPicker}</div>
+            <select
+              value={selectedGlossaryId ?? ""}
+              onChange={(e) => setSelectedGlossaryId(e.target.value || null)}
+              aria-label={strings.studioGlossaryPicker}
+              className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[14px] text-gowl-t1"
+            >
+              {glossaries.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <input
+            value={newGlossaryName}
+            onChange={(e) => setNewGlossaryName(e.target.value)}
+            placeholder={strings.studioGlossaryNamePlaceholder}
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[13.5px] text-gowl-t1"
+          />
+          <button
+            type="button"
+            disabled={busy || newGlossaryName.trim().length === 0}
+            onClick={runCreateGlossary}
+            className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
+          >
+            {strings.studioNewGlossary}
+          </button>
+        </div>
       </div>
 
-      <div className="mb-4 flex gap-1 border-b border-gowl-line">
+      <div className="mb-3 flex gap-1 border-b border-gowl-line">
         {TABS.map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => setTab(t)}
-            className={`px-3 py-2 text-[12.5px] ${
+            className={`px-3 py-2 text-[14px] ${
               tab === t ? "border-b-2 border-gowl-accent text-gowl-accent" : "text-gowl-t5 hover:text-gowl-t2"
             }`}
           >
@@ -125,7 +131,7 @@ export default function StudioRoute() {
       </div>
 
       {!selectedGlossaryId ? (
-        <p className="text-[13px] text-gowl-t5">{strings.studioNoGlossaries}</p>
+        <p className="text-[14.5px] text-gowl-t5">{strings.studioNoGlossaries}</p>
       ) : (
         <>
           {tab === "build" && <BuildTab glossaryId={selectedGlossaryId} />}
@@ -133,8 +139,9 @@ export default function StudioRoute() {
           {tab === "business" && <BusinessTab glossaryId={selectedGlossaryId} />}
           {tab === "proposals" && <ProposalsTab glossaryId={selectedGlossaryId} />}
           {tab === "graph" && <GraphTab glossaryId={selectedGlossaryId} />}
+          {tab === "ontology" && <OntologyTab />}
           {tab === "validate" && <ValidateTab glossaryId={selectedGlossaryId} />}
-          {tab === "sparql" && <SparqlTab />}
+          {tab === "queries" && <QueriesTab />}
           {tab === "export" && <ExportTab glossaryId={selectedGlossaryId} />}
         </>
       )}

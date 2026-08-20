@@ -13,32 +13,32 @@ export default function McpRoute() {
   }, []);
 
   if (error) {
-    return <div className="p-8 text-[13px] text-gowl-bad">{strings.governError}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.governError}</div>;
   }
   if (!tools) {
-    return <div className="p-8 text-[13px] text-gowl-t5">{strings.governLoading}</div>;
+    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.governLoading}</div>;
   }
 
   return (
     <div className="p-8">
-      <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.mcpTitle}</h1>
-      <p className="mb-5 text-[12.5px] text-gowl-t5">{strings.mcpDescription}</p>
+      <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.mcpTitle}</h1>
+      <p className="mb-5 text-[14px] text-gowl-t5">{strings.mcpDescription}</p>
 
       <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
-        <div className="grid grid-cols-[200px_1fr] gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[9.5px] tracking-wider text-gowl-t6">
+        <div className="grid grid-cols-[200px_1fr] gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[11px] tracking-wider text-gowl-t6">
           <span>{strings.mcpColName}</span>
           <span>{strings.mcpColDescription}</span>
         </div>
         {tools.length === 0 ? (
-          <div className="p-6 text-[12.5px] text-gowl-t5">{strings.mcpEmpty}</div>
+          <div className="p-6 text-[14px] text-gowl-t5">{strings.mcpEmpty}</div>
         ) : (
           tools.map((tool) => (
             <div
               key={tool.name}
               className="grid grid-cols-[200px_1fr] items-center gap-3 border-b border-gowl-row px-4 py-2.5 last:border-b-0"
             >
-              <span className="truncate font-mono text-[12px] text-gowl-t1">{tool.name}</span>
-              <span className="truncate text-[12px] text-gowl-t5">{tool.description ?? "—"}</span>
+              <span className="truncate font-mono text-[13.5px] text-gowl-t1">{tool.name}</span>
+              <span className="truncate text-[13.5px] text-gowl-t5">{tool.description ?? "—"}</span>
             </div>
           ))
         )}

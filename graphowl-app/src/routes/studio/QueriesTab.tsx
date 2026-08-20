@@ -1,15 +1,15 @@
 import { useState } from "react";
-import { runCypher, runSparql, type SparqlResult } from "../lib/api";
-import { strings } from "../lib/strings";
+import { runCypher, runSparql, type SparqlResult } from "../../lib/api";
+import { strings } from "../../lib/strings";
 
 type Lang = "sparql" | "cypher";
 
-/** SPARQL + Cypher share one result envelope (`SparqlOutcome` on the Rust
- *  side, `/sparql` and `/cypher` alike) — so this is one query runner
- *  parameterized by which endpoint it calls, not two screens. No editor
- *  library: a plain textarea, matching the same "don't pull in a second
- *  heavy dependency" call already made for the Graph tab's bubble layout. */
-export default function WorkbenchRoute() {
+/** Folded in from the former standalone `/workbench` page — same
+ *  SPARQL/Cypher runner, now where the rest of graph-owl's authoring
+ *  surfaces already live. SPARQL and Cypher share one result envelope
+ *  (`SparqlOutcome` server-side, `/sparql` and `/cypher` alike), so this
+ *  is one runner parameterized by which endpoint it calls, not two tabs. */
+export function QueriesTab() {
   const [lang, setLang] = useState<Lang>("sparql");
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<SparqlResult | null>(null);
@@ -31,9 +31,8 @@ export default function WorkbenchRoute() {
   };
 
   return (
-    <div className="p-8">
-      <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.workbenchTitle}</h1>
-      <p className="mb-5 text-[12.5px] text-gowl-t5">{strings.workbenchDescription}</p>
+    <div>
+      <p className="mb-3 text-[14px] text-gowl-t5">{strings.workbenchDescription}</p>
 
       <div className="mb-3 flex gap-1 border-b border-gowl-line">
         {(["sparql", "cypher"] as const).map((l) => (
@@ -45,7 +44,7 @@ export default function WorkbenchRoute() {
               setResult(null);
               setError(null);
             }}
-            className={`px-3 py-2 text-[12.5px] ${
+            className={`px-3 py-2 text-[14px] ${
               lang === l ? "border-b-2 border-gowl-accent text-gowl-accent" : "text-gowl-t5 hover:text-gowl-t2"
             }`}
           >
@@ -59,22 +58,22 @@ export default function WorkbenchRoute() {
         onChange={(e) => setQuery(e.target.value)}
         placeholder={lang === "sparql" ? strings.sparqlPlaceholder : strings.cypherPlaceholder}
         rows={6}
-        className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[12.5px] text-gowl-t1"
+        className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[14px] text-gowl-t1"
       />
       <button
         type="button"
         disabled={busy || query.trim().length === 0}
-        onClick={run}
-        className="mb-4 rounded-md bg-gowl-accent px-4 py-1.5 text-[12px] font-semibold text-gowl-accent-on disabled:opacity-40"
+        onClick={() => void run()}
+        className="mb-4 rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
       >
         {strings.sparqlRun}
       </button>
 
-      {error && <p className="text-[13px] text-gowl-bad">{error}</p>}
+      {error && <p className="text-[14.5px] text-gowl-bad">{error}</p>}
 
       {result && (
         <div>
-          <div className="mb-3 flex gap-6 font-mono text-[12px] text-gowl-t1">
+          <div className="mb-3 flex gap-6 font-mono text-[13.5px] text-gowl-t1">
             <span>
               {strings.sparqlRows} {result.rows.length}
             </span>
@@ -86,14 +85,14 @@ export default function WorkbenchRoute() {
             </span>
           </div>
           {result.rows.length === 0 ? (
-            <p className="text-[13px] text-gowl-t5">{strings.sparqlNoRows}</p>
+            <p className="text-[14.5px] text-gowl-t5">{strings.sparqlNoRows}</p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-gowl-line bg-gowl-panel">
-              <table className="w-full text-left text-[12px]">
+              <table className="w-full text-left text-[13.5px]">
                 <thead>
                   <tr className="border-b border-gowl-line bg-gowl-panel-2">
                     {result.variables.map((variable) => (
-                      <th key={variable} className="px-3 py-2 font-mono text-[9.5px] tracking-wider text-gowl-t6">
+                      <th key={variable} className="px-3 py-2 font-mono text-[11px] tracking-wider text-gowl-t6">
                         {variable}
                       </th>
                     ))}
@@ -116,7 +115,7 @@ export default function WorkbenchRoute() {
         </div>
       )}
 
-      {!result && !error && <p className="text-[13px] text-gowl-t5">{strings.sparqlEmpty}</p>}
+      {!result && !error && <p className="text-[14.5px] text-gowl-t5">{strings.sparqlEmpty}</p>}
     </div>
   );
 }

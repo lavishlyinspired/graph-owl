@@ -63,9 +63,9 @@ export function ExportTab({ glossaryId: _glossaryId }: { readonly glossaryId: st
                 : "border-gowl-line bg-gowl-panel hover:border-gowl-line-3"
             }`}
           >
-            <div className="mb-1 text-[18px]">{fmt.icon}</div>
-            <div className="text-[12.5px] font-semibold text-gowl-t1">{fmt.name}</div>
-            <div className="mt-0.5 text-[10.5px] text-gowl-t5">{fmt.description}</div>
+            <div className="mb-1 text-[19.5px]">{fmt.icon}</div>
+            <div className="text-[14px] font-semibold text-gowl-t1">{fmt.name}</div>
+            <div className="mt-0.5 text-[12px] text-gowl-t5">{fmt.description}</div>
           </button>
         ))}
       </div>
@@ -74,21 +74,21 @@ export function ExportTab({ glossaryId: _glossaryId }: { readonly glossaryId: st
         <button
           type="button"
           onClick={startExport}
-          className="rounded-md bg-gowl-accent px-5 py-2 text-[12.5px] font-semibold text-gowl-accent-on"
+          className="rounded-md bg-gowl-accent px-5 py-2 text-[14px] font-semibold text-gowl-accent-on"
         >
           Export as {EXPORT_FORMATS.find((f) => f.id === selected)?.name}
         </button>
-        <span className="text-[11.5px] text-gowl-t5">
+        <span className="text-[13px] text-gowl-t5">
           268 terms · includes definitions, domain mappings, and cross-references
         </span>
       </div>
 
       <div className="rounded-md border border-gowl-line bg-gowl-panel">
-        <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[9px] tracking-widest text-gowl-t6">
+        <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[10.5px] tracking-widest text-gowl-t6">
           EXPORT HISTORY
         </div>
         {jobs.length === 0 ? (
-          <div className="p-8 text-center text-[12.5px] text-gowl-t5">No exports yet.</div>
+          <div className="p-8 text-center text-[14px] text-gowl-t5">No exports yet.</div>
         ) : (
           <div className="divide-y divide-gowl-row">
             {jobs.map((job) => {
@@ -96,12 +96,12 @@ export function ExportTab({ glossaryId: _glossaryId }: { readonly glossaryId: st
               return (
                 <div key={job.id} className="flex items-center justify-between px-4 py-3">
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-[11px] text-gowl-t4">{job.format}</span>
-                    <span className={`rounded-full px-2 py-0.5 font-mono text-[8.5px] ${ss.bg} ${ss.text}`}>
+                    <span className="font-mono text-[12.5px] text-gowl-t4">{job.format}</span>
+                    <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${ss.bg} ${ss.text}`}>
                       {job.status.toUpperCase()}
                     </span>
                   </div>
-                  <div className="flex items-center gap-4 text-[11px] text-gowl-t5">
+                  <div className="flex items-center gap-4 text-[12.5px] text-gowl-t5">
                     {job.recordCount !== undefined && <span>{job.recordCount} records</span>}
                     {job.fileSize !== undefined && <span>{job.fileSize}</span>}
                     <span>{job.startedAt}</span>

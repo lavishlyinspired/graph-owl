@@ -45,19 +45,19 @@ export default function AdminRoute() {
       <div className="flex-1 overflow-y-auto p-8">
         <div className="mb-5 flex items-end justify-between">
           <div>
-            <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.adminTitle}</h1>
-            <p className="text-[12.5px] text-gowl-t5">{strings.adminDescription}</p>
+            <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.adminTitle}</h1>
+            <p className="text-[14px] text-gowl-t5">{strings.adminDescription}</p>
           </div>
           <div className="flex gap-2">
             <button
               type="button"
-              className="rounded-md bg-gowl-accent px-4 py-1.5 text-[12px] font-semibold text-gowl-accent-on"
+              className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
             >
               {strings.adminPrimaryAction}
             </button>
             <button
               type="button"
-              className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[12px] text-gowl-t2"
+              className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[13.5px] text-gowl-t2"
             >
               {strings.adminSecondaryAction}
             </button>
@@ -74,7 +74,7 @@ export default function AdminRoute() {
         />
 
         <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
-          <div className="grid grid-cols-[120px_1.2fr_1.2fr_130px_96px] gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[9.5px] tracking-wider text-gowl-t6">
+          <div className="grid grid-cols-[120px_1.2fr_1.2fr_130px_96px] gap-3 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2 font-mono text-[11px] tracking-wider text-gowl-t6">
             <span>{strings.adminColActor}</span>
             <span>{strings.adminColAction}</span>
             <span>{strings.adminColObject}</span>
@@ -86,12 +86,12 @@ export default function AdminRoute() {
               key={index}
               className="grid grid-cols-[120px_1.2fr_1.2fr_130px_96px] items-center gap-3 border-b border-gowl-row px-4 py-2.5 last:border-b-0 hover:bg-gowl-row"
             >
-              <span className="truncate text-[12.5px] text-gowl-t1">{event.actor}</span>
-              <span className="truncate text-[12.5px] text-gowl-t2">{event.action}</span>
-              <span className="truncate font-mono text-[11.5px] text-gowl-t2">{event.object}</span>
-              <span className="font-mono text-[11.5px] text-gowl-t5">{event.time}</span>
+              <span className="truncate text-[14px] text-gowl-t1">{event.actor}</span>
+              <span className="truncate text-[14px] text-gowl-t2">{event.action}</span>
+              <span className="truncate font-mono text-[13px] text-gowl-t2">{event.object}</span>
+              <span className="font-mono text-[13px] text-gowl-t5">{event.time}</span>
               <span
-                className={`font-mono text-[11.5px] ${
+                className={`font-mono text-[13px] ${
                   event.result === "OK" ? "text-gowl-ok" : "text-gowl-bad"
                 }`}
               >
@@ -104,10 +104,10 @@ export default function AdminRoute() {
 
       <div className="w-[280px] flex-none overflow-y-auto border-l border-gowl-line bg-gowl-panel p-5">
         <div className="mb-5">
-          <div className="mb-2 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+          <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">
             {strings.adminChartTitle}
           </div>
-          <p className="mb-3 text-[11px] text-gowl-t5">{strings.adminChartSubtitle}</p>
+          <p className="mb-3 text-[12.5px] text-gowl-t5">{strings.adminChartSubtitle}</p>
           <div className="flex items-end gap-1.5" style={{ height: 100 }}>
             {AUDIT_HOURLY.map((bar) => (
               <div key={bar.hour} className="flex flex-1 flex-col items-center gap-1">
@@ -117,23 +117,23 @@ export default function AdminRoute() {
                   }`}
                   style={{ height: bar.height }}
                 />
-                <span className="font-mono text-[9px] text-gowl-t6">{bar.hour}</span>
+                <span className="font-mono text-[10.5px] text-gowl-t6">{bar.hour}</span>
               </div>
             ))}
           </div>
         </div>
 
         <div className="mb-5 rounded-md border border-gowl-accent-border bg-gowl-accent-deep p-3">
-          <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-accent">
+          <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-accent">
             {strings.adminCalloutTitle}
           </div>
-          <p className="text-[11.5px] leading-relaxed text-gowl-t3">
+          <p className="text-[13px] leading-relaxed text-gowl-t3">
             {strings.adminCalloutBody}
           </p>
         </div>
 
         <div>
-          <div className="mb-2 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+          <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">
             {strings.relatedTitle}
           </div>
           <div className="space-y-1">
@@ -145,10 +145,10 @@ export default function AdminRoute() {
               <a
                 key={link.route}
                 href={`/${link.route}`}
-                className="flex items-center justify-between rounded-md px-2.5 py-1.5 text-[12.5px] text-gowl-t2 hover:bg-gowl-row"
+                className="flex items-center justify-between rounded-md px-2.5 py-1.5 text-[14px] text-gowl-t2 hover:bg-gowl-row"
               >
                 <span>{link.label}</span>
-                <span className="font-mono text-[10px] text-gowl-t5">{link.detail}</span>
+                <span className="font-mono text-[11.5px] text-gowl-t5">{link.detail}</span>
               </a>
             ))}
           </div>

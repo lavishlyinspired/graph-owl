@@ -38,14 +38,14 @@ export default function TasksRoute() {
     <div className="p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.tasksTitle}</h1>
-          <p className="text-[12.5px] text-gowl-t5">{strings.tasksDescription}</p>
+          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.tasksTitle}</h1>
+          <p className="text-[14px] text-gowl-t5">{strings.tasksDescription}</p>
         </div>
-        <div className="text-[12px] text-gowl-t5">{openCount} open tasks</div>
+        <div className="text-[13.5px] text-gowl-t5">{openCount} open tasks</div>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-gowl-line">
-        <div className="grid grid-cols-[1fr_120px_90px_90px_80px_110px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2.5 font-mono text-[8.5px] tracking-wider text-gowl-t6">
+        <div className="grid grid-cols-[1fr_120px_90px_90px_80px_110px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2.5 font-mono text-[10px] tracking-wider text-gowl-t6">
           <span>TASK</span>
           <span>ASSIGNEE</span>
           <span>PRIORITY</span>
@@ -61,16 +61,16 @@ export default function TasksRoute() {
               key={task.id}
               className="grid grid-cols-[1fr_120px_90px_90px_80px_110px] items-center gap-2 border-b border-gowl-row px-4 py-3 last:border-b-0"
             >
-              <span className="text-[12.5px] text-gowl-t1">{task.title}</span>
-              <span className="text-[11.5px] text-gowl-t4">{task.assignee}</span>
-              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[8.5px] ${ps.bg} ${ps.text}`}>
+              <span className="text-[14px] text-gowl-t1">{task.title}</span>
+              <span className="text-[13px] text-gowl-t4">{task.assignee}</span>
+              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[10px] ${ps.bg} ${ps.text}`}>
                 {task.priority.toUpperCase()}
               </span>
-              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[8.5px] ${ss.bg} ${ss.text}`}>
+              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[10px] ${ss.bg} ${ss.text}`}>
                 {task.status.toUpperCase()}
               </span>
-              <span className="font-mono text-[11px] text-gowl-t5">{task.due}</span>
-              <span className="text-[10.5px] text-gowl-t5">{task.source}</span>
+              <span className="font-mono text-[12.5px] text-gowl-t5">{task.due}</span>
+              <span className="text-[12px] text-gowl-t5">{task.source}</span>
             </div>
           );
         })}

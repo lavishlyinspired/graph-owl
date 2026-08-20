@@ -28,8 +28,8 @@ export default function SecurityRoute() {
     <div className="p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.securityTitle}</h1>
-          <p className="text-[12.5px] text-gowl-t5">{strings.securityDescription}</p>
+          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.securityTitle}</h1>
+          <p className="text-[14px] text-gowl-t5">{strings.securityDescription}</p>
         </div>
       </div>
 
@@ -41,14 +41,14 @@ export default function SecurityRoute() {
           { label: "POLICIES ACTIVE", value: "12", color: "text-gowl-t1" },
         ].map((kpi) => (
           <div key={kpi.label} className="bg-gowl-panel p-4">
-            <div className="mb-2 font-mono text-[9px] tracking-widest text-gowl-t6">{kpi.label}</div>
-            <div className={`font-mono text-[20px] ${kpi.color}`}>{kpi.value}</div>
+            <div className="mb-2 font-mono text-[10.5px] tracking-widest text-gowl-t6">{kpi.label}</div>
+            <div className={`font-mono text-[21.5px] ${kpi.color}`}>{kpi.value}</div>
           </div>
         ))}
       </div>
 
       <div className="rounded-lg border border-gowl-line bg-gowl-panel">
-        <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+        <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[11px] tracking-widest text-gowl-t6">
           SECURITY EVENTS
         </div>
         {EVENTS.map((event) => {
@@ -56,10 +56,10 @@ export default function SecurityRoute() {
           return (
             <div key={event.id} className="flex items-center gap-4 border-b border-gowl-row px-4 py-3 last:border-b-0">
               <span className={`flex-none h-2 w-2 rounded-full ${ss.bg}`} />
-              <span className="flex-none w-[130px] text-[11.5px] text-gowl-t4">{event.type}</span>
-              <span className="flex-none w-[180px] truncate text-[11.5px] text-gowl-t2">{event.actor}</span>
-              <span className="flex-1 text-[12px] text-gowl-t1">{event.detail}</span>
-              <span className="flex-none text-[11px] text-gowl-t5">{event.time}</span>
+              <span className="flex-none w-[130px] text-[13px] text-gowl-t4">{event.type}</span>
+              <span className="flex-none w-[180px] truncate text-[13px] text-gowl-t2">{event.actor}</span>
+              <span className="flex-1 text-[13.5px] text-gowl-t1">{event.detail}</span>
+              <span className="flex-none text-[12.5px] text-gowl-t5">{event.time}</span>
             </div>
           );
         })}

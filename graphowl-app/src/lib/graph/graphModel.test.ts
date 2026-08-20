@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   edgeClasses,
+  edgeLegendEntries,
   type Picture,
   WEBGL_THRESHOLD,
   edgeId,
@@ -10,10 +11,13 @@ import {
   MAX_ZOOM,
   nodeClasses,
   nodeGlyph,
+  shortLabel,
+  MAX_LABEL_CHARS,
   resolveEdgeStyle,
   resolveNodeStyle,
   semanticTypeColor,
   toG6Data,
+  withEntryPositions,
   visiblePicture,
   wantsWebgl,
 } from "./graphModel";
@@ -24,6 +28,7 @@ const colors = {
   primary: "#14C3CF",
   border: "#E5E7EB",
   raised: "#FFFFFF",
+  inferred: "#a3641a",
 };
 
 function picture(overrides?: Partial<Picture>): Picture {
@@ -178,33 +183,47 @@ describe("the classes a reader can act on", () => {
   });
 });
 
-describe("the layout is deterministic", () => {
-  /** Radial, focused on the seed, and never animated. A force simulation
-   *  settles somewhere slightly different every run, so the same
-   *  neighbourhood never looks the same twice. */
-  it("is radial, focused on the seed, and does not prevent overlap iteratively", () => {
-    const options = layoutOptions("a");
-
-    expect(options.type).toBe("radial");
-    expect(options.focusNode).toBe("a");
-    expect(options.preventOverlap).toBe(false);
+describe("the force-directed layout", () => {
+  it("is d3-force, matching the reference example", () => {
+    expect(layoutOptions().type).toBe("d3-force");
   });
 
-  it("produces identical options for the same seed", () => {
-    expect(layoutOptions("a")).toEqual(layoutOptions("a"));
+  /** `link`/`manyBody`/`collide` as nested objects, matching G6's own
+   *  published example (`examples/layout/force-directed/#d3-force`) —
+   *  `@antv/layout`'s `D3ForceLayoutOptions` also accepts a flatter
+   *  `linkDistance`/`nodeStrength`/`preventOverlap` shape, but the nested one
+   *  is what the reference example and its docs actually show, so it is what
+   *  this matches rather than an equivalent the docs never demonstrate. */
+  it("sizes collisions by an explicit radius, matching the reference shape", () => {
+    const options = layoutOptions() as { collide?: { radius?: number } };
+    expect(options.collide?.radius).toBe(90);
   });
 
+  /** **`d3-force` is deterministic here, verified against its own source, not
+   *  assumed from its reputation.** A force simulation is popularly believed
+   *  to settle differently every run, and it can — `Math.random()` in the
+   *  wrong place would make it so. `d3-force`'s own `initializeNodes` seeds
+   *  each node's starting position from its *index* in the array
+   *  (`initialRadius * sqrt(0.5 + i)`, `angle = i * initialAngle`), and every
+   *  force that wants randomness draws from an `lcg()` seeded with the fixed
+   *  constant `s = 1` — not the clock, not `Math.random`. Given the same
+   *  node order, the same edges and the same options, every run produces the
+   *  same simulation. Confirmed empirically too — see `GraphCanvas.tsx`'s
+   *  layout effect for the double-load comparison, done against each node's
+   *  `x`/`y` rather than a rendered-pixel hash, which canvas anti-aliasing
+   *  does not guarantee to agree even when the underlying layout does. */
   it("pins every option the layout's determinism rests on", () => {
-    expect(layoutOptions("a")).toEqual({
-      type: "radial",
-      focusNode: "a",
-      unitRadius: 90,
-      preventOverlap: false,
+    expect(layoutOptions()).toEqual({
+      type: "d3-force",
+      link: { distance: 160 },
+      manyBody: { strength: -220 },
+      collide: { radius: 90 },
+      alphaDecay: 0.05,
     });
   });
 
-  it("focuses on whichever node the canvas opened on", () => {
-    expect(layoutOptions("z").focusNode).toBe("z");
+  it("produces identical options on every call", () => {
+    expect(layoutOptions()).toEqual(layoutOptions());
   });
 });
 
@@ -321,16 +340,26 @@ describe("every class a reader can act on keeps its own drawing rule", () => {
     expect(style.labelFontWeight).toBe("bold");
   });
 
-  it("an expandable node is marked by a thicker ring", () => {
+  /** **Expandable is no longer drawn as a heavy ring.** Nearly every node in
+   *  a freshly opened neighbourhood is expandable, so the marker fired almost
+   *  everywhere and the canvas read as uniformly heavy — the ring is 1px in
+   *  the design, and a 3px default swamped it. The affordance moved to the
+   *  hover controls, which say what the click will do instead of leaving the
+   *  reader to infer it from a border. */
+  it("draws an expandable node no heavier than any other", () => {
     const base = resolveNodeStyle({ classes: "", label: "a" }, colors);
     const style = resolveNodeStyle({ classes: "expandable", label: "a" }, colors);
-    expect(style.lineWidth).toBe(3);
-    expect(style.lineWidth).not.toBe(base.lineWidth);
+    expect(style.lineWidth).toBe(base.lineWidth);
+  });
+
+  it("keeps the ring hairline, as the design draws it", () => {
+    expect(resolveNodeStyle({ classes: "", label: "a" }, colors).lineWidth).toBe(1);
+    expect(resolveNodeStyle({ classes: "seed", label: "a" }, colors).lineWidth).toBe(2);
   });
 
   it("a node hiding neighbours is marked by a dashed border", () => {
     const style = resolveNodeStyle({ classes: "truncated", label: "a" }, colors);
-    expect(style.lineWidth).toBe(3);
+    expect(style.lineWidth).toBe(2);
     expect(style.lineDash).toEqual([4, 2]);
     expect(style.stroke).toBe(colors.text);
   });
@@ -348,9 +377,9 @@ describe("every class a reader can act on keeps its own drawing rule", () => {
 
   it("a derived edge is dashed and tinted, arrow included", () => {
     const style = resolveEdgeStyle({ classes: "derived", label: "feeds" }, colors);
-    expect(style.lineDash).toEqual([4, 2]);
-    expect(style.stroke).toBe(colors.primary);
-    expect(style.endArrowFill).toBe(colors.primary);
+    expect(style.lineDash).toEqual([6, 5]);
+    expect(style.stroke).toBe(colors.inferred);
+    expect(style.endArrowFill).toBe(colors.inferred);
   });
 });
 
@@ -659,5 +688,224 @@ describe("colouring a node by its pack-declared semantic type — Plan 114 Slice
       truncatedAt: [],
     };
     expect(legendEntries(picture, "light", colors).map((e) => e.key)).toEqual(["table"]);
+  });
+});
+
+/** The **provenance key** — what a line's drawing means.
+ *
+ *  Distinct from `legendEntries` above, which names the *node* kinds present.
+ *  A GST subject has no catalog `kind` and no `semanticType`, so that legend
+ *  is empty for exactly the data the console spends most of its time on, and
+ *  the canvas ends up with no key at all. This one describes the edge
+ *  encoding `resolveEdgeStyle` actually applies, so it is present whenever
+ *  anything is drawn. */
+describe("the edge provenance key", () => {
+  it("names both edge states the canvas can draw, so the key explains the drawing", () => {
+    expect(edgeLegendEntries(picture(), colors).map((e) => e.key)).toEqual([
+      "asserted",
+      "inferred",
+    ]);
+  });
+
+  /** A key describes an encoding, not a census — but a picture with no edges
+   *  at all has no encoding to explain, and a key floating over an edgeless
+   *  canvas is furniture. */
+  it("keys nothing when there are no edges to explain", () => {
+    expect(edgeLegendEntries(picture({ edges: [] }), colors)).toEqual([]);
+  });
+
+  /** **The key must not move under the reader.** An entry that appeared only
+   *  once a derived edge arrived would make the legend reflow mid-expansion,
+   *  and the reader is using its position to read the canvas. */
+  it("keys both states even when every edge present is asserted", () => {
+    const allAsserted = picture({
+      edges: [{ from: "a", to: "b", relationship: "contains", derived: false }],
+    });
+    expect(edgeLegendEntries(allAsserted, colors).map((e) => e.key)).toEqual([
+      "asserted",
+      "inferred",
+    ]);
+  });
+
+  it("draws each state exactly as an edge of that state is drawn", () => {
+    const [asserted, inferred] = edgeLegendEntries(picture(), colors);
+    expect(asserted?.color).toBe(colors.border);
+    expect(asserted?.dashed).toBe(false);
+    expect(inferred?.color).toBe(colors.inferred);
+    expect(inferred?.dashed).toBe(true);
+  });
+
+  it("labels read for a human", () => {
+    expect(edgeLegendEntries(picture(), colors).map((e) => e.label)).toEqual([
+      "Asserted",
+      "Inferred",
+    ]);
+  });
+});
+
+/** The type caption under a node's name — `gst:Supplier` beneath
+ *  "Patel Chemicals & Co". Without it a reader can see that two nodes are
+ *  coloured differently but not what either colour *is*. */
+describe("the node type caption", () => {
+  it("captions a node with its resolved type", () => {
+    const typed = picture({
+      nodes: [{ id: "a", name: "Patel Chemicals", kind: null, semanticType: "gst:Supplier" }],
+      edges: [],
+    });
+    expect(toG6Data(typed).nodes[0]?.data.caption).toBe("gst:Supplier");
+  });
+
+  /** A catalog asset's kind is the same class of fact, and reads the same way
+   *  under the name. */
+  it("captions a catalog asset with its kind", () => {
+    const typed = picture({ nodes: [{ id: "a", name: "orders", kind: "table" }], edges: [] });
+    expect(toG6Data(typed).nodes[0]?.data.caption).toBe("table");
+  });
+
+  /** **No caption rather than an invented one.** A node the graph could not
+   *  type gets nothing under its name — a placeholder like "unknown" reads as
+   *  a class the ontology declares. */
+  it("captions nothing when the node has neither kind nor type", () => {
+    const untyped = picture({ nodes: [{ id: "a", name: "a", kind: null }], edges: [] });
+    expect(toG6Data(untyped).nodes[0]?.data.caption).toBeUndefined();
+  });
+
+  it("draws the caption under the name, in the muted colour", () => {
+    const style = resolveNodeStyle(
+      { classes: "", label: "Patel Chemicals", caption: "gst:Supplier" },
+      colors,
+    );
+    expect(style["labelText"]).toBe("Patel Chemicals\ngst:Supplier");
+  });
+
+  it("draws just the name when there is no caption", () => {
+    expect(resolveNodeStyle({ classes: "", label: "Patel" }, colors)["labelText"]).toBe("Patel");
+  });
+});
+
+/** Identifier-shaped names are long, and a canvas has no room for them.
+ *  `books-19AABCP8087C1ZV-INV-MAR-006` at full length overlaps its
+ *  neighbours until the picture is unreadable. */
+describe("shortening a label for the canvas", () => {
+  it("leaves a name that already fits completely alone", () => {
+    expect(shortLabel("Patel Chemicals & Co")).toBe("Patel Chemicals & Co");
+  });
+
+  /** **Middle-ellipsis, not a truncated tail.** These ids carry meaning at
+   *  both ends — the family at the front (`books-`, `payments-`) and the
+   *  document number at the back (`INV-MAR-006`) — and two invoices for the
+   *  same supplier differ only in the tail, so cutting it makes distinct
+   *  nodes read as identical. */
+  it("keeps both ends of a long identifier and elides the middle", () => {
+    const short = shortLabel("books-19AABCP8087C1ZV-INV-MAR-006");
+    expect(short.startsWith("books-")).toBe(true);
+    expect(short.endsWith("INV-MAR-006")).toBe(true);
+    expect(short).toContain("…");
+  });
+
+  it("never returns more than the budget", () => {
+    expect(shortLabel("books-19AABCP8087C1ZV-INV-MAR-006").length).toBeLessThanOrEqual(
+      MAX_LABEL_CHARS,
+    );
+  });
+
+  /** Two invoices differing only in their tail must stay visibly different —
+   *  the failure this shortening exists to avoid. */
+  it("keeps two ids that differ only at the end distinguishable", () => {
+    expect(shortLabel("books-19AABCP8087C1ZV-INV-MAR-006")).not.toBe(
+      shortLabel("books-19AABCP8087C1ZV-INV-MAR-007"),
+    );
+  });
+
+  it("shortens the name the canvas actually draws", () => {
+    const long = picture({
+      nodes: [{ id: "a", name: "books-19AABCP8087C1ZV-INV-MAR-006", kind: null }],
+      edges: [],
+    });
+    expect(toG6Data(long).nodes[0]?.data.label).toBe(
+      shortLabel("books-19AABCP8087C1ZV-INV-MAR-006"),
+    );
+  });
+});
+
+/** The three line treatments the design uses, and what each one means. */
+describe("edge treatments", () => {
+  const asserted = resolveEdgeStyle({ classes: "", label: "issuedBy" }, colors);
+  const inferred = resolveEdgeStyle({ classes: "derived", label: "locatedIn" }, colors);
+
+  it("draws an asserted edge as a solid hairline", () => {
+    expect(asserted.lineDash).toBeUndefined();
+    expect(asserted.stroke).toBe(colors.border);
+  });
+
+  /** Dashed *and* recoloured: a state a reader acts on must survive somebody
+   *  who cannot tell two hues apart, so the dash carries the meaning and the
+   *  colour only reinforces it. */
+  it("draws an inferred edge dashed and in the inferred colour", () => {
+    expect(inferred.lineDash).toEqual([6, 5]);
+    expect(inferred.stroke).toBe(colors.inferred);
+  });
+
+  it("labels the edge with its relationship, on its own plate", () => {
+    expect(asserted.labelText).toBe("issuedBy");
+    expect(asserted.labelBackground).toBe(true);
+    expect(asserted.labelFontSize).toBe(9.5);
+  });
+});
+
+describe("seeding a newly expanded node's starting position", () => {
+  const before = toG6Data(
+    picture({
+      nodes: [
+        { id: "a", name: "a", kind: "table" },
+        { id: "b", name: "b", kind: "column" },
+      ],
+      edges: [{ from: "a", to: "b", relationship: "contains" }],
+    }),
+  );
+
+  const after = toG6Data(
+    picture({
+      nodes: [
+        { id: "a", name: "a", kind: "table" },
+        { id: "b", name: "b", kind: "column" },
+        { id: "c", name: "c", kind: "table" },
+      ],
+      edges: [
+        { from: "a", to: "b", relationship: "contains" },
+        { from: "b", to: "c", relationship: "feeds" },
+      ],
+    }),
+  );
+
+  /** **This is what makes an expansion read as "bubbling out of" the node the
+   *  reader clicked, instead of appearing wherever the layout's own
+   *  index-based placement happens to land it.** Co-locating a brand-new
+   *  node with the node it was reached from — rather than leaving it
+   *  unpositioned — gives the force simulation a real starting point next to
+   *  its neighbour, and gives G6 an "enter" position to tween outward from
+   *  once the layout settles it. Without a seed, a new node can start on the
+   *  opposite side of the canvas from the thing that just grew it, and jump
+   *  there rather than growing out of it. */
+  it("places a node new to this picture at the anchor's position", () => {
+    const seeded = withEntryPositions(after, before, "a", { x: 100, y: 200 });
+    const c = seeded.nodes.find((n) => n.id === "c");
+    expect(c?.style).toEqual({ x: 100, y: 200 });
+  });
+
+  it("leaves a node already present in the previous picture unseeded", () => {
+    const seeded = withEntryPositions(after, before, "a", { x: 100, y: 200 });
+    const b = seeded.nodes.find((n) => n.id === "b");
+    expect(b?.style).toBeUndefined();
+  });
+
+  it("does not disturb edges", () => {
+    const seeded = withEntryPositions(after, before, "a", { x: 100, y: 200 });
+    expect(seeded.edges).toEqual(after.edges);
+  });
+
+  it("seeds nothing when nothing is new", () => {
+    const seeded = withEntryPositions(before, before, "a", { x: 100, y: 200 });
+    expect(seeded.nodes.every((n) => n.style === undefined)).toBe(true);
   });
 });

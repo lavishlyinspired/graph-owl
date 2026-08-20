@@ -28,7 +28,7 @@ export function GlossaryTab({ glossaryId }: { readonly glossaryId: string }) {
   useEffect(load, [glossaryId]);
 
   if (!terms) {
-    return <div className="text-[13px] text-gowl-t5">{strings.studioLoading}</div>;
+    return <div className="text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>;
   }
 
   const candidates = terms.filter((t) => t.status === "draft" || t.status === "inReview");
@@ -65,29 +65,29 @@ export function GlossaryTab({ glossaryId }: { readonly glossaryId: string }) {
   };
 
   if (terms.length === 0) {
-    return <p className="text-[13px] text-gowl-t5">{strings.glossaryEmpty}</p>;
+    return <p className="text-[14.5px] text-gowl-t5">{strings.glossaryEmpty}</p>;
   }
 
   return (
     <div>
-      {error && <p className="mb-3 text-[12.5px] text-gowl-bad">{error}</p>}
+      {error && <p className="mb-3 text-[14px] text-gowl-bad">{error}</p>}
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-lg border border-gowl-line bg-gowl-panel">
-          <div className="border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+          <div className="border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[11px] tracking-widest text-gowl-t6">
             {strings.glossaryCandidatesTitle}
           </div>
           {candidates.map((term) => (
             <div key={term.id} className="border-b border-gowl-row px-3 py-2 last:border-b-0">
               <div className="mb-1.5 flex items-center justify-between">
                 <div>
-                  <div className="text-[12.5px] text-gowl-t1">{term.name}</div>
-                  <div className="text-[11px] text-gowl-t6">{STATUS_LABEL[term.status]}</div>
+                  <div className="text-[14px] text-gowl-t1">{term.name}</div>
+                  <div className="text-[12.5px] text-gowl-t6">{STATUS_LABEL[term.status]}</div>
                 </div>
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => promote(term)}
-                  className="rounded-md bg-gowl-accent px-2 py-1 text-[11px] font-semibold text-gowl-accent-on disabled:opacity-40"
+                  className="rounded-md bg-gowl-accent px-2 py-1 text-[12.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
                 >
                   {term.status === "draft" ? strings.glossarySubmitForReview : strings.glossaryPromote}
                 </button>
@@ -98,13 +98,13 @@ export function GlossaryTab({ glossaryId }: { readonly glossaryId: string }) {
                     value={reviewerInputs[term.id] ?? ""}
                     onChange={(e) => setReviewerInputs((prev) => ({ ...prev, [term.id]: e.target.value }))}
                     placeholder={strings.glossaryReviewerPlaceholder}
-                    className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[11px] text-gowl-t1"
+                    className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[12.5px] text-gowl-t1"
                   />
                   <button
                     type="button"
                     disabled={busy || !reviewerInputs[term.id]?.trim()}
                     onClick={() => assignReviewer(term)}
-                    className="rounded-md border border-gowl-line-2 px-2 py-1 text-[11px] text-gowl-t2 disabled:opacity-40"
+                    className="rounded-md border border-gowl-line-2 px-2 py-1 text-[12.5px] text-gowl-t2 disabled:opacity-40"
                   >
                     {strings.glossaryAssignReviewer}
                   </button>
@@ -115,11 +115,11 @@ export function GlossaryTab({ glossaryId }: { readonly glossaryId: string }) {
         </div>
 
       <div className="rounded-lg border border-gowl-line bg-gowl-panel">
-        <div className="border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+        <div className="border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[11px] tracking-widest text-gowl-t6">
           {strings.glossaryApprovedTitle}
         </div>
         {approved.map((term) => (
-          <div key={term.id} className="border-b border-gowl-row px-3 py-2 text-[12.5px] text-gowl-t1 last:border-b-0">
+          <div key={term.id} className="border-b border-gowl-row px-3 py-2 text-[14px] text-gowl-t1 last:border-b-0">
             {term.name}
           </div>
         ))}

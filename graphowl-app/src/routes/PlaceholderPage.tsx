@@ -10,8 +10,8 @@ interface PlaceholderPageProps {
 export function PlaceholderPage({ title, slice }: PlaceholderPageProps) {
   return (
     <div className="p-8">
-      <h1 className="text-[18px] font-semibold text-gowl-t1">{title}</h1>
-      <p className="mt-2 text-[13px] text-gowl-t5">{`Ships in plans/122a-graphowl-app.md, slice ${slice}.`}</p>
+      <h1 className="text-[19.5px] font-semibold text-gowl-t1">{title}</h1>
+      <p className="mt-2 text-[14.5px] text-gowl-t5">{`Ships in plans/122a-graphowl-app.md, slice ${slice}.`}</p>
     </div>
   );
 }

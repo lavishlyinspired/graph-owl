@@ -168,19 +168,19 @@ export default function AnalyticsRoute() {
     <div className="overflow-y-auto p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[21px] font-semibold text-gowl-t1">{strings.analyticsTitle}</h1>
-          <p className="text-[12.5px] text-gowl-t5">{strings.analyticsDescription}</p>
+          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.analyticsTitle}</h1>
+          <p className="text-[14px] text-gowl-t5">{strings.analyticsDescription}</p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[12px] font-semibold text-gowl-accent-on"
+            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
           >
             {strings.analyticsShowFacts}
           </button>
           <button
             type="button"
-            className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[12px] text-gowl-t2"
+            className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[13.5px] text-gowl-t2"
           >
             {strings.analyticsBuildReport}
           </button>
@@ -191,10 +191,10 @@ export default function AnalyticsRoute() {
       <div className="mb-6 grid grid-cols-4 gap-3">
         {KPI_CARDS.map((kpi) => (
           <div key={kpi.label} className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-            <div className="mb-2 font-mono text-[9.5px] tracking-widest text-gowl-t6">{kpi.label}</div>
+            <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">{kpi.label}</div>
             <div className="flex items-baseline gap-2">
-              <span className="font-mono text-[21px] text-gowl-t1">{kpi.value}</span>
-              <span className="font-mono text-[11.5px] text-gowl-ok">{kpi.delta}</span>
+              <span className="font-mono text-[22.5px] text-gowl-t1">{kpi.value}</span>
+              <span className="font-mono text-[13px] text-gowl-ok">{kpi.delta}</span>
             </div>
             <div className="my-2 flex items-end gap-px" style={{ height: 26 }}>
               {kpi.spark.map((bar, i) => (
@@ -205,7 +205,7 @@ export default function AnalyticsRoute() {
                 />
               ))}
             </div>
-            <div className="text-[11px] text-gowl-t7">{kpi.sub}</div>
+            <div className="text-[12.5px] text-gowl-t7">{kpi.sub}</div>
           </div>
         ))}
       </div>
@@ -214,7 +214,7 @@ export default function AnalyticsRoute() {
       <div className="mb-6 grid grid-cols-2 gap-6">
         {/* Graph Growth by Fact State */}
         <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-          <div className="mb-4 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+          <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
             {strings.analyticsGrowthTitle}
           </div>
           <div className="mb-3 flex items-end gap-2" style={{ height: 140 }}>
@@ -230,35 +230,35 @@ export default function AnalyticsRoute() {
               </div>
             ))}
           </div>
-          <div className="mb-3 flex justify-between font-mono text-[10px] text-gowl-t6">
+          <div className="mb-3 flex justify-between font-mono text-[11.5px] text-gowl-t6">
             {GROWTH_DATA.map((col) => (
               <span key={col.week}>{col.week}</span>
             ))}
           </div>
           <div className="mb-3 flex gap-4">
             {GROWTH_LEGEND.map((item) => (
-              <div key={item.label} className="flex items-center gap-1.5 text-[11px] text-gowl-t4">
+              <div key={item.label} className="flex items-center gap-1.5 text-[12.5px] text-gowl-t4">
                 <div className="h-2 w-2 rounded-sm" style={{ backgroundColor: item.color }} />
                 {item.label}
               </div>
             ))}
           </div>
-          <p className="text-[11.5px] leading-relaxed text-gowl-t5">
+          <p className="text-[13px] leading-relaxed text-gowl-t5">
             {strings.analyticsGrowthNote}
           </p>
         </div>
 
         {/* Funnel: From Source Row to Certified Fact */}
         <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-          <div className="mb-4 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+          <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
             {strings.analyticsFunnelTitle}
           </div>
           <div className="space-y-3">
             {FUNNEL_DATA.map((step) => (
               <div key={step.label}>
                 <div className="mb-1 flex items-baseline justify-between">
-                  <span className="text-[12px] text-gowl-t2">{step.label}</span>
-                  <span className="font-mono text-[11px] text-gowl-t5">{step.value}</span>
+                  <span className="text-[13.5px] text-gowl-t2">{step.label}</span>
+                  <span className="font-mono text-[12.5px] text-gowl-t5">{step.value}</span>
                 </div>
                 <div className="relative h-2 rounded-full bg-gowl-track">
                   <div
@@ -266,14 +266,14 @@ export default function AnalyticsRoute() {
                     style={{ width: step.width, backgroundColor: step.color }}
                   />
                 </div>
-                <div className="mt-0.5 flex justify-between text-[10px] text-gowl-t6">
+                <div className="mt-0.5 flex justify-between text-[11.5px] text-gowl-t6">
                   <span>{step.pct}</span>
                   <span>{step.note}</span>
                 </div>
               </div>
             ))}
           </div>
-          <p className="mt-4 text-[11.5px] leading-relaxed text-gowl-t5">
+          <p className="mt-4 text-[13px] leading-relaxed text-gowl-t5">
             {strings.analyticsFunnelNote}
           </p>
         </div>
@@ -285,18 +285,18 @@ export default function AnalyticsRoute() {
         <div className="space-y-6">
           {/* Confidence Decay Heatmap */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
               {strings.analyticsHeatmapTitle}
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-[11px]">
+              <table className="w-full text-[12.5px]">
                 <thead>
                   <tr>
-                    <th className="pb-2 pr-3 text-left font-mono text-[9.5px] tracking-wider text-gowl-t6">
+                    <th className="pb-2 pr-3 text-left font-mono text-[11px] tracking-wider text-gowl-t6">
                       PREDICATE
                     </th>
                     {HEATMAP_MONTHS.map((month) => (
-                      <th key={month} className="pb-2 px-2 text-center font-mono text-[9.5px] tracking-wider text-gowl-t6">
+                      <th key={month} className="pb-2 px-2 text-center font-mono text-[11px] tracking-wider text-gowl-t6">
                         {month}
                       </th>
                     ))}
@@ -309,7 +309,7 @@ export default function AnalyticsRoute() {
                       {row.values.map((val, i) => (
                         <td key={i} className="px-2 py-1">
                           <div
-                            className={`flex h-8 items-center justify-center rounded-md font-mono text-[10px] ${HEATMAP_COLORS[row.levels[i] ?? 0]}`}
+                            className={`flex h-8 items-center justify-center rounded-md font-mono text-[11.5px] ${HEATMAP_COLORS[row.levels[i] ?? 0]}`}
                           >
                             {val}
                           </div>
@@ -324,15 +324,15 @@ export default function AnalyticsRoute() {
 
           {/* Most-Traversed Relationships */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
               {strings.analyticsHotspotsTitle}
             </div>
             <div className="space-y-2.5">
               {HOTSPOTS.map((item) => (
                 <div key={item.label}>
                   <div className="mb-1 flex items-baseline justify-between">
-                    <span className="font-mono text-[12px] text-gowl-t2">{item.label}</span>
-                    <span className="font-mono text-[11px] text-gowl-t5">{item.value}</span>
+                    <span className="font-mono text-[13.5px] text-gowl-t2">{item.label}</span>
+                    <span className="font-mono text-[12.5px] text-gowl-t5">{item.value}</span>
                   </div>
                   <div className="h-2 rounded-full bg-gowl-track">
                     <div
@@ -350,26 +350,26 @@ export default function AnalyticsRoute() {
         <div className="space-y-4">
           {/* Read of the Period */}
           <div className="rounded-lg border border-gowl-accent-border bg-gowl-accent-deep p-5">
-            <div className="mb-2 font-mono text-[9.5px] tracking-widest text-gowl-accent">
+            <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-accent">
               {strings.analyticsNarrativeTitle}
             </div>
-            <p className="mb-3 text-[12.5px] leading-relaxed text-gowl-t2">
+            <p className="mb-3 text-[14px] leading-relaxed text-gowl-t2">
               {strings.analyticsNarrativeBody}
             </p>
-            <div className="text-[11px] text-gowl-t5">{strings.analyticsNarrativeCite}</div>
+            <div className="text-[12.5px] text-gowl-t5">{strings.analyticsNarrativeCite}</div>
           </div>
 
           {/* Model Spend vs Graph Work */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[9.5px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
               {strings.analyticsModelSpendTitle}
             </div>
             <div className="space-y-3">
               {MODEL_SPEND.map((model) => (
                 <div key={model.name}>
                   <div className="mb-1 flex items-baseline justify-between">
-                    <span className="text-[12px] text-gowl-t2">{model.name}</span>
-                    <span className="font-mono text-[11px] text-gowl-t5">{model.tokens}</span>
+                    <span className="text-[13.5px] text-gowl-t2">{model.name}</span>
+                    <span className="font-mono text-[12.5px] text-gowl-t5">{model.tokens}</span>
                   </div>
                   <div className="h-2 rounded-full bg-gowl-track">
                     <div
@@ -377,11 +377,11 @@ export default function AnalyticsRoute() {
                       style={{ width: model.width, backgroundColor: model.color }}
                     />
                   </div>
-                  <div className="mt-0.5 text-[10px] text-gowl-t6">{model.use}</div>
+                  <div className="mt-0.5 text-[11.5px] text-gowl-t6">{model.use}</div>
                 </div>
               ))}
             </div>
-            <p className="mt-4 text-[11.5px] leading-relaxed text-gowl-t5">
+            <p className="mt-4 text-[13px] leading-relaxed text-gowl-t5">
               {strings.analyticsModelSpendNote}
             </p>
           </div>

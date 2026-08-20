@@ -23,7 +23,7 @@ export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, 
         <div className="relative h-5 w-5 rounded-md bg-gowl-accent">
           <div className="absolute inset-1.5 rounded-sm bg-gowl-bg" />
         </div>
-        <span className="text-[13px] font-semibold tracking-[0.14em]">{strings.brand}</span>
+        <span className="text-[14.5px] font-semibold tracking-[0.14em]">{strings.brand}</span>
       </div>
 
       <WorkspaceSwitcher name={workspaceName} />
@@ -33,12 +33,12 @@ export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, 
       <button
         type="button"
         onClick={onToggleTheme}
-        className="rounded-md border border-gowl-line px-2.5 py-1 font-mono text-[10px] tracking-widest text-gowl-t5 hover:border-gowl-line-2"
+        className="rounded-md border border-gowl-line px-2.5 py-1 font-mono text-[11.5px] tracking-widest text-gowl-t5 hover:border-gowl-line-2"
       >
         {theme === "dark" ? strings.themeNight : strings.themeDay}
       </button>
 
-      <div className="font-mono text-[11px] text-gowl-t5">{asOf}</div>
+      <div className="font-mono text-[12.5px] text-gowl-t5">{asOf}</div>
 
       <button
         type="button"
@@ -51,13 +51,13 @@ export function TopBar({ theme, onToggleTheme, onOpenInbox, pendingCount, asOf, 
       >
         <span aria-hidden="true">{strings.inboxIcon}</span>
         {pendingCount > 0 && (
-          <span className="ml-1.5 rounded-full bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[10px] text-gowl-amber">
+          <span className="ml-1.5 rounded-full bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[11.5px] text-gowl-amber">
             {pendingCount}
           </span>
         )}
       </button>
 
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gowl-avatar font-mono text-[11px] text-gowl-t2">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gowl-avatar font-mono text-[12.5px] text-gowl-t2">
         {userInitials}
       </div>
     </header>

@@ -118,8 +118,101 @@ export function legendEntries(picture: Picture, mode: ColorMode, colors: StyleCo
   return [...kindEntries, ...typeEntries];
 }
 
+/** One entry of the **provenance key** — a line, not a swatch, because it
+ *  describes how an edge is drawn rather than what colour a node is. */
+export interface EdgeLegendEntry {
+  readonly key: string;
+  readonly label: string;
+  readonly color: string;
+  readonly dashed: boolean;
+}
+
+/** What a line's drawing means — the key to `resolveEdgeStyle`.
+ *
+ *  **Separate from `legendEntries` because it answers a different question,
+ *  and because that one is empty for most real data.** `legendEntries` names
+ *  the *node* kinds present, which requires a catalog `kind` or a pack-declared
+ *  `semanticType`; a subject reached through `/graph/context` (a GST invoice,
+ *  say) has neither, so the canvas that a reader spends most of their time on
+ *  carried no key at all. This one is derived from the edge encoding itself,
+ *  so it is present whenever anything is drawn.
+ *
+ *  **Both states are keyed whenever there are edges, rather than only the
+ *  states present.** A legend is a key to an encoding, not a census of it:
+ *  "dashed means inferred" is true of this canvas whether or not an inferred
+ *  edge happens to be on screen, and it claims nothing about what is. Keying
+ *  only what is present would also move the legend under the reader the moment
+ *  an expansion returned a derived edge, and its position is part of how the
+ *  canvas is read. An edgeless picture keys nothing — there is no encoding to
+ *  explain, and a key over an edgeless canvas is furniture.
+ *
+ *  **`Contradicted` is deliberately absent**, though the design mock shows it:
+ *  `GraphEdge` carries `derived` and nothing else, so there is no contradicted
+ *  state for the canvas to draw or for this to key. Keying one would be a
+ *  legend entry no edge can ever match. */
+export function edgeLegendEntries(picture: Picture, colors: StyleColors): EdgeLegendEntry[] {
+  if (picture.edges.length === 0) return [];
+  return [
+    { key: "asserted", label: "Asserted", color: colors.border, dashed: false },
+    { key: "inferred", label: "Inferred", color: colors.inferred, dashed: true },
+  ];
+}
+
+/** A brand-new node placed at the anchor's position, rather than left for
+ *  the layout's own index-based default — what makes an expansion read as
+ *  the new nodes **bubbling out of the node the reader clicked**, edges
+ *  growing to their natural length from zero, instead of materializing
+ *  wherever d3-force's default placement lands them and possibly jumping
+ *  there from the opposite side of the canvas.
+ *
+ *  A node's own position becomes its collision/repulsion starting point for
+ *  d3-force's simulation (`initializeNodes` only assigns its own index-based
+ *  default when `x`/`y` are absent) *and* G6's "enter" transition's starting
+ *  style — one seed serves both the physics and the animation, rather than
+ *  needing to fake the animation independently of where the layout actually
+ *  begins. */
+export function withEntryPositions(
+  data: G6Data,
+  previous: G6Data,
+  anchorId: string,
+  anchorPosition: { readonly x: number; readonly y: number },
+): G6Data {
+  const existed = new Set(previous.nodes.map((node) => node.id));
+  const nodes = data.nodes.map((node) =>
+    node.id === anchorId || existed.has(node.id) ? node : { ...node, style: anchorPosition },
+  );
+  return { nodes, edges: data.edges };
+}
+
 export function visiblePicture(picture: Picture, hidden: ReadonlySet<string>): Picture {
   return { ...picture, nodes: picture.nodes.filter((node) => !hidden.has(node.id)) };
+}
+
+/** How much of a node's name the canvas draws before eliding.
+ *
+ *  **The canvas auto-fits, so only the ratio of label width to ring spacing
+ *  matters — enlarging `unitRadius` alone buys nothing, because the fit
+ *  zooms the text back down with it.** Both levers therefore move together:
+ *  22 characters against a `unitRadius` of 280 is where the real GST
+ *  identifiers (33 characters, six to a ring) stop colliding. A drawing
+ *  budget, not a data limit — the full name is one click away in the detail
+ *  panel. */
+export const MAX_LABEL_CHARS = 22;
+
+/** A name shortened to fit, eliding the middle rather than the tail.
+ *
+ *  **The tail is the part that distinguishes two nodes.** These names are
+ *  identifiers — `books-19AABCP8087C1ZV-INV-MAR-006` — whose front names the
+ *  family and whose back names the document. Two invoices from one supplier
+ *  differ only in the last few characters, so a trailing ellipsis would draw
+ *  them as the same node twice. */
+export function shortLabel(name: string): string {
+  if (name.length <= MAX_LABEL_CHARS) return name;
+  // The ellipsis costs one of the budgeted characters; split what is left so
+  // the tail keeps the larger half, since that is the distinguishing end.
+  const keep = MAX_LABEL_CHARS - 1;
+  const head = Math.floor(keep / 2);
+  return `${name.slice(0, head)}\u2026${name.slice(name.length - (keep - head))}`;
 }
 
 /** A short, fixed-width glyph drawn inside the node circle — the mockup's
@@ -134,6 +227,14 @@ export function visiblePicture(picture: Picture, hidden: ReadonlySet<string>): P
 export function nodeGlyph(name: string): string {
   const firstWord = /[A-Za-z0-9]+/.exec(name)?.[0] ?? "";
   return firstWord.slice(0, 3).toUpperCase() || "?";
+}
+
+/** What a node *is*, captioned under its name — its pack-declared semantic
+ *  type, or its catalog kind, whichever it has. A node with neither is
+ *  captioned with nothing at all: a placeholder like "unknown" would read as
+ *  a class the ontology actually declares. */
+export function nodeCaption(node: GraphNode): string | undefined {
+  return node.semanticType ?? node.kind ?? undefined;
 }
 
 function nodeColor(node: GraphNode, mode: ColorMode): string | undefined {
@@ -155,6 +256,10 @@ export interface StyleColors {
   readonly primary: string;
   readonly border: string;
   readonly raised: string;
+  /** The colour an inferred edge is drawn in — amber in both themes, kept
+   *  distinct from `primary` so "the reasoner concluded this" never reads as
+   *  "this is the thing you selected". */
+  readonly inferred: string;
 }
 
 // ---------------------------------------------------------------------
@@ -167,9 +272,15 @@ export interface G6NodeDatum {
   readonly data: {
     readonly label: string;
     readonly glyph: string;
+    readonly caption?: string;
     readonly color?: string;
     readonly classes: string;
   };
+  /** Present only on a node just seeded by {@link withEntryPositions} — an
+   *  explicit starting point for the layout and for G6's own enter
+   *  animation, rather than wherever the layout's index-based default would
+   *  otherwise place it. */
+  readonly style?: { readonly x: number; readonly y: number };
 }
 
 export interface G6EdgeDatum {
@@ -198,8 +309,9 @@ export function toG6Data(picture: Picture, mode: ColorMode = "light"): G6Data {
       id: node.id,
       type: "circle",
       data: {
-        label: canvasLabel(node.name),
+        label: shortLabel(canvasLabel(node.name)),
         glyph: nodeGlyph(node.name),
+        ...(nodeCaption(node) === undefined ? {} : { caption: nodeCaption(node) }),
         ...(nodeColor(node, mode) === undefined ? {} : { color: nodeColor(node, mode) }),
         classes,
       },
@@ -232,7 +344,13 @@ export function toG6Data(picture: Picture, mode: ColorMode = "light"): G6Data {
  *  abbreviation, rather than a flat swatch a colour-blind reader cannot
  *  tell apart from its neighbours by hue alone. */
 export function resolveNodeStyle(
-  datum: { readonly classes: string; readonly color?: string; readonly label: string; readonly glyph?: string },
+  datum: {
+    readonly classes: string;
+    readonly color?: string;
+    readonly label: string;
+    readonly glyph?: string;
+    readonly caption?: string;
+  },
   colors: StyleColors,
 ): Record<string, unknown> {
   const has = new Set(datum.classes.split(" "));
@@ -242,13 +360,15 @@ export function resolveNodeStyle(
     fill: colors.raised,
     fillOpacity: 0.6,
     stroke: ring,
-    lineWidth: 1.5,
+    // A hairline, as the design draws it. Anything heavier reads as a state
+    // marker, and the states below are what earn the extra weight.
+    lineWidth: 1,
     icon: true,
     iconText: datum.glyph ?? "",
     iconFontFamily: "monospace",
     iconFontSize: 10,
     iconFill: ring,
-    labelText: datum.label,
+    labelText: datum.caption === undefined ? datum.label : `${datum.label}\n${datum.caption}`,
     labelFontSize: 11,
     labelFill: colors.text,
     labelPlacement: "bottom",
@@ -257,13 +377,13 @@ export function resolveNodeStyle(
   if (has.has("seed")) {
     style = { ...style, size: 44, lineWidth: 2, labelFontWeight: "bold" };
   }
-  // A thicker ring, not a colour: the expandable marker has to survive a
-  // reader who cannot distinguish two hues.
-  if (has.has("expandable")) {
-    style = { ...style, lineWidth: 3 };
-  }
+  // **`expandable` deliberately draws nothing.** In a freshly opened
+  // neighbourhood almost every node is expandable, so a ring marker fired
+  // nearly everywhere and made the whole canvas read as heavy. The hover
+  // controls carry that affordance now, and say what the click does rather
+  // than leaving it to be inferred from a border weight.
   if (has.has("truncated")) {
-    style = { ...style, stroke: colors.text, lineWidth: 3, lineDash: [4, 2] };
+    style = { ...style, stroke: colors.text, lineWidth: 2, lineDash: [4, 2] };
   }
   if (has.has("hidden-kind")) {
     style = { ...style, stroke: colors.border, iconFill: colors.border };
@@ -285,7 +405,7 @@ export function resolveEdgeStyle(
     lineWidth: 1,
     stroke: colors.border,
     labelText: datum.label,
-    labelFontSize: 9,
+    labelFontSize: 9.5,
     labelFill: colors.text,
     labelBackground: true,
     labelBackgroundFill: colors.raised,
@@ -298,24 +418,79 @@ export function resolveEdgeStyle(
   // inferred without colour alone carrying the meaning — a state must
   // survive a reader unable to tell two hues apart.
   if (has.has("derived")) {
-    style = { ...style, lineDash: [4, 2], stroke: colors.primary, endArrowFill: colors.primary };
+    style = {
+      ...style,
+      lineDash: [6, 5],
+      stroke: colors.inferred,
+      endArrowFill: colors.inferred,
+      labelFill: colors.inferred,
+    };
   }
   return style;
 }
 
-/** The layout. **Radial, focused on the seed, and deterministic.** G6's
- *  `radial` layout (`focusNode`) draws rings by shortest path from a focus
- *  node, direction-agnostic, with no force simulation deciding the ring
- *  assignment — so the same picture settles the same way on every render.
- *  Animation is disabled at the Graph level (`GraphCanvas.tsx`), not
- *  per-layout — "nothing moves without the reader" applies to more than the
- *  layout, so it is set once, in one place. */
-export function layoutOptions(seedId: string): Record<string, unknown> {
+/** The layout. **Concentric, ringed by degree, and deterministic.**
+ *
+ *  No force simulation decides anything here, so the same picture settles the
+ *  same way on every render — verified by loading one neighbourhood twice and
+ *  comparing the rendered canvas pixel for pixel, not assumed. Animation is
+ *  disabled at the Graph level (`GraphCanvas.tsx`) rather than per-layout:
+ *  "nothing moves without the reader" applies to more than the layout, so it
+ *  is set once, in one place.
+ *
+ *  **This replaced `radial`, which took no seed argument by accident but by
+ *  necessity.** `radial` centres on a named `focusNode`, which is exactly
+ *  what was wanted — but on a star-shaped neighbourhood (a seed and its
+ *  neighbours, which is every picture this canvas opens on) its stress solve
+ *  converged with every neighbour at roughly the same angle, stacking them in
+ *  a line down one side of the seed. `concentric` spaces a ring by angle
+ *  directly, so the ring is a ring.
+ *
+ *  **The cost, stated plainly: the centre is now the most-connected node
+ *  rather than the seed by name.** In a freshly opened neighbourhood these
+ *  are the same node — every edge in the picture touches the seed. They can
+ *  diverge once a reader expands a neighbour that turns out to be busier,
+ *  and the centre will then shift to it. The seed stays identifiable
+ *  regardless: `nodeClasses` marks it, and `resolveNodeStyle` draws it larger
+ *  and bolder than anything else on the canvas. */
+export function layoutOptions(): Record<string, unknown> {
   return {
-    type: "radial",
-    focusNode: seedId,
-    unitRadius: 90,
-    preventOverlap: false,
+    // https://g6.antv.antgroup.com/en/examples/layout/force-directed/#d3-force
+    // — organic spacing from real physics rather than a fixed geometric
+    // rule. `concentric` (this canvas's previous layout) placed every node
+    // at a distance decided purely by its ring; a force layout spaces nodes
+    // by how many neighbours are pulling on them, which reads better once a
+    // few expansions have made the picture uneven.
+    //
+    // `link`/`manyBody`/`collide` as nested objects, not the flatter
+    // `linkDistance`/`nodeStrength`/`preventOverlap` fields `@antv/layout`
+    // also accepts — matching the reference example's own shape rather than
+    // an equivalent it never demonstrates.
+    type: "d3-force",
+    link: {
+      // The ideal edge length — enough room for a relationship label
+      // (`onInvoice`, `recordedIn`) to sit on the line without touching
+      // either endpoint's own two-line caption.
+      distance: 160,
+    },
+    manyBody: {
+      // Repulsion between every pair of nodes, not only connected ones —
+      // negative is repulsive in d3-force's convention. This is what keeps
+      // an unrelated branch of the graph from drifting into another's space.
+      strength: -220,
+    },
+    collide: {
+      // Sized to the *label*, not the circle — the same lesson `concentric`
+      // needed: a node is 34–44px across but its two-line caption runs
+      // wider, and a collision radius sized to the circle let two labels
+      // overlap even while their circles stayed clear.
+      radius: 90,
+    },
+    // Faster than d3-force's own default (`0.028`, tuned for 300 ticks) — a
+    // neighbourhood here is a handful of nodes, not the thousand-node graphs
+    // that default was chosen for, and it settles in well under a second at
+    // this rate instead of several.
+    alphaDecay: 0.05,
   };
 }
 

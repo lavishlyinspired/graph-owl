@@ -8,7 +8,7 @@ export function WorkspaceSwitcher({ name }: { readonly name: string }) {
   return (
     <div
       title={strings.workspaceSingleNote}
-      className="flex items-center gap-1.5 rounded-md border border-gowl-line px-2 py-1 text-[12px] text-gowl-t3"
+      className="flex items-center gap-1.5 rounded-md border border-gowl-line px-2 py-1 text-[13.5px] text-gowl-t3"
     >
       <span>{name}</span>
     </div>

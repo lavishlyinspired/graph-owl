@@ -20,14 +20,14 @@ export function Rail({ open, onToggle }: RailProps) {
       <button
         type="button"
         onClick={onToggle}
-        className="border-b border-gowl-line px-3 py-2 text-left font-mono text-[10px] tracking-widest text-gowl-t6 hover:text-gowl-t4"
+        className="border-b border-gowl-line px-3 py-2 text-left font-mono text-[11.5px] tracking-widest text-gowl-t6 hover:text-gowl-t4"
       >
         {open ? strings.collapseNav : "»"}
       </button>
       {NAV.map((group) => (
         <div key={group.label} className="py-2">
           {open && (
-            <div className="px-3 pb-1 font-mono text-[10px] tracking-widest text-gowl-t7">{group.label}</div>
+            <div className="px-3 pb-1 font-mono text-[11.5px] tracking-widest text-gowl-t7">{group.label}</div>
           )}
           {group.items.map((item) => (
             <NavLink
@@ -35,7 +35,7 @@ export function Rail({ open, onToggle }: RailProps) {
               to={`/${item.route}`}
               className={({ isActive }) =>
                 cn(
-                  "block px-3 py-1.5 text-[13px] text-gowl-t3 hover:bg-gowl-row hover:text-gowl-t1",
+                  "block px-3 py-1.5 text-[14.5px] text-gowl-t3 hover:bg-gowl-row hover:text-gowl-t1",
                   isActive && "bg-gowl-row text-gowl-accent",
                 )
               }

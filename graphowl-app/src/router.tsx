@@ -29,13 +29,14 @@ export const router = createBrowserRouter(
         { index: true, element: <Navigate to={`/${ROUTES[0]}`} replace /> },
         ...ROUTES.map((route) => {
           const Component = lazyRoute(route);
-          // Explore, Entity, Lineage and History are deep-linkable onto a
-          // specific asset (Plan 122a A3/A4) — an optional trailing id
-          // keeps the bare route valid (the route's own empty-state prompts
-          // a search) while `/{route}/{id}` opens directly on it. Paths
-          // takes two ends instead of one seed, so it reads `?from=&to=`
-          // query params rather than a path segment.
-          const seededRoutes = ["explore", "entity", "lineage-view", "history"];
+          // Explore and Entity are deep-linkable onto a specific asset
+          // (Plan 122a A3/A4) — an optional trailing id keeps the bare
+          // route valid (the route's own empty-state prompts a search)
+          // while `/{route}/{id}` opens directly on it. Lineage, Paths,
+          // History and Evidence used to be separate routes taking the
+          // same shape (or, for Paths, `?from=&to=` query params); all
+          // four are now Explore's own Entity tab instead.
+          const seededRoutes = ["explore", "entity"];
           const path = seededRoutes.includes(route) ? `${route}/:id?` : route;
           return { path, element: <Component /> };
         }),

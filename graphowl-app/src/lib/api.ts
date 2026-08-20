@@ -6,6 +6,13 @@
  *  `crates/graph-owl-server/src/lib.rs`'s handlers actually return. */
 
 import { resolveInboxAction, type InboxAction } from "./inboxActions";
+import {
+  nodeTypeQuery,
+  toGraphView,
+  typesFromTypeRows,
+  withNodeTypes,
+  type RawGraphContext,
+} from "./graph/graphContext";
 
 const API_BASE = "";
 
@@ -58,6 +65,28 @@ export interface SearchResult {
 export function search(query: string): Promise<SearchResult[]> {
   if (query.trim().length === 0) return Promise.resolve([]);
   return apiFetch<SearchResult[]>(`/search?q=${encodeURIComponent(query)}`);
+}
+
+// ---- "Ask GraphOWL" (`graphowl-app/plans/ask-graphowl.md`) — a separate,
+// out-of-process agent (`examples/gst-reconcile/ask_server.py`), never
+// graph-owl-server itself, per `plans/00j-language-boundaries.md`. Answers
+// a fixed set of GST reconciliation questions by real deterministic
+// findings, optionally narrated by whatever OpenAI-compatible model
+// (Ollama included) the agent process is configured with. ----
+
+export type AskResult =
+  | { readonly kind: "noMatch"; readonly message: string }
+  | { readonly kind: "error"; readonly message: string }
+  | {
+      readonly kind: "answered";
+      readonly questionNumber: number;
+      readonly answer: string;
+      readonly narration?: string;
+      readonly narrationError?: string;
+    };
+
+export function askGraphOwl(question: string): Promise<AskResult> {
+  return apiPost<AskResult>("/ask", { question });
 }
 
 export async function performInboxAction(action: InboxAction): Promise<void> {
@@ -116,6 +145,15 @@ export function fetchOverview(): Promise<OverviewResponse> {
 
 // ---- Explore + Entity (Plan 122a A3) ----
 
+/** Every admin-gated route in this server refuses a non-admin caller with
+ *  a bare `404` (never `403` — a `403` would confirm the route exists to
+ *  somebody probing for it), so this is the one place that distinction is
+ *  interpreted, reused by every admin-only panel rather than re-derived
+ *  per component. */
+export function isAdminOnlyError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(" 404");
+}
+
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -172,6 +210,9 @@ export interface GraphNode {
   readonly kind: AssetKind | null;
   readonly fullyQualifiedName?: string;
   readonly semanticType?: string | null;
+  /** The named import graphs this subject was seen in — real, checkable
+   *  provenance, and the only provenance the graph API actually returns. */
+  readonly sources?: readonly string[];
 }
 
 export interface GraphEdge {
@@ -207,6 +248,53 @@ export function fetchAssetGraph(
   }
   const qs = params.toString();
   return apiFetch<GraphView>(`/assets/${encodeURIComponent(id)}/graph${qs ? `?${qs}` : ""}`);
+}
+
+/** The neighbourhood of **any** graph subject, not only a catalog asset —
+ *  counterpart to `fetchAssetGraph` for a seed that has no `assets` row at
+ *  all (a finding's subject, most often). See `lib/graph/graphContext.ts`
+ *  for why the response is remapped rather than used as-is. */
+export function fetchGraphContext(
+  seed: string,
+  options: {
+    readonly direction?: "outgoing" | "incoming" | "both";
+    readonly hops?: number;
+    readonly relationshipTypes?: readonly string[];
+  } = {},
+): Promise<GraphView> {
+  return apiPost<RawGraphContext>("/graph/context", {
+    seed,
+    direction: options.direction,
+    hops: options.hops,
+    relationshipTypes:
+      options.relationshipTypes && options.relationshipTypes.length > 0
+        ? options.relationshipTypes
+        : undefined,
+  })
+    .then(toGraphView)
+    .then(resolveNodeTypes);
+}
+
+/** Colour, glyph and type caption all key off `semanticType`, and
+ *  `/graph/context` does not return one — the route resolves each node's
+ *  class internally to pick a label and deliberately keeps it out of its
+ *  response shape. Asking SPARQL directly is what makes the canvas legible
+ *  without changing that contract or teaching the console any pack's
+ *  vocabulary.
+ *
+ *  **A failed type lookup degrades to an untyped picture, never to no
+ *  picture.** Types are a reading aid; the neighbourhood is the answer, and
+ *  losing the whole graph because a secondary query failed would trade the
+ *  thing the reader asked for against a decoration. */
+async function resolveNodeTypes(view: GraphView): Promise<GraphView> {
+  const query = nodeTypeQuery(view.nodes.map((node) => node.id));
+  if (query === null) return view;
+  try {
+    const result = await runSparql(query);
+    return withNodeTypes(view, typesFromTypeRows(result.rows));
+  } catch {
+    return view;
+  }
 }
 
 export interface EntityVersion {
@@ -327,45 +415,12 @@ export function reviewContradiction(body: {
   return apiPost<void>("/contradictions/reviews", { ...body, note: body.note?.trim() || null });
 }
 
-// ---- TRACE: Lineage, Paths, History, Evidence (Plan 122a A4) ----
-
-export interface LineageNode {
-  readonly id: string;
-  readonly name: string;
-  readonly kind: AssetKind | null;
-  readonly fullyQualifiedName: string;
-  readonly deleted: boolean;
-}
-
-export interface LineageEdge {
-  readonly id: string;
-  readonly fromAssetId: string;
-  readonly toAssetId: string;
-  readonly relationship: string;
-  readonly source: "manual" | "connector" | "openlineage" | "agent";
-  readonly query?: string | null;
-  readonly description?: string | null;
-  readonly createdAt: string;
-  readonly createdBy: string;
-}
-
-export interface LineageGraph {
-  readonly rootId: string;
-  readonly nodes: readonly LineageNode[];
-  readonly edges: readonly LineageEdge[];
-  readonly truncated: boolean;
-}
-
-export function fetchLineage(
-  id: string,
-  options: { readonly upstream?: number; readonly downstream?: number } = {},
-): Promise<LineageGraph> {
-  const params = new URLSearchParams();
-  if (options.upstream !== undefined) params.set("upstream", String(options.upstream));
-  if (options.downstream !== undefined) params.set("downstream", String(options.downstream));
-  const qs = params.toString();
-  return apiFetch<LineageGraph>(`/lineage/asset/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`);
-}
+// ---- Paths (Plan 122a A4) — the asset-only `fetchLineage`/`LineageGraph`
+// binding that used to sit here was removed along with the standalone
+// `/lineage-view` page that was its only caller; Explore's own Entity tab
+// gets real lineage-shaped data (upstream/downstream counts) from
+// `fetchGraphContext`/`fetchAssetGraph` instead, which works for a
+// graph-only subject too, not only a catalog asset. ----
 
 export interface FoundPath {
   /** Raw subject identifiers along the route — `/graph/paths` resolves no
@@ -870,6 +925,152 @@ export interface SparqlResult {
 
 export function runSparql(query: string, asOf?: string): Promise<SparqlResult> {
   return apiPost<SparqlResult>("/sparql", { query, asOf });
+}
+
+// ---- Structural analytics (`src/lib/graph/analytics.ts`) — degree
+// centrality, connected components and orphan detection over one bounded
+// neighbourhood (`graph-owl-analytics`, Epic 38's `petgraph`-backed
+// arithmetic), reachable at last from `GET /assets/{id}/analytics` and
+// `POST /graph/context/analytics`. Never whole-graph: Epic 38's purity
+// boundary forbids that on a synchronous request, so `truncated` on the
+// response is load-bearing, not decorative. ----
+
+export interface AssetAnalytics {
+  readonly nodes: readonly string[];
+  readonly inDegree: readonly number[];
+  readonly outDegree: readonly number[];
+  readonly orphans: readonly string[];
+  readonly cycles: readonly (readonly string[])[];
+  readonly edgeTypes: readonly string[];
+  readonly truncated: boolean;
+}
+
+export function fetchAssetAnalytics(
+  assetId: string,
+  params: { hops?: number; maxNodes?: number } = {},
+): Promise<AssetAnalytics> {
+  const query = new URLSearchParams();
+  if (params.hops !== undefined) query.set("hops", String(params.hops));
+  if (params.maxNodes !== undefined) query.set("maxNodes", String(params.maxNodes));
+  const suffix = query.toString();
+  return apiFetch<AssetAnalytics>(`/assets/${encodeURIComponent(assetId)}/analytics${suffix ? `?${suffix}` : ""}`);
+}
+
+// ---- Ontology alignment review (`plans/ontology-alignment-review.md`) —
+// Epic 104's cross-vocabulary alignment queue, wired for the first time.
+// `GET /alignments/review` is never admin-gated (reviewing what is pending
+// needs no elevated tier); `POST /alignments` — the Confirm/Reject action —
+// is, matching every other admin-only graph write. ----
+
+export interface Principal {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: "user" | "service" | "system";
+  readonly roles: readonly string[];
+  readonly isAdmin: boolean;
+}
+
+export function fetchWhoAmI(): Promise<Principal> {
+  return apiFetch<Principal>("/me");
+}
+
+export interface AlignmentReviewEntry {
+  readonly subject: string;
+  readonly left: string | null;
+  readonly right: string | null;
+  readonly predicate: string | null;
+  readonly sourceKind: string | null;
+  readonly sourceDetail: string | null;
+  readonly confidence: number | null;
+  readonly lossyReverse: boolean | null;
+}
+
+export function fetchAlignmentReviewQueue(): Promise<readonly AlignmentReviewEntry[]> {
+  return apiFetch<readonly AlignmentReviewEntry[]>("/alignments/review");
+}
+
+export interface UpsertAlignmentRequest {
+  readonly kind: "match" | "equivalentClass";
+  readonly left: string;
+  readonly right: string;
+  readonly predicate?: "exactMatch" | "closeMatch" | "broadMatch" | "narrowMatch" | "equivalentClass";
+  readonly source: { readonly kind: "curated" | "computed" | "human"; readonly detail: string };
+  readonly confidence: number;
+  readonly lossyReverse: boolean;
+}
+
+export function upsertAlignment(request: UpsertAlignmentRequest): Promise<unknown> {
+  return apiPost("/alignments", request);
+}
+
+export function fetchGraphContextAnalytics(body: {
+  readonly seed: string;
+  readonly direction?: "outgoing" | "incoming" | "both";
+  readonly hops?: number;
+  readonly maxNodes?: number;
+  readonly relationshipTypes?: readonly string[];
+  readonly asOf?: string | null;
+}): Promise<AssetAnalytics> {
+  return apiPost<AssetAnalytics>("/graph/context/analytics", body);
+}
+
+// ---- Ontology editor (`plans/ontology-editor.md`) — Epic 42 Slice G's
+// already-shipped `/ontology-editor/{preview,dry-run,save}`, wired here for
+// the first time. All three share one syntax-error shape, tagged `kind` to
+// match the server's own internally-tagged enum exactly (`RdfEditDryRun`/
+// `RdfEditSave` in `graph-owl-api`) — a client that pattern-matches `kind`
+// handles all three responses the same way. ----
+
+export interface OntologySyntaxError {
+  readonly kind: "syntaxError";
+  readonly message: string;
+  readonly line: number | null;
+  readonly column: number | null;
+}
+
+export interface OntologyPreviewTriple {
+  readonly s: string;
+  readonly p: string;
+  readonly o: string;
+  readonly oIsRef: boolean;
+}
+
+export interface OntologyEditPreview {
+  readonly kind: "preview";
+  readonly triples: readonly OntologyPreviewTriple[];
+  readonly declared: readonly string[];
+}
+
+export type OntologyPreviewResult = OntologySyntaxError | OntologyEditPreview;
+
+export interface OntologyEditChecked {
+  readonly kind: "checked";
+  readonly accepted: readonly string[];
+  readonly rejected: readonly (readonly [string, string])[];
+  readonly newInferences: number;
+}
+
+export type OntologyDryRunResult = OntologySyntaxError | OntologyEditChecked;
+
+export interface OntologyEditSaved {
+  readonly kind: "saved";
+  readonly landed: readonly string[];
+  readonly skipped: readonly string[];
+  readonly rejected: readonly (readonly [string, string])[];
+}
+
+export type OntologySaveResult = OntologySyntaxError | OntologyEditSaved;
+
+export function previewOntologyEdit(document: string): Promise<OntologyPreviewResult> {
+  return apiPost<OntologyPreviewResult>("/ontology-editor/preview", { format: "turtle", document });
+}
+
+export function dryRunOntologyEdit(document: string): Promise<OntologyDryRunResult> {
+  return apiPost<OntologyDryRunResult>("/ontology-editor/dry-run", { format: "turtle", document });
+}
+
+export function saveOntologyEdit(document: string): Promise<OntologySaveResult> {
+  return apiPost<OntologySaveResult>("/ontology-editor/save", { format: "turtle", document });
 }
 
 // ---- Agents, MCP, Runs (Plan 122a A8 — real subset; see plans/122a-graphowl-app.md's A8.api gap note) ----
