@@ -300,6 +300,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/alignments/review", get(alignment_review_queue))
         .route("/validation/runs", post(run_validation))
         .route("/validation/shapes/seed", post(seed_core_shapes))
+        .route("/validation/shapes/preview", post(preview_shapes))
+        .route("/validation/shapes/import", post(import_shapes))
         .route("/validation/report", get(validation_report))
         .route("/validation/waivers", post(waive_finding))
         .route("/validation/waivers/{id}", delete(revoke_waiver))
@@ -7637,8 +7639,79 @@ async fn seed_core_shapes(
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
-    let written = catalog.seed_core_shapes().await?;
-    Ok(Json(json!({ "flakes": written })))
+    let seeded = catalog.seed_core_shapes().await?;
+    Ok(Json(shapes_preview_body(&seeded)))
+}
+
+/// Renders a [`graph_owl_api::ShapesPreview`] the same way whether it came
+/// from `/validation/shapes/preview` (nothing written) or
+/// `/validation/shapes/import` (written for real) — the two only differ in
+/// whether a write happened, never in how the outcome is described.
+/// Tagged with `kind`, matching the ontology editor's own three-response
+/// convention (`ontology_editor_preview`'s doc comment), so a frontend
+/// reader handles both endpoints with one function.
+fn shapes_preview_body(preview: &graph_owl_api::ShapesPreview) -> serde_json::Value {
+    match preview {
+        graph_owl_api::ShapesPreview::SyntaxError {
+            message,
+            line,
+            column,
+        } => json!({ "kind": "syntaxError", "message": message, "line": line, "column": column }),
+        graph_owl_api::ShapesPreview::Checked {
+            shapes,
+            shape_details,
+            refused_shapes,
+            flakes,
+            conforms,
+            violations,
+            warnings,
+            info,
+            sample,
+        } => json!({
+            "kind": "checked",
+            "shapes": shapes,
+            "shapeDetails": shape_details.iter().map(graph_owl_api::describe_shape).collect::<Vec<_>>(),
+            "refusedShapes": refused_shapes,
+            "flakes": flakes.iter().map(flake_body).collect::<Vec<_>>(),
+            "conforms": conforms,
+            "violations": violations,
+            "warnings": warnings,
+            "info": info,
+            "sample": sample.iter().map(graph_owl_api::describe_violation).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// Try a candidate SHACL document against the estate as it stands — Plan
+/// 126 Slice 2. **Writes nothing.** Any authenticated principal, unlike
+/// seed/import: computing a report costs a read, not a write, and an
+/// author trying a shape before asking an admin to commit it is exactly
+/// the workflow this exists for.
+async fn preview_shapes(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<RdfEditRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let fmt = parse_rdf_edit_format(&payload.format)?;
+    let preview = catalog.preview_shapes(fmt, &payload.document).await?;
+    Ok(Json(shapes_preview_body(&preview)))
+}
+
+/// Commit a candidate SHACL document — Plan 126 Slice 3. Admin-only,
+/// matching `seed_core_shapes`'s own gating: a shape is a rule, and
+/// writing one governs every future write to the estate, not only this
+/// request.
+async fn import_shapes(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RdfEditRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let fmt = parse_rdf_edit_format(&payload.format)?;
+    let imported = catalog.import_shapes(fmt, &payload.document).await?;
+    Ok(Json(shapes_preview_body(&imported)))
 }
 
 #[derive(Debug, serde::Deserialize)]

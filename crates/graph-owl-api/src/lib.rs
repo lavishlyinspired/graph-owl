@@ -16557,7 +16557,7 @@ impl Catalog {
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
 
         let (compiled, refused) = self.compiled_shapes(&shape_facts);
-        let base = Self::asserted_base(graph.as_ref()).await?;
+        let base = Self::validation_base(graph.as_ref()).await?;
         let report = graph_owl_constraint::validate(&compiled, &base);
 
         self.finish_validation_run(graph.as_ref(), report, compiled.len(), refused, false)
@@ -16605,7 +16605,7 @@ impl Catalog {
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
 
         let (compiled, refused) = self.compiled_shapes(&shape_facts);
-        let base = Self::asserted_base(graph.as_ref()).await?;
+        let base = Self::validation_base(graph.as_ref()).await?;
         let mut report = graph_owl_constraint::validate(&compiled, &base);
 
         // **`$this` is pre-bound via VALUES (see `run_sparql_constraint`),
@@ -18368,8 +18368,17 @@ impl Catalog {
     /// # Errors
     ///
     /// `Storage` if no graph engine is configured or the write fails.
+    ///
+    /// Returns a [`ShapesPreview::Checked`] — Plan 126 Slice 4, widened from
+    /// Slice 1's bare flake list. A reader could not tell *which* shapes
+    /// `flakes` described, and had to make a separate `run_validation` call
+    /// to learn whether they found anything; both gaps closed the same way
+    /// [`Self::preview_shapes`]/[`Self::import_shapes`] already answer them
+    /// — `shape_details` names the shapes, `conforms`/`violations`/... are
+    /// computed against the estate right after the write, through the same
+    /// `read_all`/`validate` pair every other shape-writing path uses.
     #[tracing::instrument(name = "catalog.seed_core_shapes", skip_all)]
-    pub async fn seed_core_shapes(&self) -> Result<usize, CatalogError> {
+    pub async fn seed_core_shapes(&self) -> Result<ShapesPreview, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
                 "this server has no graph engine configured".to_string(),
@@ -18385,7 +18394,162 @@ impl Catalog {
             .assert_flakes(&flakes)
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
-        Ok(flakes.len())
+
+        let (compiled, failures) = graph_owl_constraint::shapes::read_all(&flakes);
+        let base = Self::validation_base(graph.as_ref()).await?;
+        let report = graph_owl_constraint::validate(&compiled, &base);
+        let shape_details = compiled.iter().map(|c| c.shape().clone()).collect();
+
+        Ok(ShapesPreview::Checked {
+            shapes: compiled.len(),
+            shape_details,
+            refused_shapes: failures.iter().map(ToString::to_string).collect(),
+            flakes,
+            conforms: report.conforms,
+            violations: report.count_of(graph_owl_ontology::Severity::Violation),
+            warnings: report.count_of(graph_owl_ontology::Severity::Warning),
+            info: report.count_of(graph_owl_ontology::Severity::Info),
+            sample: report.violations,
+        })
+    }
+
+    /// Preview a candidate SHACL document against the estate as it stands —
+    /// Plan 126 Slice 2. **Never writes anything.** A syntax error is a
+    /// normal, successful outcome of previewing, not a system failure —
+    /// mirrors [`RdfEditDryRun`]'s own reasoning, this time for shapes
+    /// rather than data.
+    ///
+    /// Parsed flakes are stamped into [`shapes_graph()`]'s context before
+    /// compiling, even though nothing is written: `read_all`/`validate`
+    /// read raw facts regardless of `cx`, but a previewed shape must
+    /// compile exactly as it would once committed (Plan 126 Slice 3 commits
+    /// this same stamped set unchanged), and a shape stated outside its own
+    /// graph is not the shape a caller is about to get.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    pub async fn preview_shapes(
+        &self,
+        fmt: graph_owl_rdf_io::RdfFormat,
+        document: &str,
+    ) -> Result<ShapesPreview, CatalogError> {
+        let parsed = match graph_owl_rdf_io::parse_with_location(document.as_bytes(), fmt, None) {
+            Ok(flakes) => flakes,
+            Err(e) => {
+                return Ok(ShapesPreview::SyntaxError {
+                    message: e.message,
+                    line: e.line,
+                    column: e.column,
+                });
+            }
+        };
+
+        let stamped: Vec<Flake> = parsed
+            .into_iter()
+            .map(|f| Flake {
+                cx: Some(shapes_graph()),
+                ..f
+            })
+            .collect();
+
+        let (compiled, failures) = graph_owl_constraint::shapes::read_all(&stamped);
+        let refused_shapes = failures.iter().map(ToString::to_string).collect();
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        let base = Self::validation_base(graph.as_ref()).await?;
+        let report = graph_owl_constraint::validate(&compiled, &base);
+        let shape_details = compiled.iter().map(|c| c.shape().clone()).collect();
+
+        Ok(ShapesPreview::Checked {
+            shapes: compiled.len(),
+            shape_details,
+            refused_shapes,
+            flakes: stamped,
+            conforms: report.conforms,
+            violations: report.count_of(graph_owl_ontology::Severity::Violation),
+            warnings: report.count_of(graph_owl_ontology::Severity::Warning),
+            info: report.count_of(graph_owl_ontology::Severity::Info),
+            sample: report.violations,
+        })
+    }
+
+    /// Commit a candidate SHACL document — Plan 126 Slice 3. Parses and
+    /// compiles exactly as [`Self::preview_shapes`] does (**the same
+    /// evaluation path**, so a commit cannot report something a preview did
+    /// not already predict), and additionally writes the parsed flakes when
+    /// there is no syntax error, whether or not every shape in the document
+    /// compiled — matching `seed_core_shapes`'s own "one bad shape must not
+    /// stop the other twenty" reasoning: a document with nineteen good
+    /// shapes and one malformed one lands the nineteen.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read or write fails.
+    pub async fn import_shapes(
+        &self,
+        fmt: graph_owl_rdf_io::RdfFormat,
+        document: &str,
+    ) -> Result<ShapesPreview, CatalogError> {
+        let preview = self.preview_shapes(fmt, document).await?;
+        if let ShapesPreview::Checked {
+            flakes: previewed_flakes,
+            shapes,
+            shape_details,
+            refused_shapes,
+            conforms,
+            violations,
+            warnings,
+            info,
+            sample,
+        } = preview
+        {
+            let graph = self.graph.as_ref().ok_or_else(|| {
+                CatalogError::Storage(StorageError::Unexpected(
+                    "this server has no graph engine configured".to_string(),
+                ))
+            })?;
+            // **A parsed Turtle flake carries no transaction time of its
+            // own** — `t: 0` from `oxttl`'s side of the parse, not a real
+            // instant this graph ever reached. Writing it unchanged behaves
+            // exactly like any other assertion in an empty database (`t: 0`
+            // is indistinguishable from "first"), which is why an
+            // empty-database test could not catch this: found live, once
+            // real shapes already existed at a real `t`, by `t: 0` falling
+            // behind whatever bound `run_validation`'s own read applies and
+            // never surfacing again. Fixed the same way `seed_core_shapes`
+            // already does it — one fresh instant from the graph itself,
+            // stamped onto every flake right before the write, never
+            // trusted from the parse.
+            let t = graph
+                .next_time()
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            let flakes: Vec<Flake> = previewed_flakes
+                .into_iter()
+                .map(|f| Flake { t, ..f })
+                .collect();
+            graph
+                .assert_flakes(&flakes)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            return Ok(ShapesPreview::Checked {
+                shapes,
+                shape_details,
+                refused_shapes,
+                flakes,
+                conforms,
+                violations,
+                warnings,
+                info,
+                sample,
+            });
+        }
+        Ok(preview)
     }
 
     /// Accept a violation, on the record.
@@ -18753,6 +18917,48 @@ impl Catalog {
             })
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// [`Self::asserted_base`], widened to every graph except the three
+    /// synthetic overlays — Plan 126. **Validation-only, deliberately not
+    /// a change to `asserted_base` itself**, which `reasoning_base` also
+    /// builds on: reasoning already has its own careful, explicit
+    /// `Budget::include_graphs` opt-in (a deployment must ask for
+    /// `graph:extraction`, nothing pulls it in by default), and silently
+    /// widening its base too would mean every existing reasoning run
+    /// starts forward-chaining over every connector's data with no one
+    /// having asked for that — a real behaviour change to a different
+    /// feature than the one this was for.
+    ///
+    /// Found live against the real GST pack: a shape correctly targeting
+    /// `gst:Supplier` reported zero violations against data confirmed
+    /// present in Postgres, because `Catalog::import_rdf` always lands a
+    /// source's data in its own named `graph:import:{source}` context (so
+    /// a bad import stays deletable without touching anything else) — never
+    /// the default graph `asserted_base` reads — and `run_validation`
+    /// structurally could never see a single connector-sourced fact,
+    /// built-in shape or custom one alike. `graph:shapes`,
+    /// `graph:reasoning` and `graph:extraction` stay excluded here too —
+    /// those are never something a human or connector asserted.
+    async fn validation_base(
+        graph: &dyn graph_owl_engine::TripleStore,
+    ) -> Result<Vec<Flake>, CatalogError> {
+        let facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: None,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let excluded = [
+            shapes_graph(),
+            reasoning::reasoning_graph(),
+            extraction::extraction_graph(),
+        ];
+        Ok(facts
+            .into_iter()
+            .filter(|f| !matches!(&f.cx, Some(cx) if excluded.contains(cx)))
+            .collect())
     }
 
     /// The facts a reasoning run may read: the default graph, plus every named
@@ -19234,6 +19440,125 @@ fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
             "action": "retypeValue", "path": path.to_string(), "to": to,
         }),
     }
+}
+
+/// One violation, as the API renders it — the same field set
+/// [`Catalog::validation_report`]'s stored rows use (`shape`, `focusNode`,
+/// `path`, `constraint`, `severity`, `message`, `actual`, `suggestion`),
+/// minus `waiver`/`assignment` — a preview has neither, being ephemeral.
+/// Public: Plan 126 Slice 2 renders a preview's violations from
+/// `graph-owl-server`, a different crate than [`describe_repair`], which
+/// this reuses rather than duplicating.
+#[must_use]
+pub fn describe_violation(violation: &graph_owl_constraint::Violation) -> serde_json::Value {
+    serde_json::json!({
+        "shape": violation.shape.to_string(),
+        "focusNode": violation.focus_node.to_string(),
+        "path": violation.path.as_ref().map(ToString::to_string),
+        "constraint": violation.constraint,
+        "severity": format!("{:?}", violation.severity).to_lowercase(),
+        "message": violation.message,
+        "actual": violation.actual.as_ref().map(|value| format!("{value:?}")),
+        "suggestion": violation.suggestion.as_ref().map(describe_repair),
+    })
+}
+
+/// A shape's own target and constraints, in plain language — Plan 126
+/// Slice 4. Without this, "57 flakes written" is the only thing a Shapes
+/// UI has to show for a seed/preview/import: a raw triple dump nobody not
+/// already fluent in this graph's flake encoding can read as "TableShape
+/// requires a name on every Table."
+#[must_use]
+pub fn describe_shape(shape: &graph_owl_ontology::Shape) -> serde_json::Value {
+    let mut constraints = Vec::new();
+    for constraint in &shape.constraints {
+        flatten_constraint(constraint, &mut constraints);
+    }
+    serde_json::json!({
+        "id": shape.id.to_string(),
+        "target": describe_target(&shape.target),
+        "severity": format!("{:?}", shape.severity).to_lowercase(),
+        "message": shape.message,
+        "constraints": constraints,
+    })
+}
+
+/// **Every `sh:property` branch compiles to `Constraint::And([...])`, even
+/// for a single constraint** (`read_branch`'s own doc comment: "an `And`
+/// of one is fine" — it is never unwrapped, because it changes nothing
+/// about how a violation report reads). Left as `And` in a rendered shape
+/// summary, every ordinary property constraint would show as an opaque
+/// "all of 1 constraints" instead of the real, path-bearing constraint
+/// underneath — this flattens exactly that wrapper, recursively, so
+/// `minCount 1` on `owner` reads as "owner: at least 1 required," not as
+/// a combinator nobody asked to see. `Or`/`Not` are not flattened: unlike
+/// `And`, collapsing them would misstate "either A or B" as "A and B."
+fn flatten_constraint(
+    constraint: &graph_owl_ontology::Constraint,
+    out: &mut Vec<serde_json::Value>,
+) {
+    if let graph_owl_ontology::Constraint::And(inner) = constraint {
+        for nested in inner {
+            flatten_constraint(nested, out);
+        }
+    } else {
+        out.push(describe_constraint(constraint));
+    }
+}
+
+fn describe_target(target: &graph_owl_ontology::Target) -> serde_json::Value {
+    use graph_owl_ontology::Target;
+    match target {
+        Target::Class(sid) => serde_json::json!({ "kind": "class", "value": sid.to_string() }),
+        Target::Subjects(sids) => serde_json::json!({
+            "kind": "subjects",
+            "value": sids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        }),
+        Target::SubjectsOf(sid) => {
+            serde_json::json!({ "kind": "subjectsOf", "value": sid.to_string() })
+        }
+        Target::ObjectsOf(sid) => {
+            serde_json::json!({ "kind": "objectsOf", "value": sid.to_string() })
+        }
+        Target::LiteralsOf(dt) => {
+            serde_json::json!({ "kind": "literalsOf", "value": format!("{dt:?}") })
+        }
+        Target::ImplicitClass => serde_json::json!({ "kind": "implicitClass", "value": null }),
+    }
+}
+
+/// One constraint's `path`/`kind` (already machine-matchable — [`graph_owl_ontology::Constraint::path`]/
+/// [`graph_owl_ontology::Constraint::kind`]) plus a hand-written `detail`
+/// sentence per kind, the same "a person reads this" role
+/// [`graph_owl_storage::ValidationFinding::suggestion`]'s hint already
+/// plays for a violation.
+fn describe_constraint(constraint: &graph_owl_ontology::Constraint) -> serde_json::Value {
+    use graph_owl_ontology::Constraint;
+    let detail = match constraint {
+        Constraint::MinCount { n, .. } => format!("at least {n} required"),
+        Constraint::MaxCount { n, .. } => format!("at most {n} allowed"),
+        Constraint::Datatype { dt, .. } => format!("must be {dt:?}"),
+        Constraint::NodeKind { kind, .. } => format!("must be a {kind:?}"),
+        Constraint::In { allowed, .. } => {
+            format!("must be one of {} allowed values", allowed.len())
+        }
+        Constraint::Pattern { regex, .. } => format!("must match /{regex}/"),
+        Constraint::MinInclusive { v, .. } => format!("must be at least {v}"),
+        Constraint::MaxInclusive { v, .. } => format!("must be at most {v}"),
+        Constraint::MinLength { n, .. } => format!("at least {n} characters"),
+        Constraint::MaxLength { n, .. } => format!("at most {n} characters"),
+        Constraint::Class { expected, .. } => format!("must itself be a {expected}"),
+        Constraint::HasValue { v, .. } => format!("must be {v:?}"),
+        Constraint::Not(_) => "must not match the nested constraint".to_string(),
+        Constraint::And(inner) => format!("all of {} constraints", inner.len()),
+        Constraint::Or(inner) => format!("any of {} constraints", inner.len()),
+        Constraint::Sparql { query } => format!("a SPARQL constraint ({} chars)", query.len()),
+    };
+    serde_json::json!({
+        "path": constraint.path().map(ToString::to_string),
+        "kind": constraint.kind(),
+        "detail": detail,
+    })
 }
 
 /// What a policy would do to the estate as it stands.
@@ -19980,6 +20305,54 @@ pub struct ValidationRun {
     /// `false` from [`Catalog::run_validation`], which evaluates no SPARQL
     /// constraints at all.
     pub sparql_truncated: bool,
+}
+
+/// What previewing or importing a candidate SHACL document would find —
+/// Plan 126 Slices 2 and 3. No `Serialize`: `Flake`/[`graph_owl_constraint::Violation`]
+/// are domain types with no wire format ([`describe_repair`]'s own
+/// reasoning, extended here) — the server renders these.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShapesPreview {
+    /// A bad document is a normal, successful outcome — mirrors
+    /// [`RdfEditDryRun::SyntaxError`] exactly, one field at a time.
+    SyntaxError {
+        /// What the parser reported.
+        message: String,
+        /// 1-based, matching a text editor's own gutter.
+        line: Option<u64>,
+        /// 1-based, same caveat as `line`.
+        column: Option<u64>,
+    },
+    /// The document parsed as RDF; here is what it would do (or, from
+    /// [`Catalog::import_shapes`], what it just did).
+    Checked {
+        /// How many `sh:NodeShape` subjects compiled successfully.
+        shapes: usize,
+        /// The compiled shapes' own target/constraints/message — Plan 126
+        /// Slice 4, so a caller can render *what* was seeded/previewed/
+        /// imported instead of only a count or a flat flake dump nobody
+        /// not already fluent in this graph's flake encoding can read.
+        shape_details: Vec<graph_owl_ontology::Shape>,
+        /// One message per shape that failed to compile — reported, not
+        /// silently dropped, the same as [`ValidationRun::refused_shapes`]
+        /// but named instead of counted, since there is no stored run a
+        /// reader could look up the reason in later.
+        refused_shapes: Vec<String>,
+        /// Every flake the document would write — or, once
+        /// [`Catalog::import_shapes`] has run, did write.
+        flakes: Vec<Flake>,
+        /// `true` when nothing of `Violation` severity was found.
+        conforms: bool,
+        /// How many findings were of `Violation` severity.
+        violations: usize,
+        /// How many findings were of `Warning` severity.
+        warnings: usize,
+        /// How many findings were of `Info` severity.
+        info: usize,
+        /// The violations themselves, for a caller that wants to show more
+        /// than a count.
+        sample: Vec<graph_owl_constraint::Violation>,
+    },
 }
 
 /// Which strategy a reasoning run actually used — Epic 97's own missing
@@ -22930,10 +23303,13 @@ mod validation_decides_before_it_stores {
         );
     }
 
-    /// **Shapes are read from their own graph, the estate from the default
-    /// one.** Reading shapes from the default graph would make every property
-    /// shape an asset the catalog validates; reading the estate from any graph
-    /// would feed derived facts into a rule about asserted ones.
+    /// **Shapes are read from their own graph; the estate is read from
+    /// every graph except the shapes/reasoning/extraction overlays.**
+    /// Reading shapes from the estate scan would make every property shape
+    /// an asset the catalog validates; reading the estate from only the
+    /// default graph (the original, too-narrow scope — Plan 126) would
+    /// make every connector-imported fact invisible to validation forever,
+    /// since `import_rdf` never lands data there.
     #[tokio::test]
     async fn shapes_and_estate_are_read_from_different_graphs() {
         let (catalog, graph) = seeded().await;
@@ -22946,8 +23322,8 @@ mod validation_decides_before_it_stores {
             "no scan of the shapes graph: {patterns:#?}"
         );
         assert!(
-            patterns.iter().any(|p| p.cx == Some(None)),
-            "no scan of the default graph: {patterns:#?}"
+            patterns.iter().any(|p| p.cx.is_none()),
+            "the estate scan must not be narrowed to one graph: {patterns:#?}"
         );
     }
 
@@ -23910,6 +24286,473 @@ mod validation_decides_before_it_stores {
         assert_eq!(assigned[0].finding.focus_node, target.focus_node);
         assert_eq!(assigned[0].finding.path, target.path);
         assert_eq!(assigned[0].finding.constraint_kind, target.constraint_kind);
+    }
+
+    /// Plan 126 Slice 1: the UI needs to show *what* was written, not only
+    /// that something was — a count that stayed at zero and a count that
+    /// silently disagreed with what actually landed look identical to a
+    /// reader of the response body alone.
+    mod seed_core_shapes_returns_what_it_wrote {
+        use super::*;
+
+        async fn empty_catalog() -> (Catalog, Arc<RecordingGraph>) {
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+            (catalog, graph)
+        }
+
+        fn checked(
+            preview: ShapesPreview,
+        ) -> (usize, Vec<graph_owl_ontology::Shape>, Vec<Flake>, bool) {
+            match preview {
+                ShapesPreview::Checked {
+                    shapes,
+                    shape_details,
+                    flakes,
+                    conforms,
+                    ..
+                } => (shapes, shape_details, flakes, conforms),
+                other => panic!("expected Checked: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn the_returned_flakes_match_what_landed_in_the_shapes_graph() {
+            let (catalog, graph) = empty_catalog().await;
+
+            let (_, _, written, _) = checked(catalog.seed_core_shapes().await.expect("seed"));
+
+            assert!(!written.is_empty(), "the seed wrote nothing");
+            let landed = graph.asserted_flakes();
+            for flake in &written {
+                assert!(
+                    landed.contains(flake),
+                    "a flake the caller was told about never reached storage: {flake:?}"
+                );
+            }
+            assert_eq!(
+                written.len(),
+                landed.len(),
+                "the response must name every flake written, not a subset"
+            );
+        }
+
+        /// Plan 126 Slice 4: a caller (the Shapes UI) needs to know *what*
+        /// was seeded — five named shapes with real targets and
+        /// constraints — not just a flake count nobody can read.
+        #[tokio::test]
+        async fn the_response_names_every_seeded_shape_with_its_real_target() {
+            let (catalog, _graph) = empty_catalog().await;
+
+            let (shapes, details, _, _) = checked(catalog.seed_core_shapes().await.expect("seed"));
+
+            assert_eq!(shapes, 5, "{details:#?}");
+            assert_eq!(details.len(), 5, "{details:#?}");
+            let ids: Vec<String> = details.iter().map(|s| s.id.to_string()).collect();
+            assert!(ids.contains(&"1:TableShape".to_string()), "{ids:?}");
+            let table_shape = details
+                .iter()
+                .find(|s| s.id == Sid::dsc("TableShape"))
+                .expect("TableShape among the details");
+            assert!(
+                !table_shape.constraints.is_empty(),
+                "a shape with no visible constraints tells a reader nothing"
+            );
+        }
+
+        /// The seeded shapes have nothing real to validate in a fresh
+        /// catalog, so the honest answer is "conforms" — computed for
+        /// real, not omitted. `run_validation` (a separate call) proves
+        /// the same thing today; this proves seeding itself now says so
+        /// too, closing the "no validation results" gap.
+        #[tokio::test]
+        async fn seeding_also_reports_real_validation_results() {
+            let (catalog, _graph) = empty_catalog().await;
+
+            let (_, _, _, conforms) = checked(catalog.seed_core_shapes().await.expect("seed"));
+
+            assert!(
+                conforms,
+                "an empty estate must conform to the built-in shapes"
+            );
+        }
+
+        /// Re-seeding restates the same facts (`core_shapes`'s own contract) —
+        /// the caller-visible return must say so too, not just storage.
+        #[tokio::test]
+        async fn seeding_twice_returns_the_same_flakes_both_times() {
+            let (catalog, _graph) = empty_catalog().await;
+
+            let (_, _, first, _) = checked(catalog.seed_core_shapes().await.expect("seed"));
+            let (_, _, second, _) = checked(catalog.seed_core_shapes().await.expect("seed again"));
+
+            let strip_t = |flakes: &[Flake]| -> Vec<(Sid, Sid, String)> {
+                flakes
+                    .iter()
+                    .map(|f| (f.s.clone(), f.p.clone(), format!("{:?}", f.o)))
+                    .collect()
+            };
+            assert_eq!(strip_t(&first), strip_t(&second));
+        }
+    }
+
+    /// Plan 126 Slice 2: an author trying a shape against the real estate
+    /// before deciding to keep it. **The RED test's sharpest mutant is a
+    /// preview that accidentally calls `assert_flakes`** — proven here by
+    /// checking storage state directly, not just the response.
+    mod preview_shapes {
+        use super::*;
+
+        const REGULATORY_OWNER_SHAPE: &str = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix dsc: <https://graph-owl.dev/ns/catalog#> .
+
+            dsc:RegulatoryOwnerShape a sh:NodeShape ;
+                sh:targetClass dsc:Regulatory ;
+                sh:property [ sh:path dsc:owner ; sh:minCount 1 ] .
+        "#;
+
+        async fn catalog_with_unowned_regulatory_asset() -> (Catalog, Arc<RecordingGraph>) {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&[offender()])
+                .await
+                .expect("seed the estate");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+            (catalog, graph)
+        }
+
+        #[tokio::test]
+        async fn a_conforming_shape_previews_real_violations_and_writes_nothing() {
+            let (catalog, graph) = catalog_with_unowned_regulatory_asset().await;
+
+            let preview = catalog
+                .preview_shapes(graph_owl_rdf_io::RdfFormat::Turtle, REGULATORY_OWNER_SHAPE)
+                .await
+                .expect("preview must not error on a well-formed shape");
+
+            match preview {
+                ShapesPreview::Checked {
+                    shapes,
+                    conforms,
+                    violations,
+                    ..
+                } => {
+                    assert_eq!(shapes, 1, "the one shape in the document must compile");
+                    assert!(!conforms, "the unowned asset must be caught");
+                    assert_eq!(violations, 1);
+                }
+                other => panic!("expected Checked: {other:?}"),
+            }
+
+            let landed = graph.asserted_flakes();
+            assert!(
+                landed.iter().all(|f| f.cx != Some(shapes_graph())),
+                "a preview must never write to the shapes graph: {landed:#?}"
+            );
+        }
+
+        /// Plan 126 Slice 4: a preview must say *what* the shape requires,
+        /// readably — `describe_shape` is what a Shapes UI actually renders,
+        /// so this proves the round trip from real Turtle to a real
+        /// `Shape` to real, correct JSON, not just that `shape_details` is
+        /// non-empty.
+        #[tokio::test]
+        async fn the_previewed_shape_describes_its_own_target_and_constraint() {
+            let (catalog, _graph) = catalog_with_unowned_regulatory_asset().await;
+
+            let preview = catalog
+                .preview_shapes(graph_owl_rdf_io::RdfFormat::Turtle, REGULATORY_OWNER_SHAPE)
+                .await
+                .expect("preview");
+
+            let details = match preview {
+                ShapesPreview::Checked { shape_details, .. } => shape_details,
+                other => panic!("expected Checked: {other:?}"),
+            };
+            assert_eq!(details.len(), 1, "{details:#?}");
+            let described = describe_shape(&details[0]);
+            assert_eq!(described["id"], "1:RegulatoryOwnerShape");
+            assert_eq!(described["target"]["kind"], "class");
+            assert_eq!(described["target"]["value"], "1:Regulatory");
+            let constraints = described["constraints"].as_array().expect("constraints");
+            assert_eq!(constraints.len(), 1, "{constraints:#?}");
+            assert_eq!(constraints[0]["path"], "1:owner");
+            assert_eq!(constraints[0]["kind"], "minCount");
+            assert_eq!(constraints[0]["detail"], "at least 1 required");
+        }
+
+        #[tokio::test]
+        async fn malformed_turtle_previews_a_syntax_error_with_its_own_line() {
+            let (catalog, _graph) = catalog_with_unowned_regulatory_asset().await;
+            let broken = "<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"unterminated\n";
+
+            let preview = catalog
+                .preview_shapes(graph_owl_rdf_io::RdfFormat::Turtle, broken)
+                .await
+                .expect("a syntax error is a normal outcome, not an Err");
+
+            match preview {
+                ShapesPreview::SyntaxError { line, .. } => assert_eq!(line, Some(1)),
+                other => panic!("expected SyntaxError: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_shape_with_no_target_previews_as_refused_not_silently_dropped() {
+            let (catalog, _graph) = catalog_with_unowned_regulatory_asset().await;
+            let no_target = r#"
+                @prefix sh: <http://www.w3.org/ns/shacl#> .
+                @prefix dsc: <https://graph-owl.dev/ns/catalog#> .
+                dsc:NoTargetShape a sh:NodeShape .
+            "#;
+
+            let preview = catalog
+                .preview_shapes(graph_owl_rdf_io::RdfFormat::Turtle, no_target)
+                .await
+                .expect("preview");
+
+            match preview {
+                ShapesPreview::Checked {
+                    shapes,
+                    refused_shapes,
+                    ..
+                } => {
+                    assert_eq!(shapes, 0);
+                    assert_eq!(refused_shapes.len(), 1, "{refused_shapes:?}");
+                    assert!(
+                        refused_shapes[0].contains("no target"),
+                        "{refused_shapes:?}"
+                    );
+                }
+                other => panic!("expected Checked: {other:?}"),
+            }
+        }
+    }
+
+    /// Plan 126 Slice 3: committing what was previewed. **The sharpest
+    /// mutant here is a commit that evaluates its report from stale/cached
+    /// shapes rather than what it just wrote** — proven by running
+    /// `run_validation` for real afterward and checking it agrees with the
+    /// commit's own predicted counts, not just inspecting the commit's
+    /// response in isolation.
+    mod import_shapes {
+        use super::*;
+
+        async fn catalog_with_unowned_regulatory_asset() -> (Catalog, Arc<RecordingGraph>) {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&[offender()])
+                .await
+                .expect("seed the estate");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+            (catalog, graph)
+        }
+
+        const REGULATORY_OWNER_SHAPE: &str = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix dsc: <https://graph-owl.dev/ns/catalog#> .
+
+            dsc:RegulatoryOwnerShape a sh:NodeShape ;
+                sh:targetClass dsc:Regulatory ;
+                sh:property [ sh:path dsc:owner ; sh:minCount 1 ] .
+        "#;
+
+        #[tokio::test]
+        async fn committing_writes_exactly_what_was_previewed_and_a_real_run_agrees() {
+            let (catalog, graph) = catalog_with_unowned_regulatory_asset().await;
+
+            let preview = catalog
+                .preview_shapes(graph_owl_rdf_io::RdfFormat::Turtle, REGULATORY_OWNER_SHAPE)
+                .await
+                .expect("preview");
+            let previewed_flakes = match &preview {
+                ShapesPreview::Checked { flakes, .. } => flakes.clone(),
+                other => panic!("expected Checked: {other:?}"),
+            };
+            assert!(
+                graph
+                    .asserted_flakes()
+                    .iter()
+                    .all(|f| f.cx != Some(shapes_graph())),
+                "preview must not have written anything yet"
+            );
+
+            let imported = catalog
+                .import_shapes(graph_owl_rdf_io::RdfFormat::Turtle, REGULATORY_OWNER_SHAPE)
+                .await
+                .expect("import");
+            let (imported_flakes, imported_violations) = match &imported {
+                ShapesPreview::Checked {
+                    flakes, violations, ..
+                } => (flakes.clone(), *violations),
+                other => panic!("expected Checked: {other:?}"),
+            };
+            // Not flake-for-flake equal: `sh:property [ ... ]` is a blank
+            // node, and `oxttl` mints a fresh random id on every parse — so
+            // import's own internal re-parse (via `preview_shapes`) never
+            // literally matches the id preview minted a moment earlier,
+            // even though both describe the identical anonymous shape.
+            // Structure, not blank-node identity, is the real claim here.
+            assert_eq!(
+                imported_flakes.len(),
+                previewed_flakes.len(),
+                "commit must write the same number of flakes preview showed"
+            );
+            // Normalises blank-node ids out of both the subject and any
+            // `Ref`-valued object — `sh:property [ ... ]`'s blank node
+            // appears on both sides of a triple (the property shape's own
+            // subject, and the value of `NodeShape`'s `sh:property` edge
+            // pointing at it), and a fresh id each parse touches both.
+            let normalize = |sid: &Sid| -> String {
+                if sid.id.starts_with("_blank-") {
+                    "_blank".to_string()
+                } else {
+                    sid.to_string()
+                }
+            };
+            let shape_of = |f: &Flake| {
+                let o = match &f.o {
+                    FlakeValue::Ref(sid) => format!("Ref({})", normalize(sid)),
+                    other => format!("{other:?}"),
+                };
+                (normalize(&f.s), f.p.clone(), o)
+            };
+            let mut imported_shape: Vec<_> = imported_flakes.iter().map(shape_of).collect();
+            let mut previewed_shape: Vec<_> = previewed_flakes.iter().map(shape_of).collect();
+            imported_shape.sort();
+            previewed_shape.sort();
+            assert_eq!(
+                imported_shape, previewed_shape,
+                "commit must write the same (predicate, object) pairs preview showed"
+            );
+
+            let landed = graph.asserted_flakes();
+            for flake in &imported_flakes {
+                assert!(
+                    landed.contains(flake),
+                    "an imported flake never reached storage: {flake:?}"
+                );
+            }
+
+            let run = catalog.run_validation().await.expect("a real pass");
+            assert_eq!(
+                run.violations as usize, imported_violations,
+                "a real run must agree with what the import predicted"
+            );
+        }
+
+        #[tokio::test]
+        async fn malformed_turtle_writes_nothing() {
+            let (catalog, graph) = catalog_with_unowned_regulatory_asset().await;
+            let before = graph.asserted_flakes();
+            let broken = "not turtle at all {{{";
+
+            let imported = catalog
+                .import_shapes(graph_owl_rdf_io::RdfFormat::Turtle, broken)
+                .await
+                .expect("a syntax error is a normal outcome, not an Err");
+
+            assert!(
+                matches!(imported, ShapesPreview::SyntaxError { .. }),
+                "{imported:?}"
+            );
+            assert_eq!(
+                graph.asserted_flakes(),
+                before,
+                "a syntax error must write nothing beyond what was already there"
+            );
+        }
+    }
+
+    /// **A real, live-caught gap.** `asserted_base`'s own doc comment says
+    /// the intent is "not the reasoning overlay" — but its implementation
+    /// read `cx: Some(None)` (the default graph *only*), which also
+    /// excludes every connector-imported fact: `Catalog::import_rdf` always
+    /// lands data in its own named `graph:import:{source}` context (so a
+    /// bad import stays deletable without touching anything else — the
+    /// documented reason it never lands in the default graph). Found live
+    /// against the real GST pack: a custom shape correctly targeting
+    /// `gst:Supplier` still reported zero violations against real,
+    /// confirmed-present data, because `run_validation` structurally never
+    /// saw it. Not GST-specific — this blocked *every* connector's data
+    /// from ever being validated by anything, built-in or custom.
+    mod validation_reaches_connector_imported_data {
+        use super::*;
+
+        async fn catalog_with_an_offender_in_an_import_graph() -> (Catalog, Arc<RecordingGraph>) {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&shape_facts(1))
+                .await
+                .expect("seed the shape");
+            graph
+                .assert_flakes(&[Flake {
+                    s: a("payments"),
+                    p: rdf_type(),
+                    o: FlakeValue::Ref(a("Regulatory")),
+                    cx: Some(Sid::dsc("graph:import:some-connector")),
+                    t: 1,
+                    op: true,
+                }])
+                .await
+                .expect("seed the estate, in a connector's own import graph");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+            (catalog, graph)
+        }
+
+        #[tokio::test]
+        async fn a_shape_catches_an_offender_that_lives_in_a_connector_import_graph() {
+            let (catalog, _graph) = catalog_with_an_offender_in_an_import_graph().await;
+
+            let run = catalog.run_validation().await.expect("a pass");
+
+            assert_eq!(
+                run.violations, 1,
+                "connector-imported data must be validated too, not only default-graph data"
+            );
+        }
+
+        /// The exclusion is real, not accidental permissiveness: widening
+        /// the scan must not let a shape "validate" the reasoner's own
+        /// conclusions or an extraction run's own output as if a human or
+        /// connector had asserted them.
+        #[tokio::test]
+        async fn the_reasoning_and_extraction_overlays_are_still_excluded() {
+            let (catalog, graph) = catalog_with_an_offender_in_an_import_graph().await;
+            graph
+                .assert_flakes(&[
+                    Flake {
+                        s: a("derived-1"),
+                        p: rdf_type(),
+                        o: FlakeValue::Ref(a("Regulatory")),
+                        cx: Some(reasoning::reasoning_graph()),
+                        t: 1,
+                        op: true,
+                    },
+                    Flake {
+                        s: a("derived-2"),
+                        p: rdf_type(),
+                        o: FlakeValue::Ref(a("Regulatory")),
+                        cx: Some(extraction::extraction_graph()),
+                        t: 1,
+                        op: true,
+                    },
+                ])
+                .await
+                .expect("seed the overlays");
+
+            let run = catalog.run_validation().await.expect("a pass");
+
+            assert_eq!(
+                run.violations, 1,
+                "only the connector-imported offender must be caught, not the reasoning/extraction overlays: {run:#?}"
+            );
+        }
     }
 
     /// The queue's filters actually narrow. A filter that returns everything

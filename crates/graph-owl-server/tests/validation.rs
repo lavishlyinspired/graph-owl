@@ -399,10 +399,30 @@ async fn the_seeded_shapes_run_against_a_real_estate() {
         .await
         .expect("request should be handled");
     assert_eq!(seeded.status(), StatusCode::OK);
+    let body = json_body(seeded).await;
+    let flakes = body["flakes"].as_array().expect("flakes must be an array");
+    assert!(!flakes.is_empty(), "the seed wrote nothing");
     assert!(
-        json_body(seeded).await["flakes"].as_u64().expect("flakes") > 0,
-        "the seed wrote nothing"
+        flakes[0].get("s").is_some() && flakes[0].get("p").is_some(),
+        "each entry must be a real flake, not just a count: {flakes:?}"
     );
+    // Plan 126 Slice 4: a reader must be able to see *which* shapes those
+    // 57 flakes are, and whether the estate already conforms to them —
+    // not just a raw triple count.
+    let details = body["shapeDetails"].as_array().expect("shapeDetails");
+    assert_eq!(details.len(), 5, "{details:#?}");
+    assert!(
+        details.iter().any(|d| d["id"] == "1:TableShape"),
+        "{details:#?}"
+    );
+    let table_shape = details
+        .iter()
+        .find(|d| d["id"] == "1:TableShape")
+        .expect("TableShape");
+    let constraints = table_shape["constraints"].as_array().expect("constraints");
+    assert!(!constraints.is_empty(), "{table_shape:#?}");
+    assert_eq!(body["conforms"], true, "an empty estate: {body}");
+    assert_eq!(body["violations"], 0, "{body}");
 
     // A column with no parent table and an out-of-range confidence: two
     // different seed shapes, so a pass that only ran one would still look busy.
@@ -432,6 +452,173 @@ async fn the_seeded_shapes_run_against_a_real_estate() {
         .collect();
     assert!(offenders.contains(&"1:orphan"), "{queue}");
     assert!(offenders.contains(&"1:guess"), "{queue}");
+}
+
+const REGULATORY_OWNER_SHAPE: &str = r#"
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix dsc: <https://graph-owl.dev/ns/catalog#> .
+
+    dsc:RegulatoryOwnerShape a sh:NodeShape ;
+        sh:targetClass dsc:RegulatoryTable ;
+        sh:property [ sh:path dsc:owner ; sh:minCount 1 ] .
+"#;
+
+async fn post_shapes(app: &axum::Router, path: &str, document: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "format": "turtle", "document": document }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+/// Plan 126 Slice 2: previewing must find the same violation a real pass
+/// would, and must leave the graph exactly as it found it — checked here
+/// through the real HTTP surface, against real Postgres, not only the
+/// unit-level `RecordingGraph` fixture `graph-owl-api`'s own tests use.
+#[tokio::test]
+async fn previewing_a_shape_finds_a_real_violation_and_writes_nothing() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_offender(&store).await;
+
+    let (status, body) =
+        post_shapes(&app, "/validation/shapes/preview", REGULATORY_OWNER_SHAPE).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "checked", "{body}");
+    assert_eq!(body["shapes"], 1, "{body}");
+    assert_eq!(body["conforms"], false, "{body}");
+    assert_eq!(body["violations"], 1, "{body}");
+
+    // The sample itself, not only its count — a `describe_violation` that
+    // silently returned nothing would still pass a count-only assertion.
+    let sample = body["sample"].as_array().expect("sample must be an array");
+    assert_eq!(sample.len(), 1, "{body}");
+    assert_eq!(sample[0]["focusNode"], "1:payments", "{body}");
+    assert_eq!(sample[0]["constraint"], "minCount", "{body}");
+    assert_eq!(sample[0]["severity"], "violation", "{body}");
+
+    // Nothing was actually committed: a real run against the estate still
+    // finds zero shapes, because preview never touched the shapes graph.
+    let run = run_validation(&app).await;
+    assert_eq!(
+        run["shapes"], 0,
+        "a preview must never land in the shapes graph a real run reads: {run}"
+    );
+}
+
+/// Malformed Turtle previewed against the real server reports its own
+/// line, not a generic 400 — the same contract the unit-level test proves
+/// against `RecordingGraph`, now through the real HTTP body-parsing path.
+#[tokio::test]
+async fn previewing_malformed_turtle_reports_a_syntax_error_with_its_own_line() {
+    let (app, _database, _) = test_app().await;
+
+    let (status, body) = post_shapes(
+        &app,
+        "/validation/shapes/preview",
+        "<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"unterminated\n",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "syntaxError", "{body}");
+    assert_eq!(body["line"], 1, "{body}");
+}
+
+/// Plan 126 Slice 3: committing closes the loop — the flakes land for
+/// real, and the stored report (not just the import's own response)
+/// reflects them on the next run.
+#[tokio::test]
+async fn importing_a_shape_commits_it_and_a_real_run_finds_it() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_offender(&store).await;
+
+    let (status, body) =
+        post_shapes(&app, "/validation/shapes/import", REGULATORY_OWNER_SHAPE).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "checked", "{body}");
+    let flakes = body["flakes"].as_array().expect("flakes must be an array");
+    assert!(!flakes.is_empty(), "import wrote nothing");
+
+    let run = run_validation(&app).await;
+    assert_eq!(
+        run["shapes"], 1,
+        "the imported shape must run for real: {run}"
+    );
+    assert_eq!(run["conforms"], false, "{run}");
+
+    let queue = report(&app, "").await;
+    let offenders: Vec<&str> = queue["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .map(|row| row["focusNode"].as_str().expect("focusNode"))
+        .collect();
+    assert!(offenders.contains(&"1:payments"), "{queue}");
+}
+
+/// **A real, live-caught bug**: `preview_shapes` parses candidate Turtle and
+/// never assigns it a transaction time, so it lands at whatever `oxttl`
+/// defaults an unstamped [`Flake`] to (`t: 0`). Committing after the
+/// built-in shapes are already seeded (real `t`, well above zero) means the
+/// imported shape's own `t: 0` flakes land in Postgres correctly — proven
+/// directly, `docker exec ... psql` shows the rows — but a subsequent real
+/// `run_validation` never sees them: `shapes` stays at the built-in set's
+/// count, not `+1`. An empty-database test (this file's other import test)
+/// cannot reproduce it, because nothing else has claimed a higher `t` yet
+/// for `t: 0` to fall behind. Ordering — seed *before* import — is what
+/// makes this the regression test, not incidental setup.
+#[tokio::test]
+async fn importing_after_the_built_in_shapes_are_already_seeded_still_takes_effect() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_offender(&store).await;
+
+    let seed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/validation/shapes/seed")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(seed.status(), StatusCode::OK);
+
+    let baseline = run_validation(&app).await;
+    let baseline_shapes = baseline["shapes"].as_u64().expect("shapes");
+    assert!(
+        baseline_shapes > 0,
+        "the built-in seed must have landed: {baseline}"
+    );
+
+    let (status, body) =
+        post_shapes(&app, "/validation/shapes/import", REGULATORY_OWNER_SHAPE).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "checked", "{body}");
+
+    let run = run_validation(&app).await;
+    assert_eq!(
+        run["shapes"],
+        baseline_shapes + 1,
+        "the imported shape must be counted alongside the already-seeded ones: {run}"
+    );
 }
 
 /// Seeding twice is a no-op in meaning. A restart that re-imposed rules would

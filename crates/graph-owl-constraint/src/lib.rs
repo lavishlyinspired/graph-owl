@@ -43,6 +43,14 @@ impl CompiledShape {
     pub fn severity(&self) -> Severity {
         self.shape.severity
     }
+
+    /// The full shape — target, constraints, message — for a caller that
+    /// wants to describe it, not only run it (a validation UI rendering
+    /// what was just seeded/imported/previewed).
+    #[must_use]
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
 }
 
 /// Parse the regexes and reject a shape that cannot run.
@@ -574,6 +582,23 @@ mod tests {
 
     fn run(constraint: Constraint, facts: &[Flake]) -> ValidationReport {
         validate(&[shape_of(constraint)], facts)
+    }
+
+    /// Plan 126 Slice 4: the Shapes UI needs to render *what* a compiled
+    /// shape says (target, constraints), not only run it — `id()`/
+    /// `severity()` alone cannot answer "which property does this shape
+    /// require".
+    #[test]
+    fn a_compiled_shape_gives_back_its_own_target_and_constraints() {
+        let constraint = Constraint::MinCount {
+            path: a("name"),
+            n: 1,
+        };
+        let compiled = shape_of(constraint.clone());
+
+        assert_eq!(compiled.shape().id, a("TableShape"));
+        assert_eq!(compiled.shape().target, Target::Class(a("Table")));
+        assert_eq!(compiled.shape().constraints, vec![constraint]);
     }
 
     /// Every constraint kind, each with a conforming case *and* a violating
