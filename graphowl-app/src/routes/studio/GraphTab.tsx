@@ -37,7 +37,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
   }, [terms, relationsByTerm]);
 
   if (!terms) {
-    return <div className="text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>;
+    return <div className="text-[17px] text-gowl-t5">{strings.studioLoading}</div>;
   }
 
   const connect = async () => {
@@ -55,7 +55,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
     <div className="grid grid-cols-[1fr_280px] gap-4">
       <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
         {!graph || graph.nodes.length === 0 ? (
-          <p className="p-6 text-[14.5px] text-gowl-t5">{strings.graphEmpty}</p>
+          <p className="p-6 text-[17px] text-gowl-t5">{strings.graphEmpty}</p>
         ) : (
           <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} role="img" aria-label={strings.studioTabGraph}>
             {graph.edges.map((edge, index) => {
@@ -87,14 +87,14 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
       </div>
 
       <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-        <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.graphConnectTitle}</div>
+        <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.graphConnectTitle}</div>
         <div className="mb-2">
-          <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.graphConnectFrom}</div>
+          <div className="mb-1 text-[15px] text-gowl-t5">{strings.graphConnectFrom}</div>
           <select
             value={from}
             onChange={(e) => setFrom(e.target.value)}
             aria-label={strings.graphConnectFrom}
-            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           >
             <option value="" />
             {terms.map((t) => (
@@ -105,12 +105,12 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           </select>
         </div>
         <div className="mb-2">
-          <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.graphConnectKind}</div>
+          <div className="mb-1 text-[15px] text-gowl-t5">{strings.graphConnectKind}</div>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as SkosRelationKind)}
             aria-label={strings.graphConnectKind}
-            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           >
             {RELATION_KINDS.map((k) => (
               <option key={k} value={k}>
@@ -120,12 +120,12 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           </select>
         </div>
         <div className="mb-3">
-          <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.graphConnectTo}</div>
+          <div className="mb-1 text-[15px] text-gowl-t5">{strings.graphConnectTo}</div>
           <select
             value={to}
             onChange={(e) => setTo(e.target.value)}
             aria-label={strings.graphConnectTo}
-            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           >
             <option value="" />
             {terms.map((t) => (
@@ -139,7 +139,7 @@ export function GraphTab({ glossaryId }: { readonly glossaryId: string }) {
           type="button"
           disabled={busy || !from || !to}
           onClick={connect}
-          className="w-full rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
+          className="w-full rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-40"
         >
           {strings.graphConnectSubmit}
         </button>

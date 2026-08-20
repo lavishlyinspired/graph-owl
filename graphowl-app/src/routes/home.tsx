@@ -38,9 +38,9 @@ function KpiCard({ label, value, sub, color }: {
 }) {
   return (
     <div className="rounded-md border border-gowl-line bg-gowl-panel-2 p-3.5">
-      <div className="font-mono text-[11px] tracking-widest text-gowl-t6">{label}</div>
-      <div className={`mt-1.5 font-mono text-[21.5px] font-semibold ${color ?? "text-gowl-t1"}`}>{value}</div>
-      {sub && <div className="mt-0.5 text-[12.5px] text-gowl-t5">{sub}</div>}
+      <div className="font-mono text-[13.5px] tracking-widest text-gowl-t6">{label}</div>
+      <div className={`mt-1.5 font-mono text-[24px] font-semibold ${color ?? "text-gowl-t1"}`}>{value}</div>
+      {sub && <div className="mt-0.5 text-[15px] text-gowl-t5">{sub}</div>}
     </div>
   );
 }
@@ -52,7 +52,7 @@ function HealthBar({ label, pct, color }: {
 }) {
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[13.5px]">
+      <div className="mb-1 flex items-center justify-between text-[16px]">
         <span className="text-gowl-t3">{label}</span>
         <span className="font-mono text-gowl-t4">{pct}%</span>
       </div>
@@ -78,12 +78,12 @@ export default function OverviewRoute() {
 
   if (error) {
     return (
-      <div className="p-8 text-[14.5px] text-gowl-bad">{strings.overviewError}</div>
+      <div className="p-8 text-[17px] text-gowl-bad">{strings.overviewError}</div>
     );
   }
 
   if (!data) {
-    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.overviewLoading}</div>;
+    return <div className="p-8 text-[17px] text-gowl-t5">{strings.overviewLoading}</div>;
   }
 
   const contradictionCount = data.assets.total > 0 ? Math.round(data.assets.total * 0.0001) : 0;
@@ -91,8 +91,8 @@ export default function OverviewRoute() {
 
   return (
     <div className="p-8">
-      <h1 className="text-[22.5px] font-semibold text-gowl-t1">{strings.overviewTitle}</h1>
-      <p className="mt-1 text-[14px] text-gowl-t5">{strings.overviewSubtitle}</p>
+      <h1 className="text-[25px] font-semibold text-gowl-t1">{strings.overviewTitle}</h1>
+      <p className="mt-1 text-[16.5px] text-gowl-t5">{strings.overviewSubtitle}</p>
 
       {/* Row 1: 4 primary KPIs */}
       <div className="mt-6 grid grid-cols-4 gap-px overflow-hidden rounded-lg border border-gowl-line bg-gowl-line">
@@ -149,7 +149,7 @@ export default function OverviewRoute() {
       {/* Graph Health + Recent Activity */}
       <div className="mt-8 grid grid-cols-[1.15fr_1fr] gap-8">
         <div>
-          <div className="mb-4 font-mono text-[11.5px] tracking-widest text-gowl-t6">{strings.overviewGraphHealth}</div>
+          <div className="mb-4 font-mono text-[14px] tracking-widest text-gowl-t6">{strings.overviewGraphHealth}</div>
           <div className="space-y-3.5">
             {HEALTH_METRICS.map((m) => (
               <HealthBar key={m.label} label={m.label} pct={m.pct} color={m.color} />
@@ -159,25 +159,25 @@ export default function OverviewRoute() {
           {/* Callout boxes */}
           <div className="mt-5 space-y-2">
             <div className="rounded-md border border-gowl-amber-border bg-gowl-amber-deep px-3 py-2.5">
-              <div className="text-[13.5px] font-semibold text-gowl-amber">{contradictionCount} contradictions open</div>
-              <div className="mt-0.5 text-[12.5px] text-gowl-t5">Two sources disagree on supplier state, PAN and 3 other facts.</div>
+              <div className="text-[16px] font-semibold text-gowl-amber">{contradictionCount} contradictions open</div>
+              <div className="mt-0.5 text-[15px] text-gowl-t5">Two sources disagree on supplier state, PAN and 3 other facts.</div>
             </div>
             <div className="rounded-md border border-gowl-line bg-gowl-panel-2 px-3 py-2.5">
-              <div className="text-[13.5px] font-semibold text-gowl-t2">{lowConfidenceCount} low-confidence facts</div>
-              <div className="mt-0.5 text-[12.5px] text-gowl-t5">Below 0.60. Mostly inferred from the GST pack.</div>
+              <div className="text-[16px] font-semibold text-gowl-t2">{lowConfidenceCount} low-confidence facts</div>
+              <div className="mt-0.5 text-[15px] text-gowl-t5">Below 0.60. Mostly inferred from the GST pack.</div>
             </div>
           </div>
         </div>
 
         <div>
-          <div className="mb-4 font-mono text-[11.5px] tracking-widest text-gowl-t6">{strings.overviewRecentActivity}</div>
+          <div className="mb-4 font-mono text-[14px] tracking-widest text-gowl-t6">{strings.overviewRecentActivity}</div>
           <div className="space-y-0">
             {ACTIVITY_ITEMS.map((item, i) => (
               <div key={i} className="flex items-start gap-3 border-b border-gowl-row py-3 last:border-b-0">
                 <span className={`mt-1.5 flex-none h-2 w-2 rounded-full ${item.color}`} />
                 <div className="flex-1">
-                  <div className="text-[14px] text-gowl-t1">{item.text}</div>
-                  <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-gowl-t5">
+                  <div className="text-[16.5px] text-gowl-t1">{item.text}</div>
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[15px] text-gowl-t5">
                     <span>{item.time}</span>
                     <span>·</span>
                     <span>{item.meta}</span>
@@ -191,13 +191,13 @@ export default function OverviewRoute() {
 
       {/* Consumers of This Graph */}
       <div className="mt-8">
-        <div className="mb-4 font-mono text-[11.5px] tracking-widest text-gowl-t6">{strings.overviewConsumersTitle}</div>
+        <div className="mb-4 font-mono text-[14px] tracking-widest text-gowl-t6">{strings.overviewConsumersTitle}</div>
         <div className="grid grid-cols-4 gap-3">
           {CONSUMERS.map((c) => (
             <div key={c.name} className={`rounded-md border border-gowl-line bg-gowl-panel-2 p-4 border-l-2 ${c.color}`}>
-              <div className="text-[14.5px] font-semibold text-gowl-t1">{c.name}</div>
-              <div className="mt-1 font-mono text-[19.5px] text-gowl-t1">{c.calls}</div>
-              <div className="mt-0.5 text-[12.5px] text-gowl-t5">{c.detail}</div>
+              <div className="text-[17px] font-semibold text-gowl-t1">{c.name}</div>
+              <div className="mt-1 font-mono text-[22px] text-gowl-t1">{c.calls}</div>
+              <div className="mt-0.5 text-[15px] text-gowl-t5">{c.detail}</div>
             </div>
           ))}
         </div>

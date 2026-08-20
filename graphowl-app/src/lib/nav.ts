@@ -1,10 +1,34 @@
+import type { ComponentType } from "react";
+import {
+  Home,
+  Compass,
+  BookOpen,
+  ShieldCheck,
+  BarChart3,
+  History,
+  Bot,
+  Database,
+  Plug,
+  Package,
+  Boxes,
+  Server,
+  Settings,
+  ListChecks,
+  CheckCircle2,
+  Lock,
+  ShieldAlert,
+  KeyRound,
+} from "lucide-react";
 import type { RouteName } from "./routes";
 import { ROUTES } from "./routes";
 import { strings } from "./strings";
 
+export type NavIcon = ComponentType<{ readonly className?: string }>;
+
 export interface NavItem {
   readonly label: string;
   readonly route: RouteName;
+  readonly icon: NavIcon;
 }
 
 export interface NavGroup {
@@ -17,49 +41,43 @@ export interface NavGroup {
  *  deliberately absent — it is reached from Sources, not a nav item of its
  *  own, matching `plans/122a-graphowl-app.md` §2's route-budget accounting. */
 export const NAV: readonly NavGroup[] = [
-  { label: "HOME", items: [{ label: "Overview", route: "home" }] },
+  { label: "HOME", items: [{ label: "Overview", route: "home", icon: Home }] },
   {
     label: "UNDERSTAND",
-    items: [{ label: "Explore", route: "explore" }],
+    items: [{ label: "Explore", route: "explore", icon: Compass }],
   },
-  { label: "VOCABULARY", items: [{ label: "Studio", route: "studio" }] },
+  { label: "VOCABULARY", items: [{ label: "Studio", route: "studio", icon: BookOpen }] },
   {
-    label: "GOVERN",
+    label: "GOVERNANCE",
+    items: [{ label: "Govern", route: "govern", icon: ShieldCheck }],
+  },
+  {
+    label: "INSIGHT",
     items: [
-      { label: "Validation", route: "validation" },
-      { label: "Contradictions", route: "contradictions" },
-      { label: "Resolution", route: "resolution" },
-      { label: "Drift", route: "drift-view" },
-      { label: "Governance", route: "governance" },
+      { label: "Analytics", route: "analytics", icon: BarChart3 },
+      { label: "Agent runs", route: "runs", icon: History },
+      { label: "Agents", route: "agents", icon: Bot },
     ],
   },
   {
     label: "INGEST",
     items: [
-      { label: "Sources", route: "sources" },
-      { label: "Connectors", route: "connectors" },
-    ],
-  },
-  {
-    label: "INSIGHT",
-    items: [
-      { label: "Analytics", route: "analytics" },
-      { label: "Agent runs", route: "runs" },
+      { label: "Sources", route: "sources", icon: Database },
+      { label: "Connectors", route: "connectors", icon: Plug },
     ],
   },
   {
     label: "PLATFORM",
     items: [
-      { label: "Knowledge packs", route: "knowledge" },
-      { label: "Packs", route: "packs" },
-      { label: "Agents", route: "agents" },
-      { label: "MCP", route: "mcp-tools" },
-      { label: "Admin", route: "admin" },
-      { label: "Tasks", route: "tasks" },
-      { label: "Quality", route: "quality" },
-      { label: "Privacy", route: "privacy" },
-      { label: "Security", route: "security" },
-      { label: "API Keys", route: "api-keys" },
+      { label: "Knowledge packs", route: "knowledge", icon: Package },
+      { label: "Packs", route: "packs", icon: Boxes },
+      { label: "MCP", route: "mcp-tools", icon: Server },
+      { label: "Admin", route: "admin", icon: Settings },
+      { label: "Tasks", route: "tasks", icon: ListChecks },
+      { label: "Quality", route: "quality", icon: CheckCircle2 },
+      { label: "Privacy", route: "privacy", icon: Lock },
+      { label: "Security", route: "security", icon: ShieldAlert },
+      { label: "API Keys", route: "api-keys", icon: KeyRound },
     ],
   },
 ];

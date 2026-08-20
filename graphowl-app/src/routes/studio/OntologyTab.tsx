@@ -64,12 +64,12 @@ export function OntologyTab() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="mb-3 flex items-center gap-2.5">
-        <span className="text-[12.5px] text-gowl-t5">{strings.studioOntologyPackLabel}</span>
+        <span className="text-[15px] text-gowl-t5">{strings.studioOntologyPackLabel}</span>
         <select
           value={selectedPackId}
           onChange={(event) => setSelectedPackId(event.target.value)}
           aria-label={strings.studioOntologyPackLabel}
-          className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[14px] text-gowl-t1"
+          className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[16.5px] text-gowl-t1"
         >
           {(packs ?? []).map((pack) => (
             <option key={pack.packId} value={pack.packId}>
@@ -78,7 +78,7 @@ export function OntologyTab() {
           ))}
         </select>
         {model && (
-          <span className="font-mono text-[12.5px] text-gowl-t6">
+          <span className="font-mono text-[15px] text-gowl-t6">
             {`${model.classes.length} classes · ${model.relationships.length} relationships · ${model.properties.length} properties`}
           </span>
         )}
@@ -89,7 +89,7 @@ export function OntologyTab() {
               key={v}
               type="button"
               onClick={() => setView(v)}
-              className={`rounded px-2.5 py-1 text-[13px] ${
+              className={`rounded px-2.5 py-1 text-[15.5px] ${
                 view === v ? "bg-gowl-accent text-gowl-bg" : "text-gowl-t5 hover:text-gowl-t2"
               }`}
             >
@@ -103,15 +103,15 @@ export function OntologyTab() {
        *  literal-valued property has no declared domain, so which class it
        *  belongs to is not derivable from the ontology's own declarations —
        *  only from which class's *instances* actually carry it. */}
-      <p className="mb-3 text-[12.5px] text-gowl-t6">{strings.studioOntologyAttributesGap}</p>
+      <p className="mb-3 text-[15px] text-gowl-t6">{strings.studioOntologyAttributesGap}</p>
 
-      {error && <div className="text-[14.5px] text-gowl-bad">{strings.studioError}</div>}
-      {!error && !packs && <div className="text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>}
+      {error && <div className="text-[17px] text-gowl-bad">{strings.studioError}</div>}
+      {!error && !packs && <div className="text-[17px] text-gowl-t5">{strings.studioLoading}</div>}
       {!error && packs && !selectedPackId && (
-        <div className="text-[14.5px] text-gowl-t5">{strings.studioOntologyNoPacks}</div>
+        <div className="text-[17px] text-gowl-t5">{strings.studioOntologyNoPacks}</div>
       )}
       {!error && selectedPackId && !data && (
-        <div className="text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>
+        <div className="text-[17px] text-gowl-t5">{strings.studioLoading}</div>
       )}
       {!error && data && model && view === "graph" && (
         <OntologyCanvas

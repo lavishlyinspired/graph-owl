@@ -31,19 +31,19 @@ export default function ApiKeysRoute() {
     <div className="p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.apiKeysTitle}</h1>
-          <p className="text-[14px] text-gowl-t5">{strings.apiKeysDescription}</p>
+          <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.apiKeysTitle}</h1>
+          <p className="text-[16.5px] text-gowl-t5">{strings.apiKeysDescription}</p>
         </div>
         <button
           type="button"
-          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
+          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[16px] font-semibold text-gowl-accent-on"
         >
           {strings.apiKeysGenerate}
         </button>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-gowl-line">
-        <div className="grid grid-cols-[1fr_200px_100px_100px_100px_90px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2.5 font-mono text-[10px] tracking-wider text-gowl-t6">
+        <div className="grid grid-cols-[1fr_200px_100px_100px_100px_90px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-4 py-2.5 font-mono text-[12.5px] tracking-wider text-gowl-t6">
           <span>NAME</span>
           <span>SCOPE</span>
           <span>CREATED</span>
@@ -58,12 +58,12 @@ export default function ApiKeysRoute() {
               key={key.id}
               className="grid grid-cols-[1fr_200px_100px_100px_100px_90px] items-center gap-2 border-b border-gowl-row px-4 py-3 last:border-b-0"
             >
-              <span className="text-[14px] text-gowl-t1">{key.name}</span>
-              <span className="truncate font-mono text-[12px] text-gowl-t4">{key.scope}</span>
-              <span className="text-[12.5px] text-gowl-t5">{key.createdAt}</span>
-              <span className="text-[12.5px] text-gowl-t5">{key.lastUsed}</span>
-              <span className="text-[12.5px] text-gowl-t5">{key.expires}</span>
-              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[10px] ${ss.bg} ${ss.text}`}>
+              <span className="text-[16.5px] text-gowl-t1">{key.name}</span>
+              <span className="truncate font-mono text-[14.5px] text-gowl-t4">{key.scope}</span>
+              <span className="text-[15px] text-gowl-t5">{key.createdAt}</span>
+              <span className="text-[15px] text-gowl-t5">{key.lastUsed}</span>
+              <span className="text-[15px] text-gowl-t5">{key.expires}</span>
+              <span className={`rounded-full px-2 py-0.5 text-center font-mono text-[12.5px] ${ss.bg} ${ss.text}`}>
                 {key.status.toUpperCase()}
               </span>
             </div>

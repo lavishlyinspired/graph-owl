@@ -39,12 +39,12 @@ interface SubjectHeader {
 
 function Side({ memory }: { readonly memory: Memory | null }) {
   if (memory === null) {
-    return <div className="text-[13.5px] italic text-gowl-t6">{strings.entityContradictionSideMissing}</div>;
+    return <div className="text-[16px] italic text-gowl-t6">{strings.entityContradictionSideMissing}</div>;
   }
   return (
     <div className="rounded-md border border-gowl-amber-border bg-gowl-panel p-3">
-      <div className="text-[15.5px] text-gowl-t1">{memory.content}</div>
-      <div className="mt-1.5 font-mono text-[11.5px] text-gowl-t7">
+      <div className="text-[18px] text-gowl-t1">{memory.content}</div>
+      <div className="mt-1.5 font-mono text-[14px] text-gowl-t7">
         {`${new Date(memory.asOf).toLocaleDateString()} · ${memory.confidence.toFixed(2)}`}
       </div>
     </div>
@@ -70,16 +70,16 @@ function HistoryList({
 }) {
   if (isAssetEntity) {
     if ((versions ?? []).length === 0) {
-      return <div className="text-[13.5px] text-gowl-t5">{strings.entityHistoryEmpty}</div>;
+      return <div className="text-[16px] text-gowl-t5">{strings.entityHistoryEmpty}</div>;
     }
     return (
       <>
         {(versions ?? []).map((version) => (
           <div key={`${version.version.major}.${version.version.minor}`} className="flex gap-2.5 pb-3">
-            <div className="w-14 flex-none pt-0.5 font-mono text-[11.5px] text-gowl-t7">
+            <div className="w-14 flex-none pt-0.5 font-mono text-[14px] text-gowl-t7">
               {relativeTime(version.updatedAt, new Date())}
             </div>
-            <div className="flex-1 text-[13.5px] text-gowl-t2">
+            <div className="flex-1 text-[16px] text-gowl-t2">
               {version.changeDescription?.summary ?? version.updatedBy}
             </div>
           </div>
@@ -88,7 +88,7 @@ function HistoryList({
     );
   }
   if (subjectFindings.length === 0) {
-    return <div className="text-[13.5px] text-gowl-t5">{strings.entityHistoryEmpty}</div>;
+    return <div className="text-[16px] text-gowl-t5">{strings.entityHistoryEmpty}</div>;
   }
   return (
     <>
@@ -96,10 +96,10 @@ function HistoryList({
         .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
         .map((finding) => (
           <div key={finding.id} className="flex gap-2.5 pb-3">
-            <div className="w-14 flex-none pt-0.5 font-mono text-[11.5px] text-gowl-t7">
+            <div className="w-14 flex-none pt-0.5 font-mono text-[14px] text-gowl-t7">
               {relativeTime(finding.detectedAt, new Date())}
             </div>
-            <div className="flex-1 text-[13.5px] text-gowl-t2">
+            <div className="flex-1 text-[16px] text-gowl-t2">
               {`${finding.label} ${strings.entityFindingDetected}`}
             </div>
           </div>
@@ -109,13 +109,13 @@ function HistoryList({
 }
 
 function ImpactRows({ rows, empty }: { readonly rows: readonly EntityImpactRow[]; readonly empty: string }) {
-  if (rows.length === 0) return <div className="text-[13.5px] text-gowl-t5">{empty}</div>;
+  if (rows.length === 0) return <div className="text-[16px] text-gowl-t5">{empty}</div>;
   return (
     <>
       {rows.map((row) => (
         <div key={row.label} className="flex justify-between border-b border-gowl-row py-1.5 last:border-b-0">
-          <span className="text-[13.5px] text-gowl-t4">{row.label}</span>
-          <span className="font-mono text-[13.5px] text-gowl-t1">{row.n}</span>
+          <span className="text-[16px] text-gowl-t4">{row.label}</span>
+          <span className="font-mono text-[16px] text-gowl-t1">{row.n}</span>
         </div>
       ))}
     </>
@@ -127,7 +127,7 @@ function CopyableQuery({ label, query }: { readonly label: string; readonly quer
   return (
     <div className="mb-3 last:mb-0">
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-[13.5px] text-gowl-t3">{label}</span>
+        <span className="text-[16px] text-gowl-t3">{label}</span>
         <button
           type="button"
           onClick={() => {
@@ -135,12 +135,12 @@ function CopyableQuery({ label, query }: { readonly label: string; readonly quer
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
           }}
-          className="text-[12.5px] text-gowl-accent"
+          className="text-[15px] text-gowl-accent"
         >
           {copied ? strings.entityQueriesCopied : strings.entityQueriesCopy}
         </button>
       </div>
-      <pre className="overflow-x-auto rounded-md border border-gowl-line-2 bg-gowl-input p-2.5 font-mono text-[12.5px] text-gowl-t2">
+      <pre className="overflow-x-auto rounded-md border border-gowl-line-2 bg-gowl-input p-2.5 font-mono text-[15px] text-gowl-t2">
         {query}
       </pre>
     </div>
@@ -188,34 +188,34 @@ function PathsPanel({ from }: { readonly from: string }) {
     <>
       <div className="flex flex-wrap items-end gap-3 border-b border-gowl-line bg-gowl-panel px-8 py-4">
         <div>
-          <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.pathsFromLabel}</div>
-          <div className="rounded-md border border-gowl-line-2 bg-gowl-row px-3 py-1.5 font-mono text-[13.5px] text-gowl-t4">
+          <div className="mb-1 text-[15px] text-gowl-t5">{strings.pathsFromLabel}</div>
+          <div className="rounded-md border border-gowl-line-2 bg-gowl-row px-3 py-1.5 font-mono text-[16px] text-gowl-t4">
             {from}
           </div>
         </div>
         <div>
-          <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.pathsToLabel}</div>
+          <div className="mb-1 text-[15px] text-gowl-t5">{strings.pathsToLabel}</div>
           <input
             value={toInput}
             onChange={(event) => setToInput(event.target.value)}
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-3 py-1.5 font-mono text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-3 py-1.5 font-mono text-[16px] text-gowl-t1"
           />
         </div>
         <button
           type="button"
           onClick={submit}
-          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
+          className="rounded-md bg-gowl-accent px-4 py-1.5 text-[16px] font-semibold text-gowl-accent-on"
         >
           {strings.pathsSearch}
         </button>
       </div>
 
       {!to ? (
-        <div className="p-8 text-[14.5px] text-gowl-t5">{strings.pathsMissingEnds}</div>
+        <div className="p-8 text-[17px] text-gowl-t5">{strings.pathsMissingEnds}</div>
       ) : error ? (
-        <div className="p-8 text-[14.5px] text-gowl-bad">{strings.traceError}</div>
+        <div className="p-8 text-[17px] text-gowl-bad">{strings.traceError}</div>
       ) : !result ? (
-        <div className="p-8 text-[14.5px] text-gowl-t5">{strings.traceLoading}</div>
+        <div className="p-8 text-[17px] text-gowl-t5">{strings.traceLoading}</div>
       ) : (
         <TraceDetail config={toPathsConfig(result, from, to)} />
       )}
@@ -349,10 +349,10 @@ export function EntityPanel({ id }: { readonly id: string }) {
   };
 
   if (error) {
-    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.entityError}</div>;
+    return <div className="p-8 text-[17px] text-gowl-bad">{strings.entityError}</div>;
   }
   if (!asset && !subject) {
-    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.entityLoading}</div>;
+    return <div className="p-8 text-[17px] text-gowl-t5">{strings.entityLoading}</div>;
   }
 
   const openPairs = (pairs ?? []).filter((pair) => !decided.has(`${pair.id.a}-${pair.id.b}`));
@@ -369,31 +369,31 @@ export function EntityPanel({ id }: { readonly id: string }) {
         <div className="flex items-start gap-4">
           <div className="flex-1">
             <div className="mb-1.5 flex items-center gap-2">
-              <h1 className="text-[22.5px] font-semibold text-gowl-t1">{headerName}</h1>
+              <h1 className="text-[25px] font-semibold text-gowl-t1">{headerName}</h1>
               {subject?.semanticType && (
-                <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[11px] text-gowl-accent">
+                <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-accent">
                   {subject.semanticType}
                 </span>
               )}
               {isAssetEntity && openPairs.length > 0 && (
-                <span className="rounded border border-gowl-amber-border bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[11px] text-gowl-amber">
+                <span className="rounded border border-gowl-amber-border bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-amber">
                   {`${openPairs.length} CONTRADICTION${openPairs.length === 1 ? "" : "S"}`}
                 </span>
               )}
               {!isAssetEntity && subjectFindings.length > 0 && (
-                <span className="rounded border border-gowl-amber-border bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[11px] text-gowl-amber">
+                <span className="rounded border border-gowl-amber-border bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-amber">
                   {`${subjectFindings.length} FINDING${subjectFindings.length === 1 ? "" : "s"}`}
                 </span>
               )}
             </div>
-            <div className="font-mono text-[13px] text-gowl-t6">{headerSubtitle}</div>
+            <div className="font-mono text-[15.5px] text-gowl-t6">{headerSubtitle}</div>
           </div>
           <div className="flex flex-none gap-1.5">
             <button
               type="button"
               onClick={() => void handlePin()}
               disabled={pinStatus === "pinning"}
-              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-60"
+              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-60"
             >
               {strings.entityPinToInvestigation}
             </button>
@@ -414,7 +414,7 @@ export function EntityPanel({ id }: { readonly id: string }) {
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`px-3 py-2 text-[13.5px] ${
+              className={`px-3 py-2 text-[16px] ${
                 activeTab === tab
                   ? "border-b-2 border-gowl-accent text-gowl-accent"
                   : "text-gowl-t5 hover:text-gowl-t2"
@@ -430,21 +430,21 @@ export function EntityPanel({ id }: { readonly id: string }) {
         <div className="grid grid-cols-[1fr_320px] gap-6 p-8">
         <div className="flex flex-col gap-5">
           <div className="overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
-            <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="border-b border-gowl-line px-4 py-2.5 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.entityFacts}
             </div>
             {(facts ?? []).length === 0 ? (
-              <div className="p-4 text-[13.5px] text-gowl-t5">{strings.entityFactsEmpty}</div>
+              <div className="p-4 text-[16px] text-gowl-t5">{strings.entityFactsEmpty}</div>
             ) : (
               (facts ?? []).map((fact, index) => (
                 <div
                   key={`${fact.relationship}-${fact.target}-${index}`}
                   className="grid grid-cols-[150px_1fr_74px] items-center gap-3 border-b border-gowl-row px-4 py-2.5 last:border-b-0"
                 >
-                  <span className="font-mono text-[12.5px] text-gowl-t5">{fact.relationship}</span>
-                  <span className="text-[14px] text-gowl-t1">{fact.target}</span>
+                  <span className="font-mono text-[15px] text-gowl-t5">{fact.relationship}</span>
+                  <span className="text-[16.5px] text-gowl-t1">{fact.target}</span>
                   <span
-                    className={`text-right font-mono text-[11px] ${fact.derived ? "text-gowl-accent" : "text-gowl-t6"}`}
+                    className={`text-right font-mono text-[13.5px] ${fact.derived ? "text-gowl-accent" : "text-gowl-t6"}`}
                   >
                     {fact.derived ? strings.entityFactDerived : strings.entityFactAsserted}
                   </span>
@@ -458,36 +458,36 @@ export function EntityPanel({ id }: { readonly id: string }) {
                 const key = `${pair.id.a}-${pair.id.b}`;
                 return (
                   <div key={key} className="rounded-lg border border-gowl-amber-border bg-gowl-amber-deep p-4">
-                    <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-amber">
+                    <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-amber">
                       {`${strings.entityContradictionTitle} · ${kindLabel(pair.kind)}`}
                     </div>
                     <div className="grid grid-cols-[1fr_34px_1fr] items-center gap-3">
                       <Side memory={pair.a} />
-                      <div className="text-center text-[15.5px] text-gowl-amber">{strings.entityContradictionDivider}</div>
+                      <div className="text-center text-[18px] text-gowl-amber">{strings.entityContradictionDivider}</div>
                       <Side memory={pair.b} />
                     </div>
                     <div className="mt-3.5 flex items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => void decide(pair, "confirmed")}
-                        className="rounded-md border border-gowl-amber-border px-3 py-1.5 text-[13px] text-gowl-amber"
+                        className="rounded-md border border-gowl-amber-border px-3 py-1.5 text-[15.5px] text-gowl-amber"
                       >
                         {strings.entityConfirm}
                       </button>
                       {confirmingDismiss === key ? (
                         <>
-                          <span className="text-[13px] text-gowl-t5">{strings.entityDismissBody}</span>
+                          <span className="text-[15.5px] text-gowl-t5">{strings.entityDismissBody}</span>
                           <button
                             type="button"
                             onClick={() => void decide(pair, "dismissed")}
-                            className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[13px] text-gowl-t4"
+                            className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
                           >
                             {strings.entityDismiss}
                           </button>
                           <button
                             type="button"
                             onClick={() => setConfirmingDismiss(null)}
-                            className="text-[13px] text-gowl-t6"
+                            className="text-[15.5px] text-gowl-t6"
                           >
                             {strings.entityDismissCancel}
                           </button>
@@ -496,12 +496,12 @@ export function EntityPanel({ id }: { readonly id: string }) {
                         <button
                           type="button"
                           onClick={() => setConfirmingDismiss(key)}
-                          className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[13px] text-gowl-t4"
+                          className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
                         >
                           {strings.entityDismiss}
                         </button>
                       )}
-                      <span className="ml-auto text-[13px] text-gowl-t6">{strings.entityContradictionHint}</span>
+                      <span className="ml-auto text-[15.5px] text-gowl-t6">{strings.entityContradictionHint}</span>
                     </div>
                   </div>
                 );
@@ -515,12 +515,12 @@ export function EntityPanel({ id }: { readonly id: string }) {
 
         <div className="flex flex-col gap-4">
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-            <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.entityHistory}</div>
+            <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.entityHistory}</div>
             <HistoryList isAssetEntity={isAssetEntity} versions={versions} subjectFindings={subjectFindings} />
           </div>
 
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-            <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.entityImpact}</div>
+            <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.entityImpact}</div>
             <ImpactRows rows={impact ?? []} empty={strings.entityImpactEmpty} />
           </div>
         </div>
@@ -530,15 +530,15 @@ export function EntityPanel({ id }: { readonly id: string }) {
       {activeTab === "evidence" && (
         <div className="p-8">
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-6">
-            <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.entityEvidenceTitle}</div>
+            <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.entityEvidenceTitle}</div>
             {sources.length === 0 ? (
-              <div className="text-[13.5px] text-gowl-t5">{strings.entityEvidenceEmpty}</div>
+              <div className="text-[16px] text-gowl-t5">{strings.entityEvidenceEmpty}</div>
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {sources.map((source) => (
                   <span
                     key={source}
-                    className="rounded border border-gowl-line-2 bg-gowl-row px-2 py-1 font-mono text-[12px] text-gowl-t3"
+                    className="rounded border border-gowl-line-2 bg-gowl-row px-2 py-1 font-mono text-[14.5px] text-gowl-t3"
                   >
                     {source}
                   </span>
@@ -553,13 +553,13 @@ export function EntityPanel({ id }: { readonly id: string }) {
         <div className="p-8">
           <div className="grid grid-cols-2 gap-4">
             <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-              <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">
+              <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">
                 {strings.entityLineageUpstream}
               </div>
               <ImpactRows rows={impact ?? []} empty={strings.entityLineageEmpty} />
             </div>
             <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-              <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">
+              <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">
                 {strings.entityLineageDownstream}
               </div>
               <ImpactRows rows={downstream ?? []} empty={strings.entityLineageEmpty} />
@@ -568,7 +568,7 @@ export function EntityPanel({ id }: { readonly id: string }) {
           {isAssetEntity && (
             <Link
               to={`/lineage-view/${encodeURIComponent(id)}`}
-              className="mt-4 inline-block text-[14.5px] text-gowl-accent underline"
+              className="mt-4 inline-block text-[17px] text-gowl-accent underline"
             >
               {strings.entityLineageFullView}
             </Link>
@@ -579,7 +579,7 @@ export function EntityPanel({ id }: { readonly id: string }) {
       {activeTab === "history" && (
         <div className="p-8">
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-            <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.entityHistory}</div>
+            <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.entityHistory}</div>
             <HistoryList isAssetEntity={isAssetEntity} versions={versions} subjectFindings={subjectFindings} />
           </div>
         </div>
@@ -590,7 +590,7 @@ export function EntityPanel({ id }: { readonly id: string }) {
       {activeTab === "queries" && (
         <div className="p-8">
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-6">
-            <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.entityQueriesTitle}</div>
+            <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.entityQueriesTitle}</div>
             {subject ? (
               <>
                 <CopyableQuery label={strings.entityQueriesOutgoingLabel} query={outgoingFactsQuery(subject.iri)} />
@@ -603,9 +603,9 @@ export function EntityPanel({ id }: { readonly id: string }) {
               // subjects (the IRI shape every pack entity already has)
               // rather than showing a query that would silently query the
               // wrong subject.
-              <div className="mb-3 text-[13.5px] text-gowl-t5">{strings.entityQueriesAssetNote}</div>
+              <div className="mb-3 text-[16px] text-gowl-t5">{strings.entityQueriesAssetNote}</div>
             )}
-            <Link to="/studio" className="mt-1 inline-block text-[14px] text-gowl-accent underline">
+            <Link to="/studio" className="mt-1 inline-block text-[16.5px] text-gowl-accent underline">
               {strings.entityQueriesOpenSparql}
             </Link>
           </div>

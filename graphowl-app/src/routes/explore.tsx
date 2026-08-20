@@ -218,7 +218,7 @@ export default function ExploreRoute() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-[46px] flex-none items-center gap-2.5 border-b border-gowl-line bg-gowl-panel px-4">
-        <span className="text-[14.5px] font-semibold text-gowl-t1">{strings.exploreTitle}</span>
+        <span className="text-[17px] font-semibold text-gowl-t1">{strings.exploreTitle}</span>
         <span className="text-gowl-dim">{strings.exploreBreadcrumbSeparator}</span>
         <EntitySelect
           seeds={entityOptions}
@@ -226,7 +226,7 @@ export default function ExploreRoute() {
           onSelect={(next) => navigate(next === "" ? "/explore" : `/explore/${encodeURIComponent(next)}`)}
         />
         {model?.truncated && activeView === "graph" && (
-          <span className="ml-4 text-[12.5px] text-gowl-amber">{strings.exploreTruncated}</span>
+          <span className="ml-4 text-[15px] text-gowl-amber">{strings.exploreTruncated}</span>
         )}
         <div className="flex gap-1 rounded-md border border-gowl-line-2 p-0.5">
           {(["graph", "entity"] as const).map((v) => (
@@ -234,7 +234,7 @@ export default function ExploreRoute() {
               key={v}
               type="button"
               onClick={() => setActiveView(v)}
-              className={`rounded px-2.5 py-1 text-[13px] ${
+              className={`rounded px-2.5 py-1 text-[15.5px] ${
                 activeView === v ? "bg-gowl-accent text-gowl-bg" : "text-gowl-t5 hover:text-gowl-t2"
               }`}
             >
@@ -253,8 +253,8 @@ export default function ExploreRoute() {
                   onClick={() => toggleKind(kind)}
                   className={
                     active
-                      ? "rounded-md border border-gowl-accent-border bg-gowl-accent-bg px-2.5 py-1 text-[13px] text-gowl-accent"
-                      : "rounded-md border border-gowl-line-2 px-2.5 py-1 text-[13px] text-gowl-t4 hover:border-gowl-hover"
+                      ? "rounded-md border border-gowl-accent-border bg-gowl-accent-bg px-2.5 py-1 text-[15.5px] text-gowl-accent"
+                      : "rounded-md border border-gowl-line-2 px-2.5 py-1 text-[15.5px] text-gowl-t4 hover:border-gowl-hover"
                   }
                 >
                   {kind}
@@ -265,7 +265,7 @@ export default function ExploreRoute() {
               <button
                 type="button"
                 onClick={() => setSelectedKinds([])}
-                className="text-[12.5px] text-gowl-t6 hover:text-gowl-t4"
+                className="text-[15px] text-gowl-t6 hover:text-gowl-t4"
               >
                 {strings.exploreClearFilter}
               </button>
@@ -275,7 +275,7 @@ export default function ExploreRoute() {
       </div>
 
       {!id && (
-        <div className="flex flex-1 items-center justify-center p-8 text-[14.5px] text-gowl-t5">
+        <div className="flex flex-1 items-center justify-center p-8 text-[17px] text-gowl-t5">
           {strings.exploreNoSeed}
         </div>
       )}
@@ -283,10 +283,10 @@ export default function ExploreRoute() {
       {id && activeView === "entity" && <EntityPanel id={id} />}
 
       {id && activeView === "graph" && error && (
-        <div className="p-8 text-[14.5px] text-gowl-bad">{strings.exploreError}</div>
+        <div className="p-8 text-[17px] text-gowl-bad">{strings.exploreError}</div>
       )}
       {id && activeView === "graph" && !error && !model && (
-        <div className="p-8 text-[14.5px] text-gowl-t5">{strings.exploreLoading}</div>
+        <div className="p-8 text-[17px] text-gowl-t5">{strings.exploreLoading}</div>
       )}
 
       {id && activeView === "graph" && !error && model && picture && (
@@ -307,13 +307,13 @@ export default function ExploreRoute() {
             {selectedNode && (
               <>
                 <div className="mb-2 flex items-center gap-2">
-                  <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[11px] text-gowl-accent">
+                  <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-accent">
                     {selectedNode.semanticType ?? strings.exploreEntityBadge}
                   </span>
                 </div>
-                <div className="mb-1 text-[18.5px] font-semibold text-gowl-t1">{selectedNode.name}</div>
-                <div className="mb-4 break-all font-mono text-[12.5px] text-gowl-t6">{selectedNode.id}</div>
-                <div className="space-y-2 text-[13.5px]">
+                <div className="mb-1 text-[21px] font-semibold text-gowl-t1">{selectedNode.name}</div>
+                <div className="mb-4 break-all font-mono text-[15px] text-gowl-t6">{selectedNode.id}</div>
+                <div className="space-y-2 text-[16px]">
                   <div className="flex justify-between">
                     <span className="text-gowl-t5">{strings.exploreKind}</span>
                     <span className="text-gowl-t2">{selectedNode.kind ?? strings.exploreKindHidden}</span>
@@ -321,7 +321,7 @@ export default function ExploreRoute() {
                   {selectedNode.fullyQualifiedName && (
                     <div>
                       <div className="mb-1 text-gowl-t5">{strings.exploreFqn}</div>
-                      <div className="break-all font-mono text-[12.5px] text-gowl-t3">
+                      <div className="break-all font-mono text-[15px] text-gowl-t3">
                         {selectedNode.fullyQualifiedName}
                       </div>
                     </div>
@@ -346,7 +346,7 @@ export default function ExploreRoute() {
                 <div className="mt-4 flex flex-col gap-2">
                   <Link
                     to={openTargetFor(selectedNode.id)}
-                    className="rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[13.5px] text-gowl-t3 hover:border-gowl-hover"
+                    className="rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[16px] text-gowl-t3 hover:border-gowl-hover"
                   >
                     {strings.exploreOpenEntity}
                   </Link>
@@ -354,15 +354,15 @@ export default function ExploreRoute() {
                     type="button"
                     onClick={() => void handlePin()}
                     disabled={pinStatus === "pinning"}
-                    className="rounded-md bg-gowl-accent px-3 py-2 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-60"
+                    className="rounded-md bg-gowl-accent px-3 py-2 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-60"
                   >
                     {strings.explorePinToInvestigation}
                   </button>
                   {pinStatus === "done" && (
-                    <div className="text-[12.5px] text-gowl-ok">{strings.explorePinned}</div>
+                    <div className="text-[15px] text-gowl-ok">{strings.explorePinned}</div>
                   )}
                   {pinStatus === "failed" && (
-                    <div className="text-[12.5px] text-gowl-bad">{strings.explorePinFailed}</div>
+                    <div className="text-[15px] text-gowl-bad">{strings.explorePinFailed}</div>
                   )}
                 </div>
               </>
@@ -370,10 +370,10 @@ export default function ExploreRoute() {
             {selectedEdge && (
               <>
                 <div className="mb-3 flex items-center gap-2">
-                  <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[11px] text-gowl-accent">
+                  <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-accent">
                     {strings.exploreRelationshipBadge}
                   </span>
-                  <span className={`rounded border px-1.5 py-0.5 font-mono text-[11px] ${
+                  <span className={`rounded border px-1.5 py-0.5 font-mono text-[13.5px] ${
                     selectedEdge.derived
                       ? "border-gowl-amber-border bg-gowl-amber-bg text-gowl-amber"
                       : "border-gowl-line-2 bg-gowl-panel-2 text-gowl-t5"
@@ -381,8 +381,8 @@ export default function ExploreRoute() {
                     {selectedEdge.derived ? strings.exploreEdgeInferred : strings.exploreEdgeAsserted}
                   </span>
                 </div>
-                <div className="mb-1 text-[18.5px] font-semibold text-gowl-t1">{selectedEdge.relationship}</div>
-                <div className="mb-4 font-mono text-[12.5px] text-gowl-t6">
+                <div className="mb-1 text-[21px] font-semibold text-gowl-t1">{selectedEdge.relationship}</div>
+                <div className="mb-4 font-mono text-[15px] text-gowl-t6">
                   {`${endpointName(selectedEdge.from)} → ${endpointName(selectedEdge.to)}`}
                 </div>
 
@@ -392,7 +392,7 @@ export default function ExploreRoute() {
                     <button
                       key={tab}
                       type="button"
-                      className={`px-2.5 py-1.5 text-[12.5px] ${
+                      className={`px-2.5 py-1.5 text-[15px] ${
                         i === 0 ? "border-b-2 border-gowl-accent text-gowl-accent" : "text-gowl-t5 hover:text-gowl-t2"
                       }`}
                     >
@@ -416,20 +416,20 @@ export default function ExploreRoute() {
                 <div className="flex flex-col gap-2">
                   <Link
                     to={`/paths?from=${encodeURIComponent(selectedEdge.from)}&to=${encodeURIComponent(model.seedId)}`}
-                    className="rounded-md bg-gowl-accent px-3 py-2 text-center text-[13.5px] font-semibold text-gowl-accent-on"
+                    className="rounded-md bg-gowl-accent px-3 py-2 text-center text-[16px] font-semibold text-gowl-accent-on"
                   >
                     {strings.exploreTracePathAction}
                   </Link>
                   <div className="flex gap-2">
                     <Link
                       to={`/lineage-view/${encodeURIComponent(selectedEdge.from)}`}
-                      className="flex-1 rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[13.5px] text-gowl-t3 hover:border-gowl-hover"
+                      className="flex-1 rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[16px] text-gowl-t3 hover:border-gowl-hover"
                     >
                       {strings.exploreLineageAction}
                     </Link>
                     <Link
                       to={`/history/${encodeURIComponent(selectedEdge.from)}`}
-                      className="flex-1 rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[13.5px] text-gowl-t3 hover:border-gowl-hover"
+                      className="flex-1 rounded-md border border-gowl-line-2 px-3 py-2 text-center text-[16px] text-gowl-t3 hover:border-gowl-hover"
                     >
                       {strings.exploreHistoryAction}
                     </Link>
@@ -456,19 +456,19 @@ function ProvenanceBlock({
 }) {
   return (
     <div className="mb-4">
-      <div className="mb-2.5 font-mono text-[11px] tracking-[0.14em] text-gowl-t6">
+      <div className="mb-2.5 font-mono text-[13.5px] tracking-[0.14em] text-gowl-t6">
         {strings.exploreProvenanceTitle}
       </div>
       <div className="space-y-2">
         {endpoints.map(({ role, node }) => (
           <div key={role} className="rounded-md border border-gowl-line-2 bg-gowl-panel-2 px-3 py-2">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="font-mono text-[11px] tracking-[0.14em] text-gowl-t6">{role}</span>
+              <span className="font-mono text-[13.5px] tracking-[0.14em] text-gowl-t6">{role}</span>
               {node?.semanticType && (
-                <span className="font-mono text-[11.5px] text-gowl-accent">{node.semanticType}</span>
+                <span className="font-mono text-[14px] text-gowl-accent">{node.semanticType}</span>
               )}
             </div>
-            <div className="mt-1 text-[13.5px] text-gowl-t2">
+            <div className="mt-1 text-[16px] text-gowl-t2">
               {node?.name ?? strings.exploreUnknownEndpoint}
             </div>
             {node?.sources && node.sources.length > 0 ? (
@@ -476,14 +476,14 @@ function ProvenanceBlock({
                 {node.sources.map((source) => (
                   <span
                     key={source}
-                    className="rounded border border-gowl-line-2 bg-gowl-row px-1.5 py-0.5 font-mono text-[11px] text-gowl-t4"
+                    className="rounded border border-gowl-line-2 bg-gowl-row px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-t4"
                   >
                     {source}
                   </span>
                 ))}
               </div>
             ) : (
-              <div className="mt-1 text-[12px] text-gowl-t7">{strings.exploreNoSources}</div>
+              <div className="mt-1 text-[14.5px] text-gowl-t7">{strings.exploreNoSources}</div>
             )}
           </div>
         ))}
@@ -523,7 +523,7 @@ function EntitySelect({
       aria-label={strings.exploreEntityPickerLabel}
       value={selected}
       onChange={(event) => onSelect(event.target.value)}
-      className="max-w-[560px] flex-1 truncate rounded-md border border-gowl-line-2 bg-gowl-panel-2 px-2.5 py-1 font-mono text-[13px] text-gowl-accent hover:border-gowl-hover focus:border-gowl-accent focus:outline-none"
+      className="max-w-[560px] flex-1 truncate rounded-md border border-gowl-line-2 bg-gowl-panel-2 px-2.5 py-1 font-mono text-[15.5px] text-gowl-accent hover:border-gowl-hover focus:border-gowl-accent focus:outline-none"
     >
       <option value="">
         {seeds === null ? strings.exploreLoading : strings.exploreEntityPickerPlaceholder}

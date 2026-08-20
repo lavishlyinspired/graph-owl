@@ -20,16 +20,16 @@ export default function PrivacyRoute() {
   return (
     <div className="p-8">
       <div className="mb-5">
-        <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.privacyTitle}</h1>
-        <p className="text-[14px] text-gowl-t5">{strings.privacyDescription}</p>
+        <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.privacyTitle}</h1>
+        <p className="text-[16.5px] text-gowl-t5">{strings.privacyDescription}</p>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
         {CONTROLS.map((ctrl) => (
           <div key={ctrl.label} className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{ctrl.label.toUpperCase()}</div>
-            <div className="mb-2 font-mono text-[21.5px] text-gowl-t1">{ctrl.value}</div>
-            <p className="text-[13px] text-gowl-t5">{ctrl.detail}</p>
+            <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{ctrl.label.toUpperCase()}</div>
+            <div className="mb-2 font-mono text-[24px] text-gowl-t1">{ctrl.value}</div>
+            <p className="text-[15.5px] text-gowl-t5">{ctrl.detail}</p>
           </div>
         ))}
       </div>

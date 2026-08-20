@@ -46,13 +46,13 @@ export default function ConnectorsRoute() {
 
   return (
     <div className="p-8">
-      <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.connectorsTitle}</h1>
-      <p className="mb-5 text-[14px] text-gowl-t5">{strings.connectorsDescription}</p>
+      <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.connectorsTitle}</h1>
+      <p className="mb-5 text-[16.5px] text-gowl-t5">{strings.connectorsDescription}</p>
 
       <div className="max-w-[520px] rounded-lg border border-gowl-line bg-gowl-panel p-5">
         <div className="mb-4">
-          <div className="text-[15.5px] font-semibold text-gowl-t1">{strings.connectorsPostgresName}</div>
-          <div className="text-[13.5px] text-gowl-t5">{strings.connectorsPostgresDescription}</div>
+          <div className="text-[18px] font-semibold text-gowl-t1">{strings.connectorsPostgresName}</div>
+          <div className="text-[16px] text-gowl-t5">{strings.connectorsPostgresDescription}</div>
         </div>
 
         <div className="mb-3 grid grid-cols-2 gap-2">
@@ -60,32 +60,32 @@ export default function ConnectorsRoute() {
             value={host}
             onChange={(e) => setHost(e.target.value)}
             placeholder="Host"
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
           <input
             value={port}
             onChange={(e) => setPort(e.target.value)}
             placeholder="Port"
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
           <input
             value={database}
             onChange={(e) => setDatabase(e.target.value)}
             placeholder="Database"
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="Username"
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
           <input
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             type="password"
             placeholder="Password"
-            className="col-span-2 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="col-span-2 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
         </div>
 
@@ -93,35 +93,35 @@ export default function ConnectorsRoute() {
           type="button"
           disabled={busy || !complete}
           onClick={runTest}
-          className="mb-2 rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
+          className="mb-2 rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t2 disabled:opacity-40"
         >
           {strings.connectorsTestSubmit}
         </button>
         {testResult && (
-          <p className={`mb-3 text-[13.5px] ${testResult.ok ? "text-gowl-ok" : "text-gowl-bad"}`}>
+          <p className={`mb-3 text-[16px] ${testResult.ok ? "text-gowl-ok" : "text-gowl-bad"}`}>
             {testResult.ok ? strings.connectorsTestOk : testResult.detail}
           </p>
         )}
 
         <div className="mt-3 border-t border-gowl-line-2 pt-3">
-          <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.connectorsRunTitle}</div>
+          <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.connectorsRunTitle}</div>
           <input
             value={serviceName}
             onChange={(e) => setServiceName(e.target.value)}
             placeholder={strings.connectorsServiceName}
-            className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[13.5px] text-gowl-t1"
+            className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1.5 text-[16px] text-gowl-t1"
           />
           <button
             type="button"
             disabled={busy || !complete || serviceName.trim().length === 0}
             onClick={runSync}
-            className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
+            className="rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-40"
           >
             {strings.connectorsRunSubmit}
           </button>
           {runResult && (
-            <div className="mt-3 rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3 font-mono text-[13px] text-gowl-t2">
-              <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.connectorsRunResult}</div>
+            <div className="mt-3 rounded-md border border-gowl-line-2 bg-gowl-panel-2 p-3 font-mono text-[15.5px] text-gowl-t2">
+              <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.connectorsRunResult}</div>
               {strings.runPrefixCreated}
               {runResult.created} {strings.runPrefixSkipped}
               {runResult.skipped}{" "}

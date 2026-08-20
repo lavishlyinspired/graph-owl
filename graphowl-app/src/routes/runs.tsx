@@ -94,17 +94,17 @@ export default function RunsRoute() {
       <div className="flex-none border-b border-gowl-line bg-gowl-panel px-6 py-4">
         <div className="mb-3.5 flex items-end justify-between">
           <div>
-            <h1 className="mb-1 text-[21.5px] font-semibold text-gowl-t1">{strings.runsTitle}</h1>
-            <p className="text-[14px] text-gowl-t5">{strings.runsDescription}</p>
+            <h1 className="mb-1 text-[24px] font-semibold text-gowl-t1">{strings.runsTitle}</h1>
+            <p className="text-[16.5px] text-gowl-t5">{strings.runsDescription}</p>
           </div>
           <div className="flex gap-2">
-            <button type="button" className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t3 hover:border-gowl-hover">
+            <button type="button" className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t3 hover:border-gowl-hover">
               {strings.runsRunBatch}
             </button>
-            <button type="button" className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t3 hover:border-gowl-hover">
+            <button type="button" className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t3 hover:border-gowl-hover">
               {strings.runsRegenerate}
             </button>
-            <button type="button" className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on">
+            <button type="button" className="rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] font-semibold text-gowl-accent-on">
               {strings.runsOpenLanded}
             </button>
           </div>
@@ -117,7 +117,7 @@ export default function RunsRoute() {
               key={chip}
               type="button"
               onClick={() => setActiveChip(chip)}
-              className={`rounded-md border px-2.5 py-1 font-mono text-[11.5px] ${
+              className={`rounded-md border px-2.5 py-1 font-mono text-[14px] ${
                 activeChip === chip
                   ? "border-gowl-accent-border bg-gowl-accent-bg text-gowl-accent"
                   : "border-gowl-line-2 bg-gowl-input text-gowl-t5 hover:border-gowl-hover"
@@ -147,16 +147,16 @@ export default function RunsRoute() {
               }`} />
               <div className="min-w-0 flex-1 p-3">
                 <div className="mb-1 flex items-center gap-2">
-                  <span className="font-mono text-[12px] text-gowl-accent">{run.id}</span>
-                  <span className="rounded border border-gowl-line-2 bg-gowl-input px-1.5 py-0.5 font-mono text-[10.5px] text-gowl-t5">{run.kind}</span>
-                  <span className={`ml-auto font-mono text-[10.5px] ${run.statusColor}`}>{run.status}</span>
+                  <span className="font-mono text-[14.5px] text-gowl-accent">{run.id}</span>
+                  <span className="rounded border border-gowl-line-2 bg-gowl-input px-1.5 py-0.5 font-mono text-[13px] text-gowl-t5">{run.kind}</span>
+                  <span className={`ml-auto font-mono text-[13px] ${run.statusColor}`}>{run.status}</span>
                 </div>
-                <div className="mb-0.5 text-[14px] text-gowl-t2">{run.agent}</div>
-                <div className="mb-1.5 truncate font-mono text-[11px] text-gowl-t7">{run.input}</div>
+                <div className="mb-0.5 text-[16.5px] text-gowl-t2">{run.agent}</div>
+                <div className="mb-1.5 truncate font-mono text-[13.5px] text-gowl-t7">{run.input}</div>
                 <div className="flex gap-3">
-                  <span className="font-mono text-[11px] text-gowl-t7">{run.tokens.toLocaleString()} tok</span>
-                  <span className="font-mono text-[11px] text-gowl-t7">{run.latency}</span>
-                  <span className="font-mono text-[11px] text-gowl-t7">{run.trigger}</span>
+                  <span className="font-mono text-[13.5px] text-gowl-t7">{run.tokens.toLocaleString()} tok</span>
+                  <span className="font-mono text-[13.5px] text-gowl-t7">{run.latency}</span>
+                  <span className="font-mono text-[13.5px] text-gowl-t7">{run.trigger}</span>
                 </div>
               </div>
             </button>
@@ -169,10 +169,10 @@ export default function RunsRoute() {
             <>
               {/* Run header */}
               <div className="mb-4 flex items-center gap-3">
-                <span className="text-[17.5px] font-semibold text-gowl-t1">{selectedRun.agent}</span>
-                <span className="font-mono text-[12px] text-gowl-t6">{selectedRun.id}</span>
-                <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-2 py-0.5 font-mono text-[10.5px] text-gowl-accent">{selectedRun.kind}</span>
-                <span className={`ml-auto font-mono text-[11.5px] ${selectedRun.statusColor}`}>{selectedRun.status}</span>
+                <span className="text-[20px] font-semibold text-gowl-t1">{selectedRun.agent}</span>
+                <span className="font-mono text-[14.5px] text-gowl-t6">{selectedRun.id}</span>
+                <span className="rounded border border-gowl-accent-border bg-gowl-accent-bg px-2 py-0.5 font-mono text-[13px] text-gowl-accent">{selectedRun.kind}</span>
+                <span className={`ml-auto font-mono text-[14px] ${selectedRun.statusColor}`}>{selectedRun.status}</span>
               </div>
 
               <div className="grid grid-cols-[1fr_300px] gap-4">
@@ -181,34 +181,34 @@ export default function RunsRoute() {
                   {/* Output */}
                   <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
                     <div className="mb-3 flex items-baseline justify-between">
-                      <span className="font-mono text-[11px] tracking-widest text-gowl-t6">{strings.runsOutputTitle}</span>
-                      <span className="text-[12.5px] text-gowl-t7">{strings.runsOutputNote}</span>
+                      <span className="font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.runsOutputTitle}</span>
+                      <span className="text-[15px] text-gowl-t7">{strings.runsOutputNote}</span>
                     </div>
-                    <div className="rounded-md border border-gowl-accent-border bg-gowl-accent-bg p-3 text-[14.5px] text-gowl-t2 leading-relaxed">
+                    <div className="rounded-md border border-gowl-accent-border bg-gowl-accent-bg p-3 text-[17px] text-gowl-t2 leading-relaxed">
                       {selectedRun.output || "Run in progress..."}
                     </div>
                     {selectedRun.destination && (
                       <div className="mt-3 flex items-center gap-2">
-                        <span className="font-mono text-[11.5px] text-gowl-t6">landed in</span>
-                        <span className="text-[13.5px] text-gowl-accent">{selectedRun.destination} →</span>
+                        <span className="font-mono text-[14px] text-gowl-t6">landed in</span>
+                        <span className="text-[16px] text-gowl-accent">{selectedRun.destination} →</span>
                       </div>
                     )}
                   </div>
 
                   {/* Cited facts */}
                   <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-                    <div className="mb-3 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.runsCitedFactsTitle}</div>
+                    <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.runsCitedFactsTitle}</div>
                     {selectedRun.cites.length === 0 ? (
-                      <div className="text-[13.5px] text-gowl-t5">No facts cited yet.</div>
+                      <div className="text-[16px] text-gowl-t5">No facts cited yet.</div>
                     ) : (
                       selectedRun.cites.map((cite, i) => (
                         <div key={i} className="flex gap-2.5 border-b border-gowl-row py-2 last:border-b-0">
                           <span className="mt-0.5 text-gowl-ok">✓</span>
-                          <span className="font-mono text-[12.5px] text-gowl-t3 leading-relaxed">{cite}</span>
+                          <span className="font-mono text-[15px] text-gowl-t3 leading-relaxed">{cite}</span>
                         </div>
                       ))
                     )}
-                    <div className="mt-3 text-[13px] leading-relaxed text-gowl-t6">{strings.runsCitedFactsNote}</div>
+                    <div className="mt-3 text-[15.5px] leading-relaxed text-gowl-t6">{strings.runsCitedFactsNote}</div>
                   </div>
                 </div>
 
@@ -216,7 +216,7 @@ export default function RunsRoute() {
                 <div className="flex flex-col gap-3.5">
                   {/* Run detail */}
                   <div className="rounded-lg border border-gowl-line bg-gowl-panel p-3.5">
-                    <div className="mb-2.5 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.runsDetailTitle}</div>
+                    <div className="mb-2.5 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.runsDetailTitle}</div>
                     {[
                       { label: "trigger", value: selectedRun.trigger },
                       { label: "input", value: selectedRun.input },
@@ -226,29 +226,29 @@ export default function RunsRoute() {
                       <div key={row.label} className={`grid grid-cols-[78px_1fr] gap-2.5 py-1.5 ${
                         i < 3 ? "border-b border-gowl-row" : ""
                       }`}>
-                        <span className="font-mono text-[11px] text-gowl-t6">{row.label}</span>
-                        <span className="text-[13px] text-gowl-t3">{row.value}</span>
+                        <span className="font-mono text-[13.5px] text-gowl-t6">{row.label}</span>
+                        <span className="text-[15.5px] text-gowl-t3">{row.value}</span>
                       </div>
                     ))}
                   </div>
 
                   {/* Tools called */}
                   <div className="rounded-lg border border-gowl-line bg-gowl-panel p-3.5">
-                    <div className="mb-2.5 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.runsToolsTitle}</div>
+                    <div className="mb-2.5 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.runsToolsTitle}</div>
                     <div className="flex flex-wrap gap-1.5">
                       {selectedRun.tools.map((tool) => (
-                        <span key={tool} className="rounded bg-gowl-input border border-gowl-line-2 px-1.5 py-0.5 font-mono text-[11.5px] text-gowl-t4">
+                        <span key={tool} className="rounded bg-gowl-input border border-gowl-line-2 px-1.5 py-0.5 font-mono text-[14px] text-gowl-t4">
                           {tool}
                         </span>
                       ))}
                     </div>
-                    <div className="mt-3 text-[13px] leading-relaxed text-gowl-t6">{strings.runsToolsNote}</div>
+                    <div className="mt-3 text-[15.5px] leading-relaxed text-gowl-t6">{strings.runsToolsNote}</div>
                   </div>
                 </div>
               </div>
             </>
           ) : (
-            <div className="flex h-full items-center justify-center text-[14.5px] text-gowl-t5">
+            <div className="flex h-full items-center justify-center text-[17px] text-gowl-t5">
               {strings.runsSelectRun}
             </div>
           )}

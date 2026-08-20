@@ -49,7 +49,7 @@ export function ProposalsTab({ glossaryId: _glossaryId }: { readonly glossaryId:
               key={f}
               type="button"
               onClick={() => setFilter(f)}
-              className={`rounded px-2.5 py-1 text-[12.5px] ${
+              className={`rounded px-2.5 py-1 text-[15px] ${
                 filter === f
                   ? "bg-gowl-accent text-gowl-accent-on"
                   : "text-gowl-t5 hover:text-gowl-t2"
@@ -63,7 +63,7 @@ export function ProposalsTab({ glossaryId: _glossaryId }: { readonly glossaryId:
 
       <div className="space-y-2">
         {filtered.length === 0 ? (
-          <p className="py-8 text-center text-[14px] text-gowl-t5">
+          <p className="py-8 text-center text-[16.5px] text-gowl-t5">
             {strings.studioNotYetBuiltProposals}
           </p>
         ) : (
@@ -73,28 +73,28 @@ export function ProposalsTab({ glossaryId: _glossaryId }: { readonly glossaryId:
               <div key={p.id} className="rounded-md border border-gowl-line bg-gowl-panel p-4">
                 <div className="mb-2 flex items-start justify-between">
                   <div>
-                    <span className="text-[14.5px] font-semibold text-gowl-t1">{p.term}</span>
-                    <span className={`ml-2 rounded-full px-2 py-0.5 font-mono text-[10px] ${ss.bg} ${ss.text}`}>
+                    <span className="text-[17px] font-semibold text-gowl-t1">{p.term}</span>
+                    <span className={`ml-2 rounded-full px-2 py-0.5 font-mono text-[12.5px] ${ss.bg} ${ss.text}`}>
                       {ss.label}
                     </span>
                   </div>
-                  <span className="text-[12.5px] text-gowl-t5">{p.submittedBy} · {p.submittedAt}</span>
+                  <span className="text-[15px] text-gowl-t5">{p.submittedBy} · {p.submittedAt}</span>
                 </div>
-                <p className="mb-2 text-[13.5px] leading-relaxed text-gowl-t3">{p.definition}</p>
+                <p className="mb-2 text-[16px] leading-relaxed text-gowl-t3">{p.definition}</p>
                 {p.reviewNote && (
-                  <div className="rounded bg-gowl-panel-2 px-3 py-1.5 text-[12.5px] text-gowl-t5">
+                  <div className="rounded bg-gowl-panel-2 px-3 py-1.5 text-[15px] text-gowl-t5">
                     Review: {p.reviewNote}
                   </div>
                 )}
                 {p.status === "pending" && (
                   <div className="mt-3 flex gap-2">
-                    <button type="button" className="rounded border border-gowl-ok-border bg-gowl-ok-bg px-2.5 py-1 text-[12px] text-gowl-ok">
+                    <button type="button" className="rounded border border-gowl-ok-border bg-gowl-ok-bg px-2.5 py-1 text-[14.5px] text-gowl-ok">
                       Approve
                     </button>
-                    <button type="button" className="rounded border border-gowl-line-2 px-2.5 py-1 text-[12px] text-gowl-t5">
+                    <button type="button" className="rounded border border-gowl-line-2 px-2.5 py-1 text-[14.5px] text-gowl-t5">
                       Request info
                     </button>
-                    <button type="button" className="rounded border border-gowl-bad-border bg-gowl-bad-bg px-2.5 py-1 text-[12px] text-gowl-bad">
+                    <button type="button" className="rounded border border-gowl-bad-border bg-gowl-bad-bg px-2.5 py-1 text-[14.5px] text-gowl-bad">
                       Reject
                     </button>
                   </div>

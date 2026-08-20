@@ -69,24 +69,24 @@ export function SearchBox() {
           onFocus={() => setOpen(true)}
           onBlur={() => setTimeout(() => setOpen(false), 150)}
           placeholder={strings.searchPlaceholder}
-          className="flex-1 bg-transparent text-[14.5px] text-gowl-t1 outline-none placeholder:text-gowl-t5"
+          className="flex-1 bg-transparent text-[17px] text-gowl-t1 outline-none placeholder:text-gowl-t5"
         />
-        <kbd className="rounded bg-gowl-kbd px-1.5 py-0.5 font-mono text-[12.5px] text-gowl-t4">
+        <kbd className="rounded bg-gowl-kbd px-1.5 py-0.5 font-mono text-[15px] text-gowl-t4">
           {strings.searchShortcut}
         </kbd>
       </div>
 
       {(open || asking || askResult !== null) && query.trim().length > 0 && (
         <div className="absolute top-full left-0 z-40 mt-1 max-h-96 w-full overflow-y-auto rounded-md border border-gowl-line bg-gowl-panel shadow-2xl">
-          {failed && <div className="p-3 text-[13.5px] text-gowl-bad">{strings.searchFailed}</div>}
+          {failed && <div className="p-3 text-[16px] text-gowl-bad">{strings.searchFailed}</div>}
           {!failed && results.length === 0 && (
-            <div className="p-3 text-[13.5px] text-gowl-t5">{strings.searchNoResults}</div>
+            <div className="p-3 text-[16px] text-gowl-t5">{strings.searchNoResults}</div>
           )}
           {results.map((r) => (
             <div key={`${r.kind}-${r.id}`} className="border-b border-gowl-line p-3 last:border-b-0">
-              <div className="font-mono text-[11.5px] tracking-widest text-gowl-t6">{kindLabel(r.kind)}</div>
-              <div className="mt-1 text-[14.5px] text-gowl-t1">{r.label}</div>
-              <div className="mt-0.5 font-mono text-[12.5px] text-gowl-t5">{r.fqn}</div>
+              <div className="font-mono text-[14px] tracking-widest text-gowl-t6">{kindLabel(r.kind)}</div>
+              <div className="mt-1 text-[17px] text-gowl-t1">{r.label}</div>
+              <div className="mt-0.5 font-mono text-[15px] text-gowl-t5">{r.fqn}</div>
             </div>
           ))}
 
@@ -96,24 +96,24 @@ export function SearchBox() {
               onMouseDown={(e) => e.preventDefault()}
               onClick={runAsk}
               disabled={asking}
-              className="text-[14px] text-gowl-accent disabled:opacity-60"
+              className="text-[16.5px] text-gowl-accent disabled:opacity-60"
             >
               {asking ? strings.searchAsking : `${strings.searchAskPrefix} "${query}"`}
             </button>
-            {!askResult && !asking && <p className="mt-1 text-[12px] text-gowl-t6">{strings.searchAskScopeNote}</p>}
+            {!askResult && !asking && <p className="mt-1 text-[14.5px] text-gowl-t6">{strings.searchAskScopeNote}</p>}
 
             {askResult?.kind === "noMatch" && (
-              <p className="mt-2 text-[13.5px] text-gowl-t5">{askResult.message}</p>
+              <p className="mt-2 text-[16px] text-gowl-t5">{askResult.message}</p>
             )}
             {askResult?.kind === "error" && (
-              <p className="mt-2 text-[13.5px] text-gowl-bad">{askResult.message}</p>
+              <p className="mt-2 text-[16px] text-gowl-bad">{askResult.message}</p>
             )}
             {askResult?.kind === "answered" && (
               <div className="mt-2">
-                <div className="font-mono text-[11px] tracking-widest text-gowl-t6">
+                <div className="font-mono text-[13.5px] tracking-widest text-gowl-t6">
                   {strings.searchAnswerHeading}
                 </div>
-                <p className="mt-1 whitespace-pre-wrap text-[14px] text-gowl-t1">
+                <p className="mt-1 whitespace-pre-wrap text-[16.5px] text-gowl-t1">
                   {askResult.narration ?? askResult.answer}
                 </p>
               </div>

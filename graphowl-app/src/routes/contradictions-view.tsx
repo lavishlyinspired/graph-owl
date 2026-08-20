@@ -23,11 +23,11 @@ export default function ContradictionsRoute() {
 
   return (
     <div className="p-8">
-      <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.contradictionsTitle}</h1>
-      <p className="mb-5 text-[14px] text-gowl-t5">{strings.contradictionsDescription}</p>
+      <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.contradictionsTitle}</h1>
+      <p className="mb-5 text-[16.5px] text-gowl-t5">{strings.contradictionsDescription}</p>
 
       <div className="max-w-[560px] rounded-lg border border-gowl-line bg-gowl-panel p-5">
-        <p className="mb-4 text-[14px] leading-relaxed text-gowl-t3">{strings.contradictionsScopeNote}</p>
+        <p className="mb-4 text-[16.5px] leading-relaxed text-gowl-t3">{strings.contradictionsScopeNote}</p>
         <div className="flex gap-2">
           <input
             value={id}
@@ -36,13 +36,13 @@ export default function ContradictionsRoute() {
               if (e.key === "Enter") open();
             }}
             placeholder={strings.contradictionsSearchPlaceholder}
-            className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 font-mono text-[13.5px] text-gowl-t1"
+            className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 font-mono text-[16px] text-gowl-t1"
           />
           <button
             type="button"
             onClick={open}
             disabled={id.trim().length === 0}
-            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
+            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-40"
           >
             {strings.contradictionsSearchSubmit}
           </button>

@@ -55,26 +55,26 @@ export function AlignmentReviewPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-[12.5px] text-gowl-t6">{strings.studioOntologyAlignmentsScopeNote}</p>
+      <p className="text-[15px] text-gowl-t6">{strings.studioOntologyAlignmentsScopeNote}</p>
 
-      {forbidden && <p className="text-[14px] text-gowl-bad">{strings.studioOntologyAlignmentsAdminOnly}</p>}
-      {message && <p className="text-[14px] text-gowl-t2">{message}</p>}
-      {error && <p className="text-[14px] text-gowl-bad">{strings.studioOntologyAlignmentsActionFailed}</p>}
+      {forbidden && <p className="text-[16.5px] text-gowl-bad">{strings.studioOntologyAlignmentsAdminOnly}</p>}
+      {message && <p className="text-[16.5px] text-gowl-t2">{message}</p>}
+      {error && <p className="text-[16.5px] text-gowl-bad">{strings.studioOntologyAlignmentsActionFailed}</p>}
 
       {!error && entries && entries.length === 0 && (
-        <p className="text-[14px] text-gowl-t5">{strings.studioOntologyAlignmentsEmpty}</p>
+        <p className="text-[16.5px] text-gowl-t5">{strings.studioOntologyAlignmentsEmpty}</p>
       )}
 
       {entries?.map((entry) => (
         <div key={entry.subject} className={PANEL}>
           <div className="mb-2 flex items-start justify-between gap-3">
-            <div className="text-[14.5px] text-gowl-t1">{describeAlignment(entry)}</div>
-            <span className="whitespace-nowrap font-mono text-[12px] text-gowl-t6">
+            <div className="text-[17px] text-gowl-t1">{describeAlignment(entry)}</div>
+            <span className="whitespace-nowrap font-mono text-[14.5px] text-gowl-t6">
               {formatConfidence(entry.confidence)}
             </span>
           </div>
 
-          <div className="mb-3 grid grid-cols-2 gap-3 text-[13px]">
+          <div className="mb-3 grid grid-cols-2 gap-3 text-[15.5px]">
             <div>
               <div className="text-gowl-t5">{strings.studioOntologyAlignmentsLeft}</div>
               <div className="break-all font-mono text-gowl-t2">{entry.left ?? "—"}</div>
@@ -85,12 +85,12 @@ export function AlignmentReviewPanel() {
             </div>
           </div>
 
-          <div className="mb-3 text-[12.5px] text-gowl-t5">
+          <div className="mb-3 text-[15px] text-gowl-t5">
             {`${strings.studioOntologyAlignmentsSource}: ${entry.sourceKind ?? "—"}${entry.sourceDetail ? ` — ${entry.sourceDetail}` : ""}`}
           </div>
 
           {entry.lossyReverse && (
-            <div className="mb-3 text-[12.5px] text-gowl-amber">{strings.studioOntologyAlignmentsLossyReverse}</div>
+            <div className="mb-3 text-[15px] text-gowl-amber">{strings.studioOntologyAlignmentsLossyReverse}</div>
           )}
 
           <div className="flex gap-2">
@@ -98,7 +98,7 @@ export function AlignmentReviewPanel() {
               type="button"
               disabled={busySubject === entry.subject}
               onClick={() => void act(entry, "confirm")}
-              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] text-gowl-bg disabled:opacity-40"
+              className="rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] text-gowl-bg disabled:opacity-40"
             >
               {strings.studioOntologyAlignmentsConfirm}
             </button>
@@ -106,7 +106,7 @@ export function AlignmentReviewPanel() {
               type="button"
               disabled={busySubject === entry.subject}
               onClick={() => void act(entry, "reject")}
-              className="rounded-md border border-gowl-bad px-3 py-1.5 text-[13.5px] text-gowl-bad disabled:opacity-40"
+              className="rounded-md border border-gowl-bad px-3 py-1.5 text-[16px] text-gowl-bad disabled:opacity-40"
             >
               {strings.studioOntologyAlignmentsReject}
             </button>

@@ -5,8 +5,8 @@ import { strings } from "../../lib/strings";
 
 const PANEL = "rounded-lg border border-gowl-line bg-gowl-panel";
 const PANEL_HEADER =
-  "border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[11px] tracking-widest text-gowl-t6";
-const ROW = "border-b border-gowl-row px-3 py-2 text-[14px] text-gowl-t2 last:border-b-0";
+  "border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[13.5px] tracking-widest text-gowl-t6";
+const ROW = "border-b border-gowl-row px-3 py-2 text-[16.5px] text-gowl-t2 last:border-b-0";
 
 /** Reltio's own model browser is the reference point here: a filterable
  *  list of entity types (classes) and their attributes/relationships,
@@ -35,7 +35,7 @@ export function OntologyStructureBrowser({ model }: { readonly model: OntologyMo
         onChange={(event) => setQuery(event.target.value)}
         placeholder={strings.studioOntologyFilterPlaceholder}
         aria-label={strings.studioOntologyFilterPlaceholder}
-        className="w-full max-w-sm rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[14px] text-gowl-t1"
+        className="w-full max-w-sm rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[16.5px] text-gowl-t1"
       />
 
       <div className="grid grid-cols-2 gap-4">
@@ -48,7 +48,7 @@ export function OntologyStructureBrowser({ model }: { readonly model: OntologyMo
             {classes.map((cls) => (
               <div key={cls.id} className={ROW}>
                 <div className="text-gowl-t1">{cls.name}</div>
-                <div className="mt-0.5 truncate font-mono text-[12px] text-gowl-t6">{cls.namespace}</div>
+                <div className="mt-0.5 truncate font-mono text-[14.5px] text-gowl-t6">{cls.namespace}</div>
               </div>
             ))}
           </div>
@@ -65,7 +65,7 @@ export function OntologyStructureBrowser({ model }: { readonly model: OntologyMo
             {relationships.map((rel) => (
               <div key={rel.id} className={ROW}>
                 <div className="text-gowl-t1">{rel.label}</div>
-                <div className="mt-0.5 font-mono text-[12px] text-gowl-t6">
+                <div className="mt-0.5 font-mono text-[14.5px] text-gowl-t6">
                   {`${nameOf.get(rel.from) ?? rel.from} → ${nameOf.get(rel.to) ?? rel.to}`}
                 </div>
               </div>

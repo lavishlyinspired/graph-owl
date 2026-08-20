@@ -161,16 +161,16 @@ export function MockGraph() {
     <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar */}
       <div className="flex h-[46px] flex-none items-center gap-2.5 border-b border-gowl-line bg-gowl-panel px-4">
-        <span className="text-[14.5px] font-semibold text-gowl-t1">Explore</span>
+        <span className="text-[17px] font-semibold text-gowl-t1">Explore</span>
         <span className="text-gowl-dim">/</span>
-        <span className="font-mono text-[13px] text-gowl-accent">gst:Supplier/27AABCU9603R1ZM</span>
+        <span className="font-mono text-[15.5px] text-gowl-accent">gst:Supplier/27AABCU9603R1ZM</span>
         <div className="ml-auto flex items-center gap-1.5">
           {["Relationship: all", "Confidence \u2265 0.5", "Depth 2", "Filters"].map((f) => (
-            <span key={f} className="cursor-pointer rounded-md border border-gowl-line-2 px-2.5 py-1 text-[13px] text-gowl-t4 hover:border-gowl-hover hover:text-gowl-t1">
+            <span key={f} className="cursor-pointer rounded-md border border-gowl-line-2 px-2.5 py-1 text-[15.5px] text-gowl-t4 hover:border-gowl-hover hover:text-gowl-t1">
               {f}<span className="text-gowl-t8">{"\u25BE"}</span>
             </span>
           ))}
-          <span className="cursor-pointer rounded-md bg-gowl-accent px-2.5 py-1 text-[13px] font-semibold text-gowl-accent-on">
+          <span className="cursor-pointer rounded-md bg-gowl-accent px-2.5 py-1 text-[15.5px] font-semibold text-gowl-accent-on">
             Save investigation
           </span>
         </div>
@@ -181,26 +181,26 @@ export function MockGraph() {
 
         {/* Investigation badge */}
         <div className="absolute left-4 top-4 rounded-lg border border-gowl-line bg-gowl-panel p-2.5" style={{ maxWidth: 250 }}>
-          <div className="mb-1.5 font-mono text-[11px] tracking-widest text-gowl-t6">INVESTIGATION &middot; FROM RECO NOW</div>
-          <div className="mb-2 text-[13.5px] text-gowl-t2">INV-1025 &middot; Aug amount mismatch</div>
+          <div className="mb-1.5 font-mono text-[13.5px] tracking-widest text-gowl-t6">INVESTIGATION &middot; FROM RECO NOW</div>
+          <div className="mb-2 text-[16px] text-gowl-t2">INV-1025 &middot; Aug amount mismatch</div>
           <div className="flex flex-wrap gap-1.5">
             {PINNED.map((p) => (
-              <span key={p} className="rounded border border-gowl-line-2 bg-gowl-row px-1.5 py-0.5 font-mono text-[11px] text-gowl-t4">{p}</span>
+              <span key={p} className="rounded border border-gowl-line-2 bg-gowl-row px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-t4">{p}</span>
             ))}
           </div>
         </div>
 
         {/* Zoom controls */}
         <div className="absolute right-4 top-4 flex flex-col gap-px overflow-hidden rounded-md border border-gowl-line" style={{ background: "var(--gowl-line)" }}>
-          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[14.5px] text-gowl-t5 hover:text-gowl-t1">+</button>
-          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[14.5px] text-gowl-t5 hover:text-gowl-t1">&minus;</button>
-          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[12.5px] text-gowl-t5 hover:text-gowl-t1">⤢</button>
+          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[17px] text-gowl-t5 hover:text-gowl-t1">+</button>
+          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[17px] text-gowl-t5 hover:text-gowl-t1">&minus;</button>
+          <button type="button" className="flex h-7 w-7 items-center justify-center bg-gowl-panel text-[15px] text-gowl-t5 hover:text-gowl-t1">⤢</button>
         </div>
 
         {/* Legend */}
         <div className="absolute bottom-4 left-4 flex gap-4 rounded-lg border border-gowl-line bg-gowl-panel px-3.5 py-2.5">
           {legend.map((g) => (
-            <div key={g.label} className="flex items-center gap-1.5 text-[12.5px] text-gowl-t5">
+            <div key={g.label} className="flex items-center gap-1.5 text-[15px] text-gowl-t5">
               <span aria-hidden className="inline-block w-[18px] border-t" style={{ borderTop: g.line }} />
               {g.label}
             </div>
@@ -227,7 +227,7 @@ export function MockGraph() {
           {edgeLabels.map((l, i) => (
             <div
               key={`el-${i}`}
-              className="pointer-events-none absolute whitespace-nowrap rounded bg-gowl-bg px-1.5 py-px font-mono text-[11px] tracking-wide"
+              className="pointer-events-none absolute whitespace-nowrap rounded bg-gowl-bg px-1.5 py-px font-mono text-[13.5px] tracking-wide"
               style={{ left: l.left, top: l.top, transform: "translate(-50%, -50%)", color: l.color }}
             >
               {l.text}
@@ -243,14 +243,14 @@ export function MockGraph() {
               style={{ left: n.left, top: n.top, transform: "translate(-50%, -50%)", cursor: "pointer" }}
             >
               <div
-                className="flex items-center justify-center rounded-full font-mono text-[11.5px]"
+                className="flex items-center justify-center rounded-full font-mono text-[14px]"
                 style={{ width: n.size, height: n.size, background: n.fill, border: n.border, boxShadow: n.glow, color: n.glyphColor }}
               >
                 {n.glyph}
               </div>
               <div className="text-center whitespace-nowrap">
-                <div className="text-[13px] font-medium" style={{ color: n.labelColor }}>{n.label}</div>
-                <div className="font-mono text-[11px] text-gowl-t7">{n.type}</div>
+                <div className="text-[15.5px] font-medium" style={{ color: n.labelColor }}>{n.label}</div>
+                <div className="font-mono text-[13.5px] text-gowl-t7">{n.type}</div>
               </div>
             </Link>
           ))}

@@ -32,7 +32,7 @@ export function QueriesTab() {
 
   return (
     <div>
-      <p className="mb-3 text-[14px] text-gowl-t5">{strings.workbenchDescription}</p>
+      <p className="mb-3 text-[16.5px] text-gowl-t5">{strings.workbenchDescription}</p>
 
       <div className="mb-3 flex gap-1 border-b border-gowl-line">
         {(["sparql", "cypher"] as const).map((l) => (
@@ -44,7 +44,7 @@ export function QueriesTab() {
               setResult(null);
               setError(null);
             }}
-            className={`px-3 py-2 text-[14px] ${
+            className={`px-3 py-2 text-[16.5px] ${
               lang === l ? "border-b-2 border-gowl-accent text-gowl-accent" : "text-gowl-t5 hover:text-gowl-t2"
             }`}
           >
@@ -58,22 +58,22 @@ export function QueriesTab() {
         onChange={(e) => setQuery(e.target.value)}
         placeholder={lang === "sparql" ? strings.sparqlPlaceholder : strings.cypherPlaceholder}
         rows={6}
-        className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[14px] text-gowl-t1"
+        className="mb-2 w-full rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[16.5px] text-gowl-t1"
       />
       <button
         type="button"
         disabled={busy || query.trim().length === 0}
         onClick={() => void run()}
-        className="mb-4 rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
+        className="mb-4 rounded-md bg-gowl-accent px-4 py-1.5 text-[16px] font-semibold text-gowl-accent-on disabled:opacity-40"
       >
         {strings.sparqlRun}
       </button>
 
-      {error && <p className="text-[14.5px] text-gowl-bad">{error}</p>}
+      {error && <p className="text-[17px] text-gowl-bad">{error}</p>}
 
       {result && (
         <div>
-          <div className="mb-3 flex gap-6 font-mono text-[13.5px] text-gowl-t1">
+          <div className="mb-3 flex gap-6 font-mono text-[16px] text-gowl-t1">
             <span>
               {strings.sparqlRows} {result.rows.length}
             </span>
@@ -85,14 +85,14 @@ export function QueriesTab() {
             </span>
           </div>
           {result.rows.length === 0 ? (
-            <p className="text-[14.5px] text-gowl-t5">{strings.sparqlNoRows}</p>
+            <p className="text-[17px] text-gowl-t5">{strings.sparqlNoRows}</p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-gowl-line bg-gowl-panel">
-              <table className="w-full text-left text-[13.5px]">
+              <table className="w-full text-left text-[16px]">
                 <thead>
                   <tr className="border-b border-gowl-line bg-gowl-panel-2">
                     {result.variables.map((variable) => (
-                      <th key={variable} className="px-3 py-2 font-mono text-[11px] tracking-wider text-gowl-t6">
+                      <th key={variable} className="px-3 py-2 font-mono text-[13.5px] tracking-wider text-gowl-t6">
                         {variable}
                       </th>
                     ))}
@@ -115,7 +115,7 @@ export function QueriesTab() {
         </div>
       )}
 
-      {!result && !error && <p className="text-[14.5px] text-gowl-t5">{strings.sparqlEmpty}</p>}
+      {!result && !error && <p className="text-[17px] text-gowl-t5">{strings.sparqlEmpty}</p>}
     </div>
   );
 }

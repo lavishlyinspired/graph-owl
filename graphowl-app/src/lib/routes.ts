@@ -21,18 +21,37 @@
  *  at all. Renaming the console's own route slugs is the contained fix;
  *  the API surface is the versioned, documented, SDK-generating product
  *  surface and does not move for a client's convenience. Nav labels
- *  (`nav.ts`) are unchanged — only the URL segment differs from the label. */
+ *  (`nav.ts`) are unchanged — only the URL segment differs from the label.
+ *
+ *  The same bug, found again 21 August 2026: `validation`, `contradictions`
+ *  and `resolution` collide the same way, but through `vite.config.ts`'s
+ *  dev-only proxy rather than axum directly — `/validation/report`,
+ *  `/resolution/queue` etc. are real API calls the app makes, so those
+ *  proxy prefixes can't be removed, and any full browser navigation
+ *  (a hard refresh, a typed URL, a bookmark — not React Router's own
+ *  client-side `<Link>`, which never touches the network) to bare
+ *  `/validation`, `/contradictions` or `/resolution` gets forwarded
+ *  straight to `graph-owl-server` on :8080 instead of reaching Vite's SPA
+ *  fallback, and renders whatever stale build that origin happens to be
+ *  serving. Renamed to `validation-view`/`contradictions-view`/
+ *  `resolution-view`, matching `drift-view`'s existing precedent exactly
+ *  — moot for routing purposes since, per the next paragraph, none of the
+ *  five are routes any more, but the collision-avoidant names stayed
+ *  since the files themselves (and their component names) did not move.
+ *
+ *  21 August 2026: `validation-view`, `contradictions-view`,
+ *  `resolution-view`, `drift-view` and `governance` folded into one
+ *  `govern` route with five tabs (`routes/govern.tsx`), the same way
+ *  Vocabulary Studio absorbs its own nine tabs under `studio` — one nav
+ *  slot, not five. The five component files are unchanged and still
+ *  exported the same way; only their standalone routes are gone. */
 
 export const ROUTES = [
   "home",
   "explore",
   "entity",
   "knowledge",
-  "validation",
-  "contradictions",
-  "resolution",
-  "drift-view",
-  "governance",
+  "govern",
   "sources",
   "connectors",
   "pipeline",

@@ -56,10 +56,10 @@ export default function StudioRoute() {
   useEffect(load, []);
 
   if (error) {
-    return <div className="p-8 text-[14.5px] text-gowl-bad">{strings.studioError}</div>;
+    return <div className="p-8 text-[17px] text-gowl-bad">{strings.studioError}</div>;
   }
   if (!glossaries) {
-    return <div className="p-8 text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>;
+    return <div className="p-8 text-[17px] text-gowl-t5">{strings.studioLoading}</div>;
   }
 
   const runCreateGlossary = async () => {
@@ -79,17 +79,17 @@ export default function StudioRoute() {
     <div className="p-8 pb-4">
       <div className="mb-2 flex items-baseline justify-between gap-4">
         <div>
-          <h1 className="text-[22.5px] font-semibold text-gowl-t1">{strings.studioTitle}</h1>
-          <p className="text-[14px] text-gowl-t5">{strings.studioDescription}</p>
+          <h1 className="text-[25px] font-semibold text-gowl-t1">{strings.studioTitle}</h1>
+          <p className="text-[16.5px] text-gowl-t5">{strings.studioDescription}</p>
         </div>
         <div className="flex items-end gap-2">
           <div>
-            <div className="mb-1 text-[12.5px] text-gowl-t5">{strings.studioGlossaryPicker}</div>
+            <div className="mb-1 text-[15px] text-gowl-t5">{strings.studioGlossaryPicker}</div>
             <select
               value={selectedGlossaryId ?? ""}
               onChange={(e) => setSelectedGlossaryId(e.target.value || null)}
               aria-label={strings.studioGlossaryPicker}
-              className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[14px] text-gowl-t1"
+              className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[16.5px] text-gowl-t1"
             >
               {glossaries.map((g) => (
                 <option key={g.id} value={g.id}>
@@ -102,13 +102,13 @@ export default function StudioRoute() {
             value={newGlossaryName}
             onChange={(e) => setNewGlossaryName(e.target.value)}
             placeholder={strings.studioGlossaryNamePlaceholder}
-            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[13.5px] text-gowl-t1"
+            className="rounded-md border border-gowl-line-2 bg-gowl-input px-2.5 py-1.5 text-[16px] text-gowl-t1"
           />
           <button
             type="button"
             disabled={busy || newGlossaryName.trim().length === 0}
             onClick={runCreateGlossary}
-            className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
+            className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t2 disabled:opacity-40"
           >
             {strings.studioNewGlossary}
           </button>
@@ -121,7 +121,7 @@ export default function StudioRoute() {
             key={t}
             type="button"
             onClick={() => setTab(t)}
-            className={`px-3 py-2 text-[14px] ${
+            className={`px-3 py-2 text-[16.5px] ${
               tab === t ? "border-b-2 border-gowl-accent text-gowl-accent" : "text-gowl-t5 hover:text-gowl-t2"
             }`}
           >
@@ -131,7 +131,7 @@ export default function StudioRoute() {
       </div>
 
       {!selectedGlossaryId ? (
-        <p className="text-[14.5px] text-gowl-t5">{strings.studioNoGlossaries}</p>
+        <p className="text-[17px] text-gowl-t5">{strings.studioNoGlossaries}</p>
       ) : (
         <>
           {tab === "build" && <BuildTab glossaryId={selectedGlossaryId} />}

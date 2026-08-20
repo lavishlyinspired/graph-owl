@@ -532,6 +532,100 @@ export function revokeWaiver(id: string): Promise<void> {
   return apiDelete(`/validation/waivers/${encodeURIComponent(id)}`);
 }
 
+// ---- Shapes: seed, preview, import — Plan 126, closing the "why is this
+// all zero" gap: no UI previously existed to trigger any of this. ----
+
+export interface ShapeFlake {
+  readonly s: string;
+  readonly p: string;
+  readonly o: string;
+  readonly t: number;
+}
+
+export interface RunValidationResult {
+  readonly conforms: boolean;
+  readonly violations: number;
+  readonly warnings: number;
+  readonly info: number;
+  readonly shapes: number;
+  readonly refusedShapes: number;
+  readonly computedAtT: number;
+  readonly sparqlTruncated: boolean;
+}
+
+export function runValidation(): Promise<RunValidationResult> {
+  return apiPost<RunValidationResult>("/validation/runs", {});
+}
+
+export interface ShapesPreviewViolation {
+  readonly shape: string;
+  readonly focusNode: string;
+  readonly path: string | null;
+  readonly constraint: string;
+  readonly severity: Severity;
+  readonly message: string;
+  readonly actual: string | null;
+  readonly suggestion: unknown;
+}
+
+export interface ShapeConstraintDetail {
+  readonly path: string | null;
+  readonly kind: string;
+  readonly detail: string;
+}
+
+export interface ShapeTargetDetail {
+  readonly kind: string;
+  readonly value: unknown;
+}
+
+/** A shape's own target/constraints in plain language — what "57 flakes
+ *  written" could never say on its own. */
+export interface ShapeDetail {
+  readonly id: string;
+  readonly target: ShapeTargetDetail;
+  readonly severity: Severity;
+  readonly message: string | null;
+  readonly constraints: readonly ShapeConstraintDetail[];
+}
+
+/** Tagged the same way `ontology_editor_preview`'s three-response family
+ *  already is (`kind`), so one reader handles `/seed` (the built-in set),
+ *  `/preview` (nothing written) and `/import` (written for real) alike —
+ *  they differ only in which shapes and whether anything was written,
+ *  never in the shape of the answer. */
+export type ShapesPreviewResult =
+  | {
+      readonly kind: "syntaxError";
+      readonly message: string;
+      readonly line: number | null;
+      readonly column: number | null;
+    }
+  | {
+      readonly kind: "checked";
+      readonly shapes: number;
+      readonly shapeDetails: readonly ShapeDetail[];
+      readonly refusedShapes: readonly string[];
+      readonly flakes: readonly ShapeFlake[];
+      readonly conforms: boolean;
+      readonly violations: number;
+      readonly warnings: number;
+      readonly info: number;
+      readonly sample: readonly ShapesPreviewViolation[];
+    };
+
+export function seedCoreShapes(): Promise<ShapesPreviewResult> {
+  return apiPost<ShapesPreviewResult>("/validation/shapes/seed", {});
+}
+
+export function previewShapes(document: string): Promise<ShapesPreviewResult> {
+  return apiPost<ShapesPreviewResult>("/validation/shapes/preview", { format: "turtle", document });
+}
+
+export function importShapes(document: string): Promise<ShapesPreviewResult> {
+  return apiPost<ShapesPreviewResult>("/validation/shapes/import", { format: "turtle", document });
+}
+
 export interface AssignFindingRequest {
   readonly shape: string;
   readonly focusNode: string;

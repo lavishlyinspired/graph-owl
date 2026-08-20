@@ -21,24 +21,24 @@ export default function QualityRoute() {
   return (
     <div className="p-8">
       <div className="mb-5">
-        <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.qualityTitle}</h1>
-        <p className="text-[14px] text-gowl-t5">{strings.qualityDescription}</p>
+        <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.qualityTitle}</h1>
+        <p className="text-[16.5px] text-gowl-t5">{strings.qualityDescription}</p>
       </div>
 
       <div className="space-y-4">
         {METRICS.map((metric) => (
           <div key={metric.name} className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
             <div className="mb-2 flex items-baseline justify-between">
-              <span className="text-[14.5px] font-semibold text-gowl-t1">{metric.name}</span>
+              <span className="text-[17px] font-semibold text-gowl-t1">{metric.name}</span>
               <div className="flex items-baseline gap-3">
-                <span className="font-mono text-[13.5px] text-gowl-t5">{metric.trend}</span>
-                <span className="font-mono text-[19.5px] text-gowl-t1">{metric.score}</span>
+                <span className="font-mono text-[16px] text-gowl-t5">{metric.trend}</span>
+                <span className="font-mono text-[22px] text-gowl-t1">{metric.score}</span>
               </div>
             </div>
             <div className="mb-2 h-2 rounded-full bg-gowl-track">
               <div className="h-2 rounded-full" style={{ width: metric.width, backgroundColor: metric.color }} />
             </div>
-            <p className="text-[13px] text-gowl-t5">{metric.description}</p>
+            <p className="text-[15.5px] text-gowl-t5">{metric.description}</p>
           </div>
         ))}
       </div>

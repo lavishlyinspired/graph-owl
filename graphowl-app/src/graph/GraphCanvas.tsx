@@ -471,7 +471,7 @@ export function GraphCanvas({
       <div className="flex flex-none flex-wrap items-center gap-3 border-b border-gowl-line bg-gowl-panel px-4 py-2">
         <button
           type="button"
-          className="ml-auto rounded-md border border-gowl-line-2 px-2 py-1 text-[12.5px] text-gowl-t4 hover:border-gowl-hover"
+          className="ml-auto rounded-md border border-gowl-line-2 px-2 py-1 text-[15px] text-gowl-t4 hover:border-gowl-hover"
           onClick={toggleFullscreen}
         >
           {fullscreen ? strings.exploreFullscreenExit : strings.exploreFullscreenEnter}
@@ -518,7 +518,7 @@ export function GraphCanvas({
         {(legend.length > 0 || edgeLegend.length > 0) && (
           <div className="pointer-events-none absolute bottom-4 left-4 flex flex-wrap items-center gap-4 rounded-lg border border-gowl-line bg-gowl-panel px-3.5 py-2.5">
             {legend.map((entry) => (
-              <div key={entry.key} className="flex items-center gap-1.5 text-[12.5px] text-gowl-t5">
+              <div key={entry.key} className="flex items-center gap-1.5 text-[15px] text-gowl-t5">
                 <span
                   aria-hidden
                   className="inline-block h-2.5 w-2.5 rounded-full"
@@ -528,7 +528,7 @@ export function GraphCanvas({
               </div>
             ))}
             {edgeLegend.map((entry) => (
-              <div key={entry.key} className="flex items-center gap-1.5 text-[12.5px] text-gowl-t5">
+              <div key={entry.key} className="flex items-center gap-1.5 text-[15px] text-gowl-t5">
                 <span
                   aria-hidden
                   className="inline-block w-[18px]"

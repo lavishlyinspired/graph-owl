@@ -118,19 +118,19 @@ export default function AgentsRoute() {
     <div className="overflow-y-auto p-8">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.agentsTitle}</h1>
-          <p className="text-[14px] text-gowl-t5">{strings.agentsDescription}</p>
+          <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.agentsTitle}</h1>
+          <p className="text-[16.5px] text-gowl-t5">{strings.agentsDescription}</p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[13.5px] text-gowl-t2"
+            className="rounded-md border border-gowl-line-2 px-4 py-1.5 text-[16px] text-gowl-t2"
           >
             {strings.agentsPolicies}
           </button>
           <button
             type="button"
-            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[13.5px] font-semibold text-gowl-accent-on"
+            className="rounded-md bg-gowl-accent px-4 py-1.5 text-[16px] font-semibold text-gowl-accent-on"
           >
             {strings.agentsNewGrant}
           </button>
@@ -141,9 +141,9 @@ export default function AgentsRoute() {
       <div className="mb-6 grid grid-cols-5 gap-px overflow-hidden rounded-lg border border-gowl-line bg-gowl-line">
         {KPI_STATS.map((stat) => (
           <div key={stat.label} className="bg-gowl-panel p-4">
-            <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">{stat.label}</div>
-            <div className={`font-mono text-[21.5px] ${stat.color ?? "text-gowl-t1"}`}>{stat.value}</div>
-            <div className="mt-1 text-[12.5px] text-gowl-t7">{stat.sub}</div>
+            <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">{stat.label}</div>
+            <div className={`font-mono text-[24px] ${stat.color ?? "text-gowl-t1"}`}>{stat.value}</div>
+            <div className="mt-1 text-[15px] text-gowl-t7">{stat.sub}</div>
           </div>
         ))}
       </div>
@@ -154,37 +154,37 @@ export default function AgentsRoute() {
         <div className="space-y-6">
           {/* Pipeline Visualization */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsPipelineTitle}
             </div>
-            <p className="mb-4 text-[13px] text-gowl-t5">{strings.agentsPipelineSubtitle}</p>
+            <p className="mb-4 text-[15.5px] text-gowl-t5">{strings.agentsPipelineSubtitle}</p>
             <div className="flex items-center gap-2 overflow-x-auto">
               {PIPELINE_STAGES.map((stage, i) => (
                 <div key={stage.tag} className="flex items-center gap-2">
                   <div className={`flex-none rounded-lg border ${stage.borderColor} ${stage.bgColor} p-3`}>
-                    <div className="mb-1 font-mono text-[9.5px] tracking-widest text-gowl-t6">{stage.tag}</div>
-                    <div className="text-[13.5px] font-semibold text-gowl-t1">{stage.name}</div>
-                    <div className="mt-0.5 text-[11.5px] text-gowl-t5">{stage.detail}</div>
+                    <div className="mb-1 font-mono text-[12px] tracking-widest text-gowl-t6">{stage.tag}</div>
+                    <div className="text-[16px] font-semibold text-gowl-t1">{stage.name}</div>
+                    <div className="mt-0.5 text-[14px] text-gowl-t5">{stage.detail}</div>
                   </div>
                   {i < PIPELINE_STAGES.length - 1 && (
-                    <span className="flex-none font-mono text-[15.5px] text-gowl-t6">→</span>
+                    <span className="flex-none font-mono text-[18px] text-gowl-t6">→</span>
                   )}
                 </div>
               ))}
             </div>
-            <p className="mt-3 text-[12px] leading-relaxed text-gowl-t5">
+            <p className="mt-3 text-[14.5px] leading-relaxed text-gowl-t5">
               {strings.agentsPipelineNote}
             </p>
           </div>
 
           {/* Agents Table */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsRosterTitle}
             </div>
-            <p className="mb-4 text-[12.5px] text-gowl-t5">{strings.agentsRosterSubtitle}</p>
+            <p className="mb-4 text-[15px] text-gowl-t5">{strings.agentsRosterSubtitle}</p>
             <div className="overflow-hidden rounded-md border border-gowl-line-2">
-              <div className="grid grid-cols-[1.5fr_150px_118px_92px_150px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[10px] tracking-wider text-gowl-t6">
+              <div className="grid grid-cols-[1.5fr_150px_118px_92px_150px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-3 py-2 font-mono text-[12.5px] tracking-wider text-gowl-t6">
                 <span>{strings.agentsColAgent}</span>
                 <span>{strings.agentsColTrigger}</span>
                 <span>{strings.agentsColRuns}</span>
@@ -200,22 +200,22 @@ export default function AgentsRoute() {
                   >
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="text-[14px] text-gowl-t1">{agent.name}</span>
-                        <span className={`rounded-full px-1.5 py-0.5 font-mono text-[9.5px] ${ms.bg} ${ms.text}`}>
+                        <span className="text-[16.5px] text-gowl-t1">{agent.name}</span>
+                        <span className={`rounded-full px-1.5 py-0.5 font-mono text-[12px] ${ms.bg} ${ms.text}`}>
                           {agent.mode}
                         </span>
                       </div>
-                      <div className="mt-0.5 text-[12px] text-gowl-t5">{agent.desc}</div>
+                      <div className="mt-0.5 text-[14.5px] text-gowl-t5">{agent.desc}</div>
                     </div>
                     <div>
-                      <div className="text-[13px] text-gowl-t2">{agent.trigger}</div>
-                      <div className="font-mono text-[11.5px] text-gowl-t5">{agent.next}</div>
+                      <div className="text-[15.5px] text-gowl-t2">{agent.trigger}</div>
+                      <div className="font-mono text-[14px] text-gowl-t5">{agent.next}</div>
                     </div>
                     <div>
-                      <div className="font-mono text-[13.5px] text-gowl-t1">{agent.runs}</div>
-                      <div className="font-mono text-[11.5px] text-gowl-t5">{agent.tokens} tokens</div>
+                      <div className="font-mono text-[16px] text-gowl-t1">{agent.runs}</div>
+                      <div className="font-mono text-[14px] text-gowl-t5">{agent.tokens} tokens</div>
                     </div>
-                    <div className={`font-mono text-[13.5px] ${parseFloat(agent.grounding) > 95 ? "text-gowl-ok" : "text-gowl-amber"}`}>
+                    <div className={`font-mono text-[16px] ${parseFloat(agent.grounding) > 95 ? "text-gowl-ok" : "text-gowl-amber"}`}>
                       {agent.grounding}
                     </div>
                     <div className="flex items-center gap-3">
@@ -233,7 +233,7 @@ export default function AgentsRoute() {
                           style={{ marginLeft: agent.on ? "auto" : "2px", marginRight: agent.on ? "2px" : "auto" }}
                         />
                       </div>
-                      <button type="button" className="text-[12.5px] text-gowl-accent">
+                      <button type="button" className="text-[15px] text-gowl-accent">
                         Run now
                       </button>
                     </div>
@@ -245,34 +245,34 @@ export default function AgentsRoute() {
 
           {/* Run Trace */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsTraceTitle}
             </div>
-            <div className="mb-3 font-mono text-[11.5px] text-gowl-t5">
+            <div className="mb-3 font-mono text-[14px] text-gowl-t5">
               {strings.agentsTraceMeta}
             </div>
-            <p className="mb-4 text-[14px] text-gowl-t2">
+            <p className="mb-4 text-[16.5px] text-gowl-t2">
               {strings.agentsTraceQuestion}
             </p>
             <div className="space-y-2">
               {TRACE_STEPS.map((step, i) => (
                 <div key={i} className="flex items-center gap-3 rounded-md border border-gowl-line-2 bg-gowl-panel-2 px-3 py-2">
-                  <span className="flex-none font-mono text-[11.5px] text-gowl-t6">{i + 1}</span>
-                  <span className="flex-none font-mono text-[12.5px] text-gowl-accent">{step.tool}</span>
-                  <span className="flex-1 truncate font-mono text-[12px] text-gowl-t4">{step.args}</span>
-                  <span className="flex-none font-mono text-[11.5px] text-gowl-t5">{step.tokens} tok</span>
-                  <span className="flex-none font-mono text-[11.5px] text-gowl-t5">{step.latency}</span>
+                  <span className="flex-none font-mono text-[14px] text-gowl-t6">{i + 1}</span>
+                  <span className="flex-none font-mono text-[15px] text-gowl-accent">{step.tool}</span>
+                  <span className="flex-1 truncate font-mono text-[14.5px] text-gowl-t4">{step.args}</span>
+                  <span className="flex-none font-mono text-[14px] text-gowl-t5">{step.tokens} tok</span>
+                  <span className="flex-none font-mono text-[14px] text-gowl-t5">{step.latency}</span>
                 </div>
               ))}
             </div>
             <div className="mt-4 rounded-md border border-gowl-accent-border bg-gowl-accent-deep p-3">
-              <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-accent">
+              <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-accent">
                 {strings.agentsAnswerTitle}
               </div>
-              <p className="text-[13.5px] leading-relaxed text-gowl-t2">
+              <p className="text-[16px] leading-relaxed text-gowl-t2">
                 {strings.agentsAnswerBody}
               </p>
-              <div className="mt-2 text-[12px] text-gowl-t5">{strings.agentsAnswerCite}</div>
+              <div className="mt-2 text-[14.5px] text-gowl-t5">{strings.agentsAnswerCite}</div>
             </div>
           </div>
         </div>
@@ -281,15 +281,15 @@ export default function AgentsRoute() {
         <div className="space-y-6">
           {/* Model Usage */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsModelTitle}
             </div>
             <div className="space-y-3">
               {MODEL_USAGE.map((model) => (
                 <div key={model.name}>
                   <div className="mb-1 flex items-baseline justify-between">
-                    <span className="text-[13.5px] text-gowl-t2">{model.name}</span>
-                    <span className="font-mono text-[12.5px] text-gowl-t5">{model.tokens}</span>
+                    <span className="text-[16px] text-gowl-t2">{model.name}</span>
+                    <span className="font-mono text-[15px] text-gowl-t5">{model.tokens}</span>
                   </div>
                   <div className="h-2 rounded-full bg-gowl-track">
                     <div
@@ -297,16 +297,16 @@ export default function AgentsRoute() {
                       style={{ width: model.width, backgroundColor: model.color }}
                     />
                   </div>
-                  <div className="mt-0.5 text-[11.5px] text-gowl-t6">{model.use}</div>
+                  <div className="mt-0.5 text-[14px] text-gowl-t6">{model.use}</div>
                 </div>
               ))}
             </div>
             <div className="mt-4 border-t border-gowl-line pt-3">
-              <div className="flex justify-between text-[13.5px]">
+              <div className="flex justify-between text-[16px]">
                 <span className="text-gowl-t2">{strings.agentsSpendLabel}</span>
                 <span className="font-mono text-gowl-t1">$1,284</span>
               </div>
-              <div className="mt-1 flex justify-between text-[13.5px]">
+              <div className="mt-1 flex justify-between text-[16px]">
                 <span className="text-gowl-t2">{strings.agentsBudgetLabel}</span>
                 <span className="font-mono text-gowl-amber">64% of $2,000</span>
               </div>
@@ -315,18 +315,18 @@ export default function AgentsRoute() {
 
           {/* Guardrails */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsGuardrailsTitle}
             </div>
             <div className="space-y-3">
               {GUARDRAILS.map((item, i) => (
                 <div key={i} className="flex items-start gap-2.5">
-                  <span className={`mt-0.5 flex-none text-[15.5px] ${item.ok ? "text-gowl-ok" : "text-gowl-amber"}`}>
+                  <span className={`mt-0.5 flex-none text-[18px] ${item.ok ? "text-gowl-ok" : "text-gowl-amber"}`}>
                     {item.ok ? "✓" : "!"}
                   </span>
                   <div>
-                    <div className="text-[13.5px] text-gowl-t2">{item.text}</div>
-                    <div className="mt-0.5 text-[12px] text-gowl-t5">{item.meta}</div>
+                    <div className="text-[16px] text-gowl-t2">{item.text}</div>
+                    <div className="mt-0.5 text-[14.5px] text-gowl-t5">{item.meta}</div>
                   </div>
                 </div>
               ))}
@@ -335,14 +335,14 @@ export default function AgentsRoute() {
 
           {/* MCP Tools Cloud */}
           <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-            <div className="mb-4 font-mono text-[11px] tracking-widest text-gowl-t6">
+            <div className="mb-4 font-mono text-[13.5px] tracking-widest text-gowl-t6">
               {strings.agentsMcpTitle}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {MCP_TOOLS.map((tool) => (
                 <span
                   key={tool}
-                  className="rounded border border-gowl-line-2 bg-gowl-input px-2 py-1 font-mono text-[11.5px] text-gowl-t4"
+                  className="rounded border border-gowl-line-2 bg-gowl-input px-2 py-1 font-mono text-[14px] text-gowl-t4"
                 >
                   {tool}
                 </span>

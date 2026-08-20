@@ -37,7 +37,7 @@ describe("pageTitleForPath", () => {
   // screen — AppShell renders one (visually hidden) sourced from this, since
   // the console's own visual design has no on-screen page title.
   it("resolves a bare route to its nav label", () => {
-    expect(pageTitleForPath("/validation")).toBe("Validation");
+    expect(pageTitleForPath("/govern")).toBe("Govern");
   });
 
   it("resolves a route carrying a deep-linked id segment", () => {

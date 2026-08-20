@@ -43,7 +43,7 @@ function TreeNodeRow({
         type="button"
         onClick={() => onSelect(node.renderKey)}
         style={{ paddingLeft: `${8 + node.depth * 16}px` }}
-        className={`block w-full truncate py-1 text-left text-[14px] hover:text-gowl-accent ${
+        className={`block w-full truncate py-1 text-left text-[16.5px] hover:text-gowl-accent ${
           node.termId === selectedTermId ? "text-gowl-accent" : "text-gowl-t2"
         }`}
       >
@@ -108,7 +108,7 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
   const byRenderKey = useMemo(() => (tree ? indexByRenderKey(tree.roots) : new Map()), [tree]);
 
   if (!terms) {
-    return <div className="text-[14.5px] text-gowl-t5">{strings.studioLoading}</div>;
+    return <div className="text-[17px] text-gowl-t5">{strings.studioLoading}</div>;
   }
 
   const selected = terms.find((t) => t.id === selectedTermId) ?? null;
@@ -175,19 +175,19 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
             value={newTermName}
             onChange={(e) => setNewTermName(e.target.value)}
             placeholder={strings.buildTermNamePlaceholder}
-            className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[13.5px] text-gowl-t1"
+            className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[16px] text-gowl-t1"
           />
           <button
             type="button"
             disabled={busy || newTermName.trim().length === 0}
             onClick={runCreate}
-            className="rounded-md bg-gowl-accent px-2 py-1 text-[12.5px] font-semibold text-gowl-accent-on disabled:opacity-40"
+            className="rounded-md bg-gowl-accent px-2 py-1 text-[15px] font-semibold text-gowl-accent-on disabled:opacity-40"
           >
             {strings.buildNewTerm}
           </button>
         </div>
         {tree && tree.roots.length === 0 ? (
-          <p className="text-[13.5px] text-gowl-t5">{strings.buildTreeEmpty}</p>
+          <p className="text-[16px] text-gowl-t5">{strings.buildTreeEmpty}</p>
         ) : (
           tree?.roots.map((root) => (
             <TreeNodeRow key={root.renderKey} node={root} selectedTermId={selectedTermId} onSelect={select} />
@@ -197,45 +197,45 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
 
       <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
         {!selected ? (
-          <p className="text-[14.5px] text-gowl-t5">{strings.buildDetailPlaceholder}</p>
+          <p className="text-[17px] text-gowl-t5">{strings.buildDetailPlaceholder}</p>
         ) : (
           <div>
             <div className="mb-3 flex items-start justify-between">
-              <div className="text-[17.5px] font-semibold text-gowl-t1">{selected.name}</div>
-              <button type="button" disabled={busy} onClick={runDelete} className="text-[13.5px] text-gowl-bad">
+              <div className="text-[20px] font-semibold text-gowl-t1">{selected.name}</div>
+              <button type="button" disabled={busy} onClick={runDelete} className="text-[16px] text-gowl-bad">
                 {strings.buildDeleteTerm}
               </button>
             </div>
             {selectedNode?.isCyclic && (
-              <p className="mb-3 rounded-md border border-gowl-amber-border bg-gowl-amber-bg p-2 text-[13.5px] text-gowl-amber">
+              <p className="mb-3 rounded-md border border-gowl-amber-border bg-gowl-amber-bg p-2 text-[16px] text-gowl-amber">
                 {strings.buildCyclicNotice}
               </p>
             )}
 
             <div className="mb-3">
-              <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildDefinition}</div>
-              <p className="text-[14px] text-gowl-t2">{selected.definition || "—"}</p>
+              <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildDefinition}</div>
+              <p className="text-[16.5px] text-gowl-t2">{selected.definition || "—"}</p>
             </div>
             <div className="mb-3 grid grid-cols-3 gap-3">
               <div>
-                <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildStatus}</div>
-                <p className="text-[14px] text-gowl-t2">{selected.status}</p>
+                <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildStatus}</div>
+                <p className="text-[16.5px] text-gowl-t2">{selected.status}</p>
               </div>
               <div>
-                <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildSynonyms}</div>
-                <p className="text-[14px] text-gowl-t2">{selected.synonyms.join(", ") || "—"}</p>
+                <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildSynonyms}</div>
+                <p className="text-[16.5px] text-gowl-t2">{selected.synonyms.join(", ") || "—"}</p>
               </div>
               <div>
-                <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildAbbreviations}</div>
-                <p className="text-[14px] text-gowl-t2">{selected.abbreviations.join(", ") || "—"}</p>
+                <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildAbbreviations}</div>
+                <p className="text-[16.5px] text-gowl-t2">{selected.abbreviations.join(", ") || "—"}</p>
               </div>
             </div>
 
             <div className="mb-3">
-              <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildRelations}</div>
-              {relations && relations.length === 0 && <p className="text-[13.5px] text-gowl-t5">{strings.buildNoRelations}</p>}
+              <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildRelations}</div>
+              {relations && relations.length === 0 && <p className="text-[16px] text-gowl-t5">{strings.buildNoRelations}</p>}
               {relations?.map((relation, index) => (
-                <div key={index} className="flex items-center justify-between border-b border-gowl-row py-1 text-[13.5px]">
+                <div key={index} className="flex items-center justify-between border-b border-gowl-row py-1 text-[16px]">
                   <span className="text-gowl-t2">
                     <span className="font-mono text-gowl-t6">{relation.kind}</span> {relation.target}
                   </span>
@@ -249,7 +249,7 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
                   value={relationKind}
                   onChange={(e) => setRelationKind(e.target.value as SkosRelationKind)}
                   aria-label={strings.buildRelationKind}
-                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[12.5px] text-gowl-t1"
+                  className="rounded-md border border-gowl-line-2 bg-gowl-input px-1.5 py-1 text-[15px] text-gowl-t1"
                 >
                   {RELATION_KINDS.map((kind) => (
                     <option key={kind} value={kind}>
@@ -261,13 +261,13 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
                   value={relationTarget}
                   onChange={(e) => setRelationTarget(e.target.value)}
                   placeholder={strings.buildRelationTarget}
-                  className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[12.5px] text-gowl-t1"
+                  className="flex-1 rounded-md border border-gowl-line-2 bg-gowl-input px-2 py-1 text-[15px] text-gowl-t1"
                 />
                 <button
                   type="button"
                   disabled={busy || relationTarget.trim().length === 0}
                   onClick={runAddRelation}
-                  className="rounded-md border border-gowl-line-2 px-2 py-1 text-[12.5px] text-gowl-t2 disabled:opacity-40"
+                  className="rounded-md border border-gowl-line-2 px-2 py-1 text-[15px] text-gowl-t2 disabled:opacity-40"
                 >
                   {strings.buildAddRelation}
                 </button>
@@ -275,11 +275,11 @@ export function BuildTab({ glossaryId }: { readonly glossaryId: string }) {
             </div>
 
             <div>
-              <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.buildUsage}</div>
-              {usage && usage.length === 0 && <p className="text-[13.5px] text-gowl-t5">{strings.buildNoUsage}</p>}
+              <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.buildUsage}</div>
+              {usage && usage.length === 0 && <p className="text-[16px] text-gowl-t5">{strings.buildNoUsage}</p>}
               <ul>
                 {usage?.map((fqn) => (
-                  <li key={fqn} className="font-mono text-[13px] text-gowl-t2">
+                  <li key={fqn} className="font-mono text-[15.5px] text-gowl-t2">
                     {fqn}
                   </li>
                 ))}

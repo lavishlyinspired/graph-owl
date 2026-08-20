@@ -19,11 +19,11 @@ function RejectedList({ rejected }: { readonly rejected: readonly (readonly [str
   if (rejected.length === 0) return null;
   return (
     <div className="mt-2">
-      <div className="font-mono text-[11px] tracking-widest text-gowl-t6">
+      <div className="font-mono text-[13.5px] tracking-widest text-gowl-t6">
         {strings.studioOntologyEditorRejectedHeading}
       </div>
       {rejected.map(([subject, reason]) => (
-        <p key={subject} className="text-[13.5px] text-gowl-bad">
+        <p key={subject} className="text-[16px] text-gowl-bad">
           {`${subject}: ${reason}`}
         </p>
       ))}
@@ -85,12 +85,12 @@ export function OntologyEditorPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-[12.5px] text-gowl-t6">{strings.studioOntologyEditorScopeNote}</p>
+      <p className="text-[15px] text-gowl-t6">{strings.studioOntologyEditorScopeNote}</p>
 
-      {forbidden && <p className="text-[14px] text-gowl-bad">{strings.studioOntologyEditorAdminOnly}</p>}
+      {forbidden && <p className="text-[16.5px] text-gowl-bad">{strings.studioOntologyEditorAdminOnly}</p>}
 
       {current && (
-        <p className="font-mono text-[12.5px] text-gowl-t6">
+        <p className="font-mono text-[15px] text-gowl-t6">
           {`${strings.studioOntologyEditorCurrentlyDeclared}: ${current.classes.length} classes · ${current.relationships.length} relationships`}
         </p>
       )}
@@ -100,7 +100,7 @@ export function OntologyEditorPanel() {
         onChange={(event) => setDocument(event.target.value)}
         placeholder={strings.studioOntologyEditorPlaceholder}
         spellCheck={false}
-        className="min-h-[280px] rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[13.5px] text-gowl-t1"
+        className="min-h-[280px] rounded-md border border-gowl-line-2 bg-gowl-input p-3 font-mono text-[16px] text-gowl-t1"
       />
 
       <div className="flex gap-2">
@@ -108,7 +108,7 @@ export function OntologyEditorPanel() {
           type="button"
           disabled={busy}
           onClick={runPreview}
-          className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
+          className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t2 disabled:opacity-40"
         >
           {strings.studioOntologyEditorPreview}
         </button>
@@ -116,7 +116,7 @@ export function OntologyEditorPanel() {
           type="button"
           disabled={busy}
           onClick={runCheck}
-          className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[13.5px] text-gowl-t2 disabled:opacity-40"
+          className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t2 disabled:opacity-40"
         >
           {strings.studioOntologyEditorCheck}
         </button>
@@ -124,7 +124,7 @@ export function OntologyEditorPanel() {
           type="button"
           disabled={busy}
           onClick={runSave}
-          className="rounded-md bg-gowl-accent px-3 py-1.5 text-[13.5px] text-gowl-bg disabled:opacity-40"
+          className="rounded-md bg-gowl-accent px-3 py-1.5 text-[16px] text-gowl-bg disabled:opacity-40"
         >
           {strings.studioOntologyEditorSave}
         </button>
@@ -133,13 +133,13 @@ export function OntologyEditorPanel() {
       {preview && (
         <div className={PANEL}>
           {preview.kind === "syntaxError" ? (
-            <p className="text-[14px] text-gowl-bad">{`Syntax error: ${preview.message}`}</p>
+            <p className="text-[16.5px] text-gowl-bad">{`Syntax error: ${preview.message}`}</p>
           ) : (
             <div>
-              <div className="font-mono text-[11px] tracking-widest text-gowl-t6">
+              <div className="font-mono text-[13.5px] tracking-widest text-gowl-t6">
                 {strings.studioOntologyEditorDeclaredHeading}
               </div>
-              <p className="text-[14px] text-gowl-t2">{preview.declared.join(", ") || "—"}</p>
+              <p className="text-[16.5px] text-gowl-t2">{preview.declared.join(", ") || "—"}</p>
             </div>
           )}
         </div>
@@ -147,14 +147,14 @@ export function OntologyEditorPanel() {
 
       {check && (
         <div className={PANEL}>
-          <p className="text-[14px] text-gowl-t2">{formatOntologyCheckSummary(check)}</p>
+          <p className="text-[16.5px] text-gowl-t2">{formatOntologyCheckSummary(check)}</p>
           {check.kind === "checked" && <RejectedList rejected={check.rejected} />}
         </div>
       )}
 
       {save && (
         <div className={PANEL}>
-          <p className={`text-[14px] ${save.kind === "saved" ? "text-gowl-ok" : "text-gowl-bad"}`}>
+          <p className={`text-[16.5px] ${save.kind === "saved" ? "text-gowl-ok" : "text-gowl-bad"}`}>
             {formatOntologySaveSummary(save)}
           </p>
           {save.kind === "saved" && <RejectedList rejected={save.rejected} />}

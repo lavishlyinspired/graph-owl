@@ -25,8 +25,8 @@ export default function KnowledgeRoute() {
   return (
     <div className="flex h-full flex-col overflow-auto">
       <div className="border-b border-gowl-line bg-gowl-panel px-8 py-5">
-        <div className="mb-1 text-[22.5px] font-semibold text-gowl-t1">{strings.knowledgeTitle}</div>
-        <div className="text-[14px] text-gowl-t5">{strings.knowledgeSubtitle}</div>
+        <div className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.knowledgeTitle}</div>
+        <div className="text-[16.5px] text-gowl-t5">{strings.knowledgeSubtitle}</div>
       </div>
 
       <div className="p-8">
@@ -39,15 +39,15 @@ export default function KnowledgeRoute() {
             { label: "GST PACK", value: "v1.4.2", color: "text-gowl-accent" },
           ].map((kpi) => (
             <div key={kpi.label} className="bg-gowl-panel p-4">
-              <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">{kpi.label}</div>
-              <div className={`font-mono text-[21.5px] font-medium ${kpi.color}`}>{kpi.value}</div>
+              <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">{kpi.label}</div>
+              <div className={`font-mono text-[24px] font-medium ${kpi.color}`}>{kpi.value}</div>
             </div>
           ))}
         </div>
 
         {/* Packs table */}
         <div className="mb-5 overflow-hidden rounded-lg border border-gowl-line bg-gowl-panel">
-          <div className="grid grid-cols-[1.3fr_100px_1fr_110px_96px] gap-3 border-b border-gowl-line px-4 py-2.5 font-mono text-[11px] tracking-widest text-gowl-t6">
+          <div className="grid grid-cols-[1.3fr_100px_1fr_110px_96px] gap-3 border-b border-gowl-line px-4 py-2.5 font-mono text-[13.5px] tracking-widest text-gowl-t6">
             <span>{strings.knowledgeInstalled.replace("INSTALLED", "PACK")}</span>
             <span>{strings.knowledgePackVersion}</span>
             <span>{strings.knowledgePackContents}</span>
@@ -60,13 +60,13 @@ export default function KnowledgeRoute() {
               className="grid grid-cols-[1.3fr_100px_1fr_110px_96px] items-center gap-3 border-b border-gowl-row px-4 py-3 last:border-b-0"
             >
               <div>
-                <div className="text-[14px] text-gowl-t1">{pack.name}</div>
-                <div className="font-mono text-[11.5px] text-gowl-t6">{pack.namespace}</div>
+                <div className="text-[16.5px] text-gowl-t1">{pack.name}</div>
+                <div className="font-mono text-[14px] text-gowl-t6">{pack.namespace}</div>
               </div>
-              <span className="font-mono text-[12.5px] text-gowl-t3">{pack.version}</span>
-              <span className="text-[13px] text-gowl-t4">{pack.contents}</span>
-              <span className="font-mono text-[12.5px] text-gowl-t5">{pack.updated}</span>
-              <span className={`font-mono text-[12.5px] ${STATE_COLORS[pack.state]}`}>
+              <span className="font-mono text-[15px] text-gowl-t3">{pack.version}</span>
+              <span className="text-[15.5px] text-gowl-t4">{pack.contents}</span>
+              <span className="font-mono text-[15px] text-gowl-t5">{pack.updated}</span>
+              <span className={`font-mono text-[15px] ${STATE_COLORS[pack.state]}`}>
                 {pack.state === "active" ? strings.knowledgeActive
                   : pack.state === "disabled" ? strings.knowledgeDisabled
                   : strings.knowledgeUpdate}
@@ -77,8 +77,8 @@ export default function KnowledgeRoute() {
 
         {/* Architecture rule note */}
         <div className="rounded-lg border border-gowl-line bg-gowl-panel p-5">
-          <div className="mb-2 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.knowledgeArchitectureRule}</div>
-          <div className="text-[14px] text-gowl-t4">{strings.knowledgeArchitectureBody}</div>
+          <div className="mb-2 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.knowledgeArchitectureRule}</div>
+          <div className="text-[16.5px] text-gowl-t4">{strings.knowledgeArchitectureBody}</div>
         </div>
       </div>
     </div>

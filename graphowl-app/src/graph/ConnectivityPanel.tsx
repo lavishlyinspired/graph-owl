@@ -44,24 +44,24 @@ export function ConnectivityPanel({
   }, [cacheKey]);
 
   if (error) {
-    return <p className="text-[13px] text-gowl-bad">{strings.connectivityFailed}</p>;
+    return <p className="text-[15.5px] text-gowl-bad">{strings.connectivityFailed}</p>;
   }
   if (!analytics) {
-    return <p className="text-[13px] text-gowl-t5">{strings.connectivityLoading}</p>;
+    return <p className="text-[15.5px] text-gowl-t5">{strings.connectivityLoading}</p>;
   }
 
   const rows = connectivityRows(analytics, names);
   if (rows.length === 0) {
-    return <p className="text-[13px] text-gowl-t5">{strings.connectivityEmpty}</p>;
+    return <p className="text-[15.5px] text-gowl-t5">{strings.connectivityEmpty}</p>;
   }
 
   return (
     <div>
-      <div className="mb-1 font-mono text-[11px] tracking-widest text-gowl-t6">{strings.connectivityTitle}</div>
-      <p className="mb-2 text-[12.5px] text-gowl-t5">{strings.connectivityHint}</p>
-      <p className="mb-2 text-[12.5px] text-gowl-t3">{describeAnalytics(analytics)}</p>
+      <div className="mb-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">{strings.connectivityTitle}</div>
+      <p className="mb-2 text-[15px] text-gowl-t5">{strings.connectivityHint}</p>
+      <p className="mb-2 text-[15px] text-gowl-t3">{describeAnalytics(analytics)}</p>
       <div className="overflow-hidden rounded-md border border-gowl-line">
-        <div className="grid grid-cols-[1fr_60px_60px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-2 py-1 font-mono text-[11px] tracking-widest text-gowl-t6">
+        <div className="grid grid-cols-[1fr_60px_60px] gap-2 border-b border-gowl-line bg-gowl-panel-2 px-2 py-1 font-mono text-[13.5px] tracking-widest text-gowl-t6">
           <span>{strings.connectivityColNode}</span>
           <span className="text-right">{strings.connectivityColIncoming}</span>
           <span className="text-right">{strings.connectivityColOutgoing}</span>
@@ -69,7 +69,7 @@ export function ConnectivityPanel({
         {rows.map((row) => (
           <div
             key={row.id}
-            className="grid grid-cols-[1fr_60px_60px] gap-2 border-b border-gowl-row px-2 py-1 text-[13px] text-gowl-t2 last:border-b-0"
+            className="grid grid-cols-[1fr_60px_60px] gap-2 border-b border-gowl-row px-2 py-1 text-[15.5px] text-gowl-t2 last:border-b-0"
           >
             <span className="truncate" title={row.orphan ? strings.connectivityOrphanTag : row.label}>
               {row.orphan ? `${row.label} ⚠` : row.label}

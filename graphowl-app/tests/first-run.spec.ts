@@ -34,12 +34,11 @@ test("the rail is keyboard-reachable and every group's first destination renders
   const routes = [
     "/home",
     "/explore",
-    "/lineage-view",
-    "/validation",
-    "/sources",
     "/studio",
+    "/govern",
+    "/sources",
     "/analytics",
-    "/workbench",
+    "/knowledge",
   ];
 
   for (const route of routes) {
