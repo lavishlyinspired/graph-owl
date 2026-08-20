@@ -1,0 +1,65 @@
+# RecoNow — the Python backend and frontend, which plans/119 §3.5 found had
+# no CI at all: "nothing Python is in CI". The backend suite needs Postgres
+# (the repo tests create a fresh database per test); a service container on
+# the port the test fixtures default to keeps the workflow and local runs on
+# the same DSN.
+
+name: reconow
+
+on:
+  pull_request:
+    paths:
+      - "ext-apps/RecoNow/**"
+      - ".github/workflows/reconow.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ext-apps/RecoNow/**"
+      - ".github/workflows/reconow.yml"
+
+jobs:
+  backend:
+    name: backend pytest
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55000:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        working-directory: ext-apps/RecoNow/backend
+        run: pip install -r requirements.txt
+      - name: Backend suite
+        working-directory: ext-apps/RecoNow/backend
+        run: python -m pytest -q
+
+  frontend:
+    name: frontend vitest + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        working-directory: ext-apps/RecoNow/frontend
+        run: npm ci
+      - name: Typecheck
+        working-directory: ext-apps/RecoNow/frontend
+        run: npx tsc -b
+      - name: Frontend suite
+        working-directory: ext-apps/RecoNow/frontend
+        run: npx vitest run

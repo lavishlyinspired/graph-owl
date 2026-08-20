@@ -460,3 +460,49 @@ async def list_rule_outcomes(
         }
         for r in rows
     ]
+
+
+def _jsonable(value: Any) -> Any:
+    """Agent-run records carry whatever the run recorded — Decimals among
+    them (a case's amount). `json.dumps` cannot serialize Decimal, and a
+    failed serialization must not lose the run."""
+    import decimal
+
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+async def insert_agent_run(conn: asyncpg.Connection, *, record: dict[str, Any]) -> None:
+    """Persist one run's full record (spans, writes, refusals included).
+
+    Not client-scoped, deliberately: the run record is the audit trail of a
+    background process, not a workflow entity, and the list view is
+    deployment-wide. The cases it worked from are scoped; the trace of how
+    they got there is an operator's view.
+    """
+    await conn.execute(
+        "INSERT INTO agent_run (id, agent, event, status, record) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING",
+        record["id"], record.get("agent", "unknown"),
+        record.get("event", "unknown"), record.get("status", "unknown"),
+        json.dumps(_jsonable(record)),
+    )
+
+
+async def list_agent_runs(conn: asyncpg.Connection, *, limit: int = 500) -> list[dict[str, Any]]:
+    """Newest first. Bounded because the list view is a screen, not an
+    export; a full trace is one `get_agent_run` away."""
+    rows = await conn.fetch(
+        "SELECT record FROM agent_run ORDER BY started_at DESC LIMIT $1", limit
+    )
+    return [json.loads(r["record"]) for r in rows]
+
+
+async def get_agent_run(conn: asyncpg.Connection, *, run_id: str) -> dict[str, Any] | None:
+    row = await conn.fetchrow("SELECT record FROM agent_run WHERE id = $1", run_id)
+    return None if row is None else json.loads(row["record"])

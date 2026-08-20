@@ -77,13 +77,6 @@ def _find_portal_match(portal_records: list[dict], book: dict) -> dict | None:
     for record in portal_records:
         if invoice_key(record.get("supplier_gstin", ""), record.get("invoice_no", "")) == exact_key:
             return record
-    fuzzy_key = normalize_invoice_no(book.get("invoice_no", ""))
-    gstin = normalize_gstin(book.get("supplier_gstin", ""))
-    if not fuzzy_key:
-        return None
-    for record in portal_records:
-        if normalize_gstin(record.get("supplier_gstin", "")) == gstin and normalize_invoice_no(record.get("invoice_no", "")) == fuzzy_key:
-            return record
     return None
 
 
@@ -119,7 +112,7 @@ def reconcile(books: list[dict], portal: list[dict], tolerance: float = 1.0) -> 
                 reason = REASON_AMOUNT_DIFF
                 diff = max(taxable_diff, tax_diff)
 
-        itc = tax_book if match is not None else tax_book
+        itc = tax_book
 
         results.append(
             {
@@ -231,9 +224,10 @@ def classify_mismatches(results: list[dict]) -> list[dict]:
     for item in classifications:
         if item["key"] == "amount_discrepancy":
             itc = round(sum(r["tax_diff"] for r in item["rows"]), 2)
-        elif item["key"] == "only_in_portal":
-            itc = 0.0
         else:
+            # Only-in-portal carries its real tax: credit available on the
+            # portal that nobody booked is unclaimed, not absent — reporting
+            # it as zero hid the one bucket a reviewer can act on alone.
             itc = round(sum(r["itc"] for r in item["rows"]), 2)
         output.append(
             {
@@ -258,6 +252,15 @@ def classify_mismatches(results: list[dict]) -> list[dict]:
 
 
 def supplier_health(results: list[dict]) -> list[dict]:
+    """A rollup of what this period showed per supplier — nothing more.
+
+    This used to attach `risk: "Chronic Non-Filer"` to every supplier with
+    any at-risk row and a blank `filing_6mo` beside it. That is a filing
+    history this function never looked at, and one disputed invoice became a
+    permanent-sounding judgement about a third party, printed on the
+    dashboard and in exports. Cross-period recurrence — the only honest basis
+    for such a label — is computed where the data for it exists:
+    `capabilities.supplier_pattern`."""
     by_supplier: dict[str, dict] = {}
     for row in results:
         if row["status"] not in (STATUS_ONLY_BOOKS, STATUS_REVIEW):
@@ -266,17 +269,18 @@ def supplier_health(results: list[dict]) -> list[dict]:
         key = view["gstin"]
         entry = by_supplier.setdefault(
             key,
-            {"gstin": view["gstin"], "supplier": view["supplier"], "itc": 0.0},
+            {"gstin": view["gstin"], "supplier": view["supplier"], "itc": 0.0,
+             "at_risk_invoices": 0},
         )
         value = row["tax_diff"] if row["status"] == STATUS_REVIEW else row["itc"]
         entry["itc"] = round(entry["itc"] + value, 2)
+        entry["at_risk_invoices"] += 1
     return [
         {
             "gstin": entry["gstin"],
             "supplier": entry["supplier"],
-            "filing_6mo": "",
+            "at_risk_invoices": entry["at_risk_invoices"],
             "itc": entry["itc"],
-            "risk": "Chronic Non-Filer",
         }
         for entry in by_supplier.values()
     ]

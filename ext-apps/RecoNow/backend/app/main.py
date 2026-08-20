@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from graph_owl_packs.loader import LoadError, load_pack
 from graph_owl_packs.reconcile import run_findings
 
@@ -59,6 +59,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _optional_bearer_auth(request, call_next):
+    """Identity, when the deployment asks for it.
+
+    Every route trusts the `client_id` in the URL, and row-level isolation is
+    tested — but isolation without identity is a courtesy, not a control.
+    Setting `RECONOW_API_TOKEN` gates every `/api` route behind a bearer
+    token; unset keeps the single-firm desktop default open. `/api/health`
+    stays open so a load balancer can still probe the process.
+    """
+    token = os.environ.get("RECONOW_API_TOKEN")
+    if (
+        token
+        and request.url.path.startswith("/api/")
+        and request.url.path != "/api/health"
+        and request.headers.get("authorization") != f"Bearer {token}"
+    ):
+        return JSONResponse(status_code=401, content={"detail": "unauthenticated"})
+    return await call_next(request)
+
 
 SESSION: dict = {}
 
@@ -389,7 +411,10 @@ async def _connect_db() -> None:
 
 def _require_db_pool():
     pool = getattr(app.state, "db_pool", None)
-    if pool is None:
+    # A closed pool is not a configured one: startup's best-effort connect can
+    # leave a stale handle behind (a restarted database, a test's torn-down
+    # fixture), and handing it out turns every route into a 500.
+    if pool is None or pool.is_closing():
         raise HTTPException(status_code=503, detail="database not configured — set DATABASE_URL")
     return pool
 
@@ -1066,6 +1091,7 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
     # period's cases, decides something, and leaves a trace of both. Nothing
     # subscribed before, which is why every agent in this product had to be
     # clicked.
+    runs_before = len(AGENT_RUNS)
     woken = wake_agents(
         "reconciliation.finished",
         cases=await _cases_for(client_id, period_id),
@@ -1073,6 +1099,17 @@ async def reconcile_route(client_id: str, period_id: str) -> dict:
         period_id=period_id,
         findings=result.found,
     )
+
+    # The trace is the audit trail; it used to live in a capped module global
+    # and evaporate on restart. Persisted beside the cases it was produced
+    # from — best-effort like every other graph-owl/db integration point: a
+    # run that was recorded in memory must not fail the request that made it.
+    try:
+        async with pool.acquire() as conn:
+            for record in AGENT_RUNS[runs_before:]:
+                await repo.insert_agent_run(conn, record=record)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] agent-run persistence skipped — {exc}")
 
     return {
         "ok": True,
@@ -1569,16 +1606,18 @@ def wake_agents(event: str, cases: list[dict] | None = None, **context) -> list[
 
 @app.get("/api/agents/runs")
 async def agent_runs_route(agent: str | None = None, status: str | None = None) -> dict:
-    """Every agent run this process has performed, newest first.
+    """Every agent run this deployment has performed, newest first.
 
-    **The screen that did not exist.** There was no history of what an agent
-    did, no way to see what was running, and nothing to report on.
-
-    Each entry carries its span *counts* rather than its spans — a list view
-    that ships every trace is a list view nobody can load. The full trace is
-    one call away at `/api/agents/runs/{id}`.
+    Read from the durable store when one is configured — the runs survive a
+    restart there — and from process memory otherwise, which is all a
+    database-less desktop session has.
     """
-    runs = list(reversed(AGENT_RUNS))
+    pool = getattr(app.state, "db_pool", None)
+    if pool is not None:
+        async with pool.acquire() as conn:
+            runs = await repo.list_agent_runs(conn)
+    else:
+        runs = list(reversed(AGENT_RUNS))
     if agent:
         runs = [r for r in runs if r.get("agent") == agent]
     if status:
@@ -1605,6 +1644,11 @@ async def agent_run_detail_route(run_id: str) -> dict:
     is *what did it look at before it decided that*.
     """
     run = next((r for r in AGENT_RUNS if r.get("id") == run_id), None)
+    if run is None:
+        pool = getattr(app.state, "db_pool", None)
+        if pool is not None:
+            async with pool.acquire() as conn:
+                run = await repo.get_agent_run(conn, run_id=run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="no such run")
     return run
@@ -1671,14 +1715,22 @@ async def agent_subscriptions_route() -> dict:
 
     An agent fleet whose wiring is not inspectable is one nobody can reason
     about after an incident.
+
+    `implemented` names which subscriptions have code behind them: seven of
+    the ten below are declared but not yet built, and a screen that lists
+    them indistinguishably from the real ones advertises a fleet that does
+    not exist.
     """
     return {
         "subscriptions": [
-            {"agent": s.agent, "event": s.event}
+            {"agent": s.agent, "event": s.event, "implemented": s.agent in agents.AGENTS}
             for s in sorted(agent_runtime.DEFAULT_SUBSCRIPTIONS, key=lambda s: (s.event, s.agent))
         ],
         "grants": sorted(
-            {"agent": a, "capability": c} for a, c in AGENT_REGISTRY._grants
+            ({"agent": a, "capability": c} for a, c in AGENT_REGISTRY._grants),
+            # Dicts have no ordering; sort on the pair. Grants exist from
+            # module import, so this route 500'd on every call until now.
+            key=lambda g: (g["agent"], g["capability"]),
         )
         if AGENT_REGISTRY._grants
         else [],
@@ -2692,7 +2744,15 @@ def _run_graphowl_reconcile() -> None:
     be running at all, and that must degrade `_select_results` to the
     Python fallback rather than fail the endpoint."""
     try:
-        result = run_findings(graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
+        # Scoped to what this session actually uploaded, plus the pack's own
+        # vocabulary and law graphs — the same discipline `reconcile_route`
+        # applies via `reconcile_scope`. Unscoped, the rules read the whole
+        # store, and another client's data could satisfy or trigger a rule
+        # about this session's files.
+        scope = [f"reco-{kind}" for kind in SESSION.get("datasets", {})] + list(PACK_GRAPHS)
+        result = run_findings(
+            graphowl_client.PACK_ID, GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN, graphs=scope
+        )
         findings = graphowl_client.list_findings(GRAPH_OWL_SERVER, GRAPH_OWL_TOKEN)
         SESSION["graphowl_reconcile"] = {
             "evaluated": result.evaluated,
@@ -2884,17 +2944,26 @@ def ai_act_summary() -> dict:
     def _build(job: dict) -> str:
         summary = ai.ai_summary(stats, classifications)
         if not summary:
-            summary = (
-                f"{stats['match_rate']}% of {stats['total']} invoices matched, confirming ITC of "
-                f"{rc.display_tax(stats['confirmed_itc'])}. "
-                f"{stats['only_books']} supplier non-filing item(s) and {stats['review']} amount "
-                f"discrepancy item(s) put {rc.display_tax(stats['at_risk_itc'])} of ITC at risk, "
-                f"reducing net GSTR-3B Table 4 credit to {rc.display_tax(stats['gross_itc'])}."
-            )
+            summary = _fallback_summary(stats, classifications)
         return summary
 
     job_id = _start_ai_job(1, _build)
     return {"ok": True, "job_id": job_id}
+
+
+def _fallback_summary(stats: dict, classifications: list[dict]) -> str:
+    """The deterministic summary when no model is available.
+
+    `gross_itc` is matched + review + portal-only tax — never the net, and
+    never the GSTR-3B Table 4 figure, both of which this used to call it."""
+    return (
+        f"{stats['match_rate']}% of {stats['total']} invoices matched, confirming ITC of "
+        f"{rc.display_tax(stats['confirmed_itc'])}. "
+        f"{stats['only_books']} supplier non-filing item(s) and {stats['review']} amount "
+        f"discrepancy item(s) put {rc.display_tax(stats['at_risk_itc'])} of ITC at risk. "
+        f"Gross ITC across matched, review and portal-only invoices is "
+        f"{rc.display_tax(stats['gross_itc'])}."
+    )
 
 
 def _template_report(stats: dict, classifications: list[dict], period: dict) -> str:
@@ -2919,7 +2988,8 @@ def _template_report(stats: dict, classifications: list[dict], period: dict) -> 
         f"\n## Recommended Actions\n\n"
         f"1. Follow up with suppliers whose invoices are missing from GSTR-2B so they file GSTR-1.\n"
         f"2. Verify amount discrepancies with suppliers before filing GSTR-3B.\n"
-        f"3. Claim eligible ITC in GSTR-3B Table 4 up to {rc.display_tax(stats['gross_itc'])}.\n"
+        f"3. Claim the confirmed ITC of {rc.display_tax(stats['confirmed_itc'])} in GSTR-3B Table 4; "
+        f"the {rc.display_tax(stats['at_risk_itc'])} at risk follows only once the items above are resolved.\n"
     )
     return report
 

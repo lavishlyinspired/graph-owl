@@ -142,9 +142,10 @@ def generate_client_report(period: dict, stats: dict, classifications: list[dict
         f"Amount discrepancies: {stats.get('review', 0)}\n"
         f"In books, not in GSTR-2B: {stats.get('only_books', 0)}\n"
         f"In GSTR-2B, not in books: {stats.get('only_gstr2b', 0)}\n"
-        f"ITC confirmed: INR {stats.get('confirmed_itc', 0):,.0f}\n"
+        f"ITC confirmed on matched invoices: INR {stats.get('confirmed_itc', 0):,.0f}\n"
         f"ITC at risk: INR {stats.get('at_risk_itc', 0):,.0f}\n"
-        f"Net ITC for GSTR-3B Table 4: INR {stats.get('gross_itc', 0):,.0f}\n\n"
+        f"Gross ITC across matched, review and portal-only invoices (not the filed Table 4 figure): "
+        f"INR {stats.get('gross_itc', 0):,.0f}\n\n"
         f"Risk classifications:\n{risk_summary}\n\n"
         f"Recommended IMS actions:\n{ims_summary}\n\n"
         "Write the report with sections: Executive Summary, Findings, Risk Assessment, "
@@ -167,7 +168,8 @@ def ai_summary(stats: dict, classifications: list[dict]) -> str | None:
         f"Match rate: {stats.get('match_rate', 0)}%. "
         f"Matched: {stats.get('matched', 0)} invoices with ITC of INR {stats.get('confirmed_itc', 0):,.0f}. "
         f"At-risk items: {risk}. "
-        f"Net ITC available for GSTR-3B Table 4: INR {stats.get('gross_itc', 0):,.0f}. "
+        f"Gross ITC across matched, review and portal-only invoices is "
+        f"INR {stats.get('gross_itc', 0):,.0f} — do not call this the net or the GSTR-3B Table 4 figure. "
         "Write the summary."
     )
     return chat(system, user)

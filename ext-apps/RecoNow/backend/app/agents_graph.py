@@ -15,6 +15,7 @@ failed call is the dangerous direction, and the one a reviewer would act on.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from .agent_runtime import AgentRun, GrantRevoked, Registry
@@ -25,6 +26,13 @@ from .mcp_client import McpError
 #: — a quarter is the shortest span over which "always" is defensible, and
 #: stating it twice with two values would be worse than stating it twice.
 RECURRING_PERIODS = 3
+
+#: A GSTIN is 15 characters: 2 state code, 10 PAN, 1 entity, 1 'Z', 1 checksum.
+#: `SUPPLIER_HISTORY` interpolates the GSTIN into a SPARQL string, and
+#: ingestion only *warns* on a malformed one — so the shape is enforced here,
+#: at the point of interpolation, or a value containing a quote reaches the
+#: query intact. Same pattern as `data_quality._GSTIN`.
+_GSTIN_SHAPE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z][Z][0-9A-Z]$")
 
 #: What to ask the graph about one supplier. Every finding it has ever been
 #: named in, with the period, so recurrence is counted rather than guessed.
@@ -80,15 +88,20 @@ def run_supplier_risk(
         except McpError as exc:
             unchecked = f"could not recall prior judgements: {exc}"
 
-        try:
-            with run.span("tool", "mcp:query_graph") as span:
-                span.record(input={"gstin": gstin})
-                answer = mcp("query_graph", {"query": SUPPLIER_HISTORY % gstin})
-                rows = answer.get("rows") or []
-                periods = {str(r.get("period")) for r in rows if r.get("period")}
-                span.record(output={"rows": len(rows), "periods": len(periods)})
-        except McpError as exc:
-            unchecked = f"could not read this supplier's history: {exc}"
+        if not _GSTIN_SHAPE.match(str(gstin)):
+            # Never interpolated into a query. A malformed GSTIN is a data
+            # problem for a human, not a string this agent puts into SPARQL.
+            unchecked = "supplier GSTIN is not well-formed — history query not run"
+        else:
+            try:
+                with run.span("tool", "mcp:query_graph") as span:
+                    span.record(input={"gstin": gstin})
+                    answer = mcp("query_graph", {"query": SUPPLIER_HISTORY % gstin})
+                    rows = answer.get("rows") or []
+                    periods = {str(r.get("period")) for r in rows if r.get("period")}
+                    span.record(output={"rows": len(rows), "periods": len(periods)})
+            except McpError as exc:
+                unchecked = f"could not read this supplier's history: {exc}"
 
         assessments.append(
             {
