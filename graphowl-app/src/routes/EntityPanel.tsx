@@ -20,12 +20,14 @@ import {
   findPaths,
   pinToInvestigation,
   recallMemories,
+  resolveAsset,
   reviewContradiction,
   type Asset,
   type AssetVersion,
   type Finding,
   type Memory,
   type PathSearchResult,
+  type Resolution,
 } from "../lib/api";
 
 const ENTITY_TABS = ["overview", "evidence", "lineage", "history", "paths", "queries"] as const;
@@ -310,6 +312,8 @@ export function EntityPanel({ id }: { readonly id: string }) {
   const [decided, setDecided] = useState<ReadonlySet<string>>(new Set());
   const [confirmingDismiss, setConfirmingDismiss] = useState<string | null>(null);
   const [pinStatus, setPinStatus] = useState<"idle" | "pinning" | "done" | "failed">("idle");
+  const [resolveStatus, setResolveStatus] = useState<"idle" | "checking" | "failed">("idle");
+  const [resolveResult, setResolveResult] = useState<Resolution | null>(null);
   const [activeTab, setActiveTab] = useState<EntityTab>("overview");
 
   useEffect(() => {
@@ -325,6 +329,8 @@ export function EntityPanel({ id }: { readonly id: string }) {
     setError(false);
     setDecided(new Set());
     setPinStatus("idle");
+    setResolveStatus("idle");
+    setResolveResult(null);
     setActiveTab("overview");
     if (!id) return;
 
@@ -427,6 +433,22 @@ export function EntityPanel({ id }: { readonly id: string }) {
     }
   };
 
+  /** `POST /assets/{id}/resolve` — the same entity-resolution check that
+   *  otherwise only ever runs automatically on streamed ingestion. Existed
+   *  on the backend with no way to reach it from the console until now. */
+  const handleCheckDuplicates = async () => {
+    if (!asset) return;
+    setResolveStatus("checking");
+    setResolveResult(null);
+    try {
+      const result = await resolveAsset(asset.id);
+      setResolveResult(result);
+      setResolveStatus("idle");
+    } catch {
+      setResolveStatus("failed");
+    }
+  };
+
   if (error) {
     return <div className="p-8 text-[17px] text-gowl-bad">{strings.entityError}</div>;
   }
@@ -468,6 +490,16 @@ export function EntityPanel({ id }: { readonly id: string }) {
             <div className="font-mono text-[15.5px] text-gowl-t6">{headerSubtitle}</div>
           </div>
           <div className="flex flex-none gap-1.5">
+            {isAssetEntity && (
+              <button
+                type="button"
+                onClick={() => void handleCheckDuplicates()}
+                disabled={resolveStatus === "checking"}
+                className="rounded-md border border-gowl-line-2 px-3 py-1.5 text-[16px] text-gowl-t2 disabled:opacity-60"
+              >
+                {resolveStatus === "checking" ? strings.entityCheckDuplicatesChecking : strings.entityCheckDuplicates}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handlePin()}
@@ -478,6 +510,25 @@ export function EntityPanel({ id }: { readonly id: string }) {
             </button>
           </div>
         </div>
+
+        {(resolveResult ?? resolveStatus === "failed") && (
+          <div className="mt-3 rounded-md border border-gowl-line-2 bg-gowl-panel-2 px-3 py-2 text-[15.5px] text-gowl-t2">
+            {resolveStatus === "failed" ? (
+              strings.entityCheckDuplicatesFailed
+            ) : resolveResult?.kind === "new" ? (
+              strings.entityCheckDuplicatesNew
+            ) : resolveResult?.kind === "existing" ? (
+              `${strings.entityCheckDuplicatesExistingPrefix} ${resolveResult.confidence.toFixed(2)} — ${resolveResult.entity}`
+            ) : (
+              <>
+                {strings.entityCheckDuplicatesAmbiguous}{" "}
+                <Link to="/govern" className="text-gowl-accent underline">
+                  {strings.entityCheckDuplicatesOpenQueue}
+                </Link>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="flex gap-1 border-b border-gowl-line bg-gowl-panel px-8">

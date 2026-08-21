@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { KpiGrid } from "./KpiGrid";
 import { applyDrift, fetchDrift, ignoreDrift, type DriftItem } from "../lib/api";
 import { strings } from "../lib/strings";
@@ -71,7 +72,13 @@ export default function DriftRoute() {
     <div className="flex h-full">
       <div className="flex-1 overflow-y-auto p-8">
         <h1 className="mb-1 text-[25px] font-semibold text-gowl-t1">{strings.driftTitle}</h1>
-        <p className="mb-5 text-[16.5px] text-gowl-t5">{strings.driftDescription}</p>
+        <p className="mb-2 text-[16.5px] text-gowl-t5">{strings.driftDescription}</p>
+        <p className="mb-5 text-[15.5px] leading-relaxed text-gowl-t6">
+          {strings.driftScopeNote}{" "}
+          <Link to="/govern" className="text-gowl-accent underline">
+            {strings.driftOpenFindings}
+          </Link>
+        </p>
 
         <KpiGrid
           kpis={[

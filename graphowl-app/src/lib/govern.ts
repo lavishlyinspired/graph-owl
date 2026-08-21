@@ -1,10 +1,10 @@
 /** Pure decision logic for the GOVERN group (Plan 122a A5: Validation,
  *  Resolution, Drift, Governance) — kept separate from the route components
  *  so it can be unit-tested without rendering anything, same split as
- *  `trace.ts`. Contradictions has no pure logic of its own here: the real
- *  API has no catalog-wide queue to reduce (see the "GOVERN backend gaps"
- *  decision — build real only, note gaps), so `contradictions.tsx` is a
- *  thin, honestly-scoped page with nothing to unit test. */
+ *  `trace.ts`. Contradictions' own pure logic — filtering, sorting and
+ *  labelling the `/findings` queue — lives in `lib/findingsQueue.ts`
+ *  instead: it is about a different API entirely (findings, not policies or
+ *  drift), and grouping it here would make this file's name a lie. */
 
 import type { DryRunOutcome, Evidence, MetadataOperation, Policy, PolicyEffect, ResourceMatcher, ValidationFinding } from "./api";
 

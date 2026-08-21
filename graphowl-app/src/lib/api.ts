@@ -706,6 +706,17 @@ export function rejectReview(id: string, reason: string): Promise<Resolution> {
   return apiPost<Resolution>(`/resolution/queue/${encodeURIComponent(id)}/reject`, { reason });
 }
 
+/** Manually trigger entity resolution for one catalog asset —
+ *  `POST /assets/{id}/resolve`, the same check that otherwise only ever
+ *  runs automatically on streamed ingestion (`19-streaming.md` decision 7).
+ *  Existed on the backend with no caller anywhere in the console until the
+ *  Entity page wired it in — a business admin had no way to ask "does this
+ *  already exist?" for something created directly through the console or a
+ *  batch import. */
+export function resolveAsset(id: string): Promise<Resolution> {
+  return apiPost<Resolution>(`/assets/${encodeURIComponent(id)}/resolve`, {});
+}
+
 export interface BulkDecideOutcome {
   readonly id: string;
   readonly ok: boolean;
