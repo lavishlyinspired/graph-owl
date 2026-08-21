@@ -6,6 +6,7 @@
  *  `crates/graph-owl-server/src/lib.rs`'s handlers actually return. */
 
 import { resolveInboxAction, type InboxAction } from "./inboxActions";
+import { findingsQueryString } from "./findingsQueue";
 import {
   nodeTypeQuery,
   toGraphView,
@@ -457,11 +458,23 @@ export interface Finding {
   readonly evidence: readonly FindingEvidence[];
   readonly status: "pending" | "accepted" | "rejected";
   readonly detectedAt: string;
+  /** Who decided, once somebody has — `null` while `status` is `pending`. */
+  readonly decidedBy?: string | null;
+  /** Why they decided that. Required by the server on rejection. */
+  readonly reason?: string | null;
+  /** The rule's own rank against a pack's other rules — lower is more
+   *  actionable. `undefined`/`null` when the rule declared none. */
+  readonly priority?: number | null;
   readonly subjectLabel?: string | null;
 }
 
-export function fetchFindings(): Promise<readonly Finding[]> {
-  return apiFetch<readonly Finding[]>("/findings");
+export interface FindingsFilter {
+  readonly pack?: string;
+  readonly status?: Finding["status"];
+}
+
+export function fetchFindings(filter: FindingsFilter = {}): Promise<readonly Finding[]> {
+  return apiFetch<readonly Finding[]>(`/findings${findingsQueryString(filter)}`);
 }
 
 // ---- GOVERN group — Validation, Resolution, Drift, Governance (Plan 122a A5) ----

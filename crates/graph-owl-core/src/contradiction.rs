@@ -24,7 +24,7 @@
 //! decisions "overlap" precisely when both are current and neither corrects the
 //! other.
 
-use crate::memory::{LinkRelation, Memory, MemoryKind};
+use crate::memory::{LinkRelation, Memory, MemoryKind, MemoryTarget};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
@@ -49,16 +49,20 @@ pub enum ContradictionKind {
 /// A flagged pair. **Unordered**: `a` is simply the smaller id, so the same two
 /// memories always produce the same pair however they arrived, which is what
 /// makes dismissal and deduplication work at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+///
+/// **Not `Copy`** — it was, until `subject` grew a graph-native case: a
+/// `MemoryTarget` may hold an owned IRI, and a String cannot be `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contradiction {
     /// The smaller of the two memory ids.
     pub a: Uuid,
     /// The larger of the two memory ids.
     pub b: Uuid,
-    /// The asset both are anchored to, for a `Candidate`. `None` for a
-    /// `Declared` one, which needs no shared subject to be real.
-    pub subject: Option<Uuid>,
+    /// What both are anchored to, for a `Candidate` — a catalog asset or a
+    /// graph-native subject a domain pack owns. `None` for a `Declared` one,
+    /// which needs no shared subject to be real.
+    pub subject: Option<MemoryTarget>,
     /// Why the pair was flagged.
     pub kind: ContradictionKind,
 }
@@ -125,16 +129,22 @@ pub fn contradictions(memories: &[&Memory], reviews: &[Review]) -> Vec<Contradic
     // assertion of disagreement is the truer description of the same pair.
     for memory in memories {
         for edge in &memory.links {
-            if edge.relation != LinkRelation::Contradicts || edge.target == memory.id {
+            if edge.relation != LinkRelation::Contradicts {
                 continue;
             }
-            // The other side may be an asset id, a typo, or a memory the caller
-            // did not load. Reporting a pair with one half missing gives a
+            // The other side may be an asset id, a graph subject, a typo, or a
+            // memory the caller did not load. Only a memory has a `Uuid` a
+            // `Contradicts` link could legitimately name, so a target that
+            // does not even parse as one is filtered the same way an absent
+            // one is — reporting a pair with one half missing gives a
             // reviewer nothing to review.
-            if !present.contains(&edge.target) {
+            let Some(target_id) = edge.target.as_uuid() else {
+                continue;
+            };
+            if target_id == memory.id || !present.contains(&target_id) {
                 continue;
             }
-            let key = unordered(memory.id, edge.target);
+            let key = unordered(memory.id, target_id);
             found.insert(
                 key,
                 Contradiction {
@@ -213,13 +223,13 @@ fn candidate(one: &Memory, two: &Memory) -> Option<Contradiction> {
     })
 }
 
-/// An asset both are anchored to.
+/// What both are anchored to — a catalog asset or a graph-native subject.
 ///
 /// Anchors only — `Mentions` does not count, which is precisely why it exists as
 /// a separate relation: two decisions that merely name the same table are not
 /// competing about it.
-fn shared_anchor(one: &Memory, two: &Memory) -> Option<Uuid> {
-    let theirs: HashSet<Uuid> = two.anchors().into_iter().collect();
+fn shared_anchor(one: &Memory, two: &Memory) -> Option<MemoryTarget> {
+    let theirs: HashSet<MemoryTarget> = two.anchors().into_iter().collect();
     one.anchors()
         .into_iter()
         .find(|target| theirs.contains(target))
@@ -250,11 +260,11 @@ mod tests {
         }
     }
 
-    fn decision(subject: Uuid) -> Memory {
+    fn decision(subject: impl Into<MemoryTarget>) -> Memory {
         of_kind(MemoryKind::Decision, subject)
     }
 
-    fn of_kind(kind: MemoryKind, subject: Uuid) -> Memory {
+    fn of_kind(kind: MemoryKind, subject: impl Into<MemoryTarget>) -> Memory {
         Memory::new(
             kind,
             "Refunds are excluded from revenue.".into(),
@@ -262,7 +272,7 @@ mod tests {
             None,
             vec![MemoryLink {
                 relation: LinkRelation::About,
-                target: subject,
+                target: subject.into(),
             }],
             Utc::now(),
         )
@@ -304,7 +314,7 @@ mod tests {
         let two = of_kind(MemoryKind::Rationale, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
 
         let found = contradictions(&[&one, &two], &[]);
@@ -321,7 +331,7 @@ mod tests {
         let two = of_kind(MemoryKind::Decision, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
         let corpus = [&one, &two];
 
@@ -340,7 +350,7 @@ mod tests {
         let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
 
         let forwards = contradictions(&[&one, &two], &[]);
@@ -356,7 +366,7 @@ mod tests {
         let mut one = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: Uuid::new_v4(),
+            target: Uuid::new_v4().into(),
         });
 
         assert!(contradictions(&[&one], &[]).is_empty());
@@ -369,11 +379,11 @@ mod tests {
         let mut two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
         two.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: one.id,
+            target: one.id.into(),
         });
 
         assert_eq!(contradictions(&[&one, &two], &[]).len(), 1);
@@ -397,7 +407,7 @@ mod tests {
             let mut one = of_kind(MemoryKind::Caveat, Uuid::new_v4());
             one.links.push(MemoryLink {
                 relation,
-                target: two.id,
+                target: two.id.into(),
             });
 
             assert!(
@@ -415,7 +425,7 @@ mod tests {
         let mut only = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         only.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: only.id,
+            target: only.id.into(),
         });
 
         assert!(contradictions(&[&only], &[]).is_empty());
@@ -433,7 +443,7 @@ mod tests {
 
         assert_eq!(pairs(&found), vec![normalised(one.id, two.id)]);
         assert_eq!(found[0].kind, ContradictionKind::Candidate);
-        assert_eq!(found[0].subject, Some(subject));
+        assert_eq!(found[0].subject, Some(subject.into()));
     }
 
     // Only `Decision`. Two rationales about one asset are two explanations, which
@@ -563,16 +573,16 @@ mod tests {
         let mut two = decision(shared);
         one.links.push(MemoryLink {
             relation: LinkRelation::About,
-            target: Uuid::new_v4(),
+            target: Uuid::new_v4().into(),
         });
         two.links.push(MemoryLink {
             relation: LinkRelation::About,
-            target: Uuid::new_v4(),
+            target: Uuid::new_v4().into(),
         });
 
         let found = contradictions(&[&one, &two], &[]);
 
-        assert_eq!(found[0].subject, Some(shared));
+        assert_eq!(found[0].subject, Some(shared.into()));
     }
 
     // `Mentions` is not an anchor, so two decisions that merely name the same
@@ -586,7 +596,7 @@ mod tests {
         for memory in [&mut one, &mut two] {
             memory.links.push(MemoryLink {
                 relation: LinkRelation::Mentions,
-                target: named,
+                target: named.into(),
             });
         }
 
@@ -643,7 +653,7 @@ mod tests {
         let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
         let dismissal = dismissed(two.id, one.id);
 
@@ -669,7 +679,7 @@ mod tests {
         let two = decision(subject);
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
 
         let found = contradictions(&[&one, &two], &[]);
@@ -693,7 +703,7 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, ContradictionKind::Confirmed);
-        assert_eq!(found[0].subject, Some(subject));
+        assert_eq!(found[0].subject, Some(subject.into()));
     }
 
     // Order-independent, for the same reason dismissal is: a verdict recorded in
@@ -734,7 +744,7 @@ mod tests {
         let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
 
         let found = contradictions(&[&one, &two], &[confirmed(one.id, two.id)]);
@@ -752,7 +762,7 @@ mod tests {
         let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
         one.links.push(MemoryLink {
             relation: LinkRelation::Contradicts,
-            target: two.id,
+            target: two.id.into(),
         });
 
         let found = contradictions(&[&one, &two], &[]);
@@ -798,5 +808,72 @@ mod tests {
     #[test]
     fn nothing_to_compare_finds_nothing() {
         assert!(contradictions(&[], &[]).is_empty());
+    }
+
+    // ---- graph-native subjects ----
+    //
+    // `subject` used to be `Option<Uuid>`, so a candidate could only ever be
+    // about a catalog asset. Verified against the running deployment: a real
+    // GST finding's subject is an IRI, never a `Uuid` — so without this, a
+    // domain pack's own data could never produce a candidate contradiction at
+    // all, regardless of how the surrounding UI was arranged.
+
+    const GST_SUBJECT: &str = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011";
+
+    #[test]
+    fn two_current_decisions_about_one_graph_subject_are_candidates() {
+        let one = decision(GST_SUBJECT);
+        let two = decision(GST_SUBJECT);
+
+        let found = contradictions(&[&one, &two], &[]);
+
+        assert_eq!(pairs(&found), vec![normalised(one.id, two.id)]);
+        assert_eq!(found[0].kind, ContradictionKind::Candidate);
+        assert_eq!(found[0].subject, Some(GST_SUBJECT.into()));
+    }
+
+    // The negative that makes the test above about *this* subject rather than
+    // about "any subject": two different GST invoices are two different
+    // situations, not a disagreement about one.
+    #[test]
+    fn decisions_about_different_graph_subjects_are_not_candidates() {
+        let one = decision(GST_SUBJECT);
+        let two = decision("https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-012");
+
+        assert!(contradictions(&[&one, &two], &[]).is_empty());
+    }
+
+    // A `Contradicts` link only ever names another *memory*, which always has
+    // a real `Uuid` — so a target that is not even `Uuid`-shaped (a subject
+    // IRI landing on the wrong relation, or a typo) cannot be one, and must
+    // be filtered the same way a well-formed but absent target already is.
+    #[test]
+    fn a_contradicts_link_whose_target_does_not_parse_as_a_uuid_is_not_flagged() {
+        let mut one = of_kind(MemoryKind::Caveat, Uuid::new_v4());
+        one.links.push(MemoryLink {
+            relation: LinkRelation::Contradicts,
+            target: GST_SUBJECT.into(),
+        });
+
+        assert!(contradictions(&[&one], &[]).is_empty());
+    }
+
+    // A human declaring disagreement between two memories both anchored to a
+    // graph subject works exactly like the asset case — `Declared` never
+    // looked at `subject` to begin with, but this pins that the two
+    // capabilities compose rather than merely coexist.
+    #[test]
+    fn a_declared_contradiction_works_for_memories_anchored_to_a_graph_subject() {
+        let mut one = decision(GST_SUBJECT);
+        let two = decision(GST_SUBJECT);
+        one.links.push(MemoryLink {
+            relation: LinkRelation::Contradicts,
+            target: two.id.into(),
+        });
+
+        let found = contradictions(&[&one, &two], &[]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ContradictionKind::Declared);
     }
 }

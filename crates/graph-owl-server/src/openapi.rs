@@ -92,6 +92,14 @@ const fn query_param(
     }
 }
 
+/// `(method, path)` — the `{id}` routes whose `id` accepts a graph-native
+/// subject IRI as well as a `Uuid`, so the blanket `format: uuid` default
+/// below must not apply to them.
+const ID_ACCEPTS_ANY_SUBJECT: &[(&str, &str)] = &[
+    ("get", "/assets/{id}/memories"),
+    ("get", "/assets/{id}/contradictions"),
+];
+
 /// `(method, path, params)` — looked up per route while building the spec.
 /// Scoped to exactly what Epic 36 Slice D's browse reference app needs: a
 /// generated client that can page `GET /assets`, pass `q`/`kind`/`domain`/
@@ -2491,9 +2499,21 @@ pub fn document() -> Value {
                 "application/json": { "schema": { "$ref": format!("#/components/schemas/{schema}") } } } });
         }
         if route.path.contains("{id}") {
+            // `format: uuid` is the right default for almost every `{id}` in
+            // this table, but `recall_memories`/`list_contradictions` accept
+            // a graph-native subject IRI too (Epic 31 follow-on) — declaring
+            // `uuid` here would tell a client-generator to reject exactly the
+            // input the handler now accepts.
+            let id_is_uuid_only = !ID_ACCEPTS_ANY_SUBJECT
+                .iter()
+                .any(|(method, path)| *method == route.method && *path == route.path);
             operation["parameters"] = json!([{
                 "name": "id", "in": "path", "required": true,
-                "schema": { "type": "string", "format": "uuid" }
+                "schema": if id_is_uuid_only {
+                    json!({ "type": "string", "format": "uuid" })
+                } else {
+                    json!({ "type": "string" })
+                }
             }]);
         }
         // Additive to the `{id}` path parameter above, not a replacement —

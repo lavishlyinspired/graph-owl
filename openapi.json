@@ -1676,9 +1676,8 @@
             "description": "How this memory relates to the target."
           },
           "target": {
-            "description": "The asset, run, or other memory this points at.",
-            "format": "uuid",
-            "type": "string"
+            "$ref": "#/components/schemas/MemoryTarget",
+            "description": "The asset, run, memory, or graph-native subject this points at."
           }
         },
         "required": [
@@ -1686,6 +1685,10 @@
           "target"
         ],
         "type": "object"
+      },
+      "MemoryTarget": {
+        "description": "What a memory link points at: a catalog asset or another memory — both by\n`Uuid`, exactly as before this type existed — or a graph-native subject a\ndomain pack owns (an invoice, a filing period), addressed the same way\n`graph_owl_core::finding::Finding::subject` already is: a plain string in\n`Sid`'s wire form, validated by nothing but non-blankness. **One wire\nshape for all three.** Disambiguating asset-vs-memory was already a\nstorage-layer question, never a domain one — the domain has only ever\nneeded equality, to find a shared anchor and to match a `Contradicts`\nlink's target against the corpus — so adding a third case that is\n\"neither\" changes nothing this type's callers were relying on.\n\n`#[serde(transparent)]` keeps the wire form a bare JSON string exactly as\nit always was: a `Uuid`'s own string form for an asset or memory, so\nevery existing client is unaffected, or a subject IRI for the new case.",
+        "type": "string"
       },
       "MergeDecidedBy": {
         "description": "Who — or what — decided a merge.\n\nDeliberately not the shared [`crate::memory::Authorship`] type: that one\nmodels a memory's author and has no notion of an automated decision,\nwhile a merge's most common decider *is* the auto-merge band itself. A\nthird variant bolted onto `Authorship` for this one caller would make\nevery memory-authoring call site pattern-match a case that can never\napply to it.",
@@ -4166,7 +4169,6 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
               "type": "string"
             }
           }
@@ -4348,7 +4350,6 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
               "type": "string"
             }
           }
@@ -10508,6 +10509,58 @@
           }
         ],
         "summary": "Validate the estate against every shape and replace the queue"
+      }
+    },
+    "/validation/shapes/import": {
+      "post": {
+        "operationId": "post_validation_shapes_import",
+        "responses": {
+          "200": {
+            "description": "Commit a candidate SHACL document, admin-only"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Commit a candidate SHACL document, admin-only"
+      }
+    },
+    "/validation/shapes/preview": {
+      "post": {
+        "operationId": "post_validation_shapes_preview",
+        "responses": {
+          "200": {
+            "description": "Try a candidate SHACL document against the estate, writing nothing"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Try a candidate SHACL document against the estate, writing nothing"
       }
     },
     "/validation/shapes/seed": {

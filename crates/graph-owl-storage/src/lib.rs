@@ -2525,6 +2525,21 @@ pub trait Storage: Send + Sync {
         include_superseded: bool,
     ) -> Result<Vec<Memory>, StorageError>;
 
+    /// Every memory linked to a graph-native subject — a domain pack's own
+    /// IRI (an invoice, a filing period), never a catalog asset. The same
+    /// contract as [`Storage::memories_about`], for the target `Uuid` could
+    /// never represent: **by any relation**, current only unless
+    /// `include_superseded` says otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn memories_about_subject(
+        &self,
+        subject: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<Memory>, StorageError>;
+
     /// Store a memory's embedding, computed out of process at write time
     /// (`graph_owl_search::embeddings::EmbeddingClient`) — Epic 31's
     /// semantic ranking term reads this back at recall time.

@@ -14779,6 +14779,85 @@ impl Catalog {
         )
     }
 
+    /// What we know about a graph-native subject — a domain pack's own IRI
+    /// (an invoice, a filing period), never a catalog asset. The subject
+    /// half of [`Catalog::recall`], for the `Uuid` that method's own
+    /// signature could never accept: verified against the running
+    /// deployment, a real GST finding's subject rejected `recall` with a
+    /// `400 UUID parsing failed` before this existed.
+    ///
+    /// **No staleness verdict beyond [`Staleness::SubjectUnknown`].** A
+    /// catalog asset has a version history to compare `as_of` against;
+    /// a graph subject has none — there is no evidence a memory about it
+    /// is wrong, only no way to check, which is exactly what
+    /// `SubjectUnknown` already means for an asset a connector stopped
+    /// reporting. Everything else — lexical match, recency, authorship,
+    /// confidence, and semantic similarity when a client is configured —
+    /// scores identically to the asset path, through the same
+    /// [`graph_owl_core::recall::rank`].
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read fails.
+    pub async fn recall_by_subject(
+        &self,
+        subject: &str,
+        query: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<RecalledMemory>, CatalogError> {
+        use graph_owl_core::memory::Staleness;
+
+        let memories = self
+            .storage
+            .memories_about_subject(subject, include_superseded)
+            .await?;
+
+        let query_embedding = match &self.embedding_client {
+            Some(client) if !query.trim().is_empty() => match client.embed(query).await {
+                Ok(embedding) => Some(embedding),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to embed recall query; semantic ranking skipped for this call"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+        let stored_embeddings = if query_embedding.is_some() {
+            let memory_ids: Vec<Uuid> = memories.iter().map(|memory| memory.id).collect();
+            self.storage.memory_embeddings(&memory_ids).await?
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        let candidates: Vec<graph_owl_core::recall::Candidate<'_>> = memories
+            .iter()
+            .map(|memory| graph_owl_core::recall::Candidate {
+                memory,
+                staleness: Staleness::SubjectUnknown,
+                semantic: query_embedding.as_ref().and_then(|query_vector| {
+                    stored_embeddings.get(&memory.id).map(|memory_vector| {
+                        graph_owl_search::embeddings::cosine_similarity(query_vector, memory_vector)
+                    })
+                }),
+            })
+            .collect();
+
+        let weights = graph_owl_core::recall::Weights::default();
+        Ok(
+            graph_owl_core::recall::rank(query, subject, &candidates, Utc::now(), &weights)
+                .into_iter()
+                .map(|ranked| RecalledMemory {
+                    memory: ranked.memory.clone(),
+                    staleness: ranked.staleness,
+                    score: ranked.score,
+                })
+                .collect(),
+        )
+    }
+
     /// Correct a memory, keeping the original readable.
     ///
     /// # Errors
@@ -14875,6 +14954,26 @@ impl Catalog {
         // them to rule them out, and filtering here would hide the very state
         // that distinguishes a correction from a conflict.
         let memories = self.storage.memories_about(subject, true).await?;
+        let reviews = self.storage.contradiction_reviews().await?;
+        let refs: Vec<&graph_owl_core::memory::Memory> = memories.iter().collect();
+        Ok(graph_owl_core::contradiction::contradictions(
+            &refs, &reviews,
+        ))
+    }
+
+    /// Every open contradiction about a graph-native subject — a domain
+    /// pack's own IRI, never a catalog asset. The subject half of
+    /// [`Catalog::contradictions_about`], for the `Uuid` that method's own
+    /// signature could never accept.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read fails.
+    pub async fn contradictions_about_subject(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<graph_owl_core::contradiction::Contradiction>, CatalogError> {
+        let memories = self.storage.memories_about_subject(subject, true).await?;
         let reviews = self.storage.contradiction_reviews().await?;
         let refs: Vec<&graph_owl_core::memory::Memory> = memories.iter().collect();
         Ok(graph_owl_core::contradiction::contradictions(
@@ -20584,7 +20683,7 @@ mod tests {
             Some(1.0),
             vec![graph_owl_core::memory::MemoryLink {
                 relation: graph_owl_core::memory::LinkRelation::About,
-                target: subject,
+                target: subject.into(),
             }],
             Utc::now(),
         )
@@ -35157,7 +35256,7 @@ mod projection_isolation_tests {
             assert!(
                 written.links.iter().any(|link| link.relation
                     == graph_owl_core::memory::LinkRelation::Evidence
-                    && link.target == evidence_asset.id),
+                    && link.target.as_uuid() == Some(evidence_asset.id)),
                 "the evidence that does resolve must become a real link: {:?}",
                 written.links
             );
@@ -36834,7 +36933,7 @@ impl Catalog {
         use graph_owl_core::memory::MemoryError;
         let code = match error {
             MemoryError::NoAnchor => FieldErrorCode::Required,
-            MemoryError::NoContent => FieldErrorCode::Empty,
+            MemoryError::NoContent | MemoryError::BlankLinkTarget => FieldErrorCode::Empty,
             MemoryError::ConfidenceOutOfRange(_) | MemoryError::AgentWithoutConfidence => {
                 FieldErrorCode::Type
             }
@@ -36969,7 +37068,7 @@ impl Catalog {
                     Some(proposal.confidence),
                     vec![graph_owl_core::memory::MemoryLink {
                         relation: graph_owl_core::memory::LinkRelation::About,
-                        target: asset_id,
+                        target: asset_id.into(),
                     }],
                     Utc::now(),
                 )
@@ -36991,7 +37090,7 @@ impl Catalog {
 
                 let mut links = vec![graph_owl_core::memory::MemoryLink {
                     relation: graph_owl_core::memory::LinkRelation::About,
-                    target: asset_id,
+                    target: asset_id.into(),
                 }];
                 // Best-effort: an evidence entry becomes a real, queryable link
                 // when it names a live asset. One that does not resolve (a test
@@ -37002,7 +37101,7 @@ impl Catalog {
                     if let Some(evidence_asset) = self.get_asset_by_fqn(evidence_fqn).await? {
                         links.push(graph_owl_core::memory::MemoryLink {
                             relation: graph_owl_core::memory::LinkRelation::Evidence,
-                            target: evidence_asset.id,
+                            target: evidence_asset.id.into(),
                         });
                     }
                 }

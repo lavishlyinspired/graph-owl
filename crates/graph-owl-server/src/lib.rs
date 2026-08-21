@@ -6517,6 +6517,7 @@ fn memory_rejection(error: graph_owl_core::memory::MemoryError) -> AppError {
     let (field, code) = match &error {
         MemoryError::NoAnchor => ("links", FieldErrorCode::Required),
         MemoryError::NoContent => ("content", FieldErrorCode::Empty),
+        MemoryError::BlankLinkTarget => ("links", FieldErrorCode::Empty),
         MemoryError::ConfidenceOutOfRange(_) | MemoryError::AgentWithoutConfidence => {
             ("confidence", FieldErrorCode::Type)
         }
@@ -6962,20 +6963,36 @@ struct RecallQuery {
     include_superseded: bool,
 }
 
-/// What we know about an asset, best first — Epic 31 Slice C.
+/// What we know about a subject, best first — Epic 31 Slice C.
+///
+/// `id` is a `Uuid` (a catalog asset or another memory) or a graph-native
+/// subject IRI (a domain pack's own invoice, filing period, supplier) — the
+/// domain and storage layers have named the capability "about a subject"
+/// since Epic 31 shipped; only the HTTP layer's `Uuid`-only path extractor
+/// narrowed it. Verified against the running deployment: a real GST
+/// finding's subject returned `400 UUID parsing failed` here before this
+/// existed, which is why the fix is at this boundary and not deeper —
+/// `Catalog::recall`/`recall_by_subject` and everything under them already
+/// worked for both shapes.
 async fn recall_memories(
     State(catalog): State<Catalog>,
     Auth(_principal): Auth,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Query(params): Query<RecallQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let recalled = catalog
-        .recall(
-            id,
-            params.q.as_deref().unwrap_or(""),
-            params.include_superseded,
-        )
-        .await?;
+    let query = params.q.as_deref().unwrap_or("");
+    let recalled = match Uuid::parse_str(&id) {
+        Ok(asset_or_memory) => {
+            catalog
+                .recall(asset_or_memory, query, params.include_superseded)
+                .await?
+        }
+        Err(_) => {
+            catalog
+                .recall_by_subject(&id, query, params.include_superseded)
+                .await?
+        }
+    };
 
     Ok(Json(json!(
         recalled
@@ -6993,15 +7010,21 @@ async fn recall_memories(
     )))
 }
 
-/// Open disagreements about an asset — Epic 31 Slice E.
+/// Open disagreements about a subject — Epic 31 Slice E.
 ///
 /// Nothing is resolved and neither memory is hidden. A human decides.
+/// `id` accepts a `Uuid` or a graph-native subject IRI, for the same reason
+/// [`recall_memories`] does.
 async fn list_contradictions(
     State(catalog): State<Catalog>,
     Auth(_principal): Auth,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(json!(catalog.contradictions_about(id).await?)))
+    let found = match Uuid::parse_str(&id) {
+        Ok(asset_or_memory) => catalog.contradictions_about(asset_or_memory).await?,
+        Err(_) => catalog.contradictions_about_subject(&id).await?,
+    };
+    Ok(Json(json!(found)))
 }
 
 #[derive(Debug, serde::Deserialize)]

@@ -319,12 +319,18 @@ impl Storage for InMemoryStorage {
 
         let assets = self.assets.lock().expect("lock");
         for (index, edge) in memory.links.iter().enumerate() {
-            let known = assets.iter().any(|asset| asset.id == edge.target)
-                || held.iter().any(|other| other.id == edge.target);
+            // A graph-native subject has no `Uuid` to look up and (matching
+            // the Postgres adapter's `findings.subject`-style precedent) no
+            // existence check at all — it always resolves.
+            let Some(target_id) = edge.target.as_uuid() else {
+                continue;
+            };
+            let known = assets.iter().any(|asset| asset.id == target_id)
+                || held.iter().any(|other| other.id == target_id);
             if !known {
                 return Ok(graph_owl_storage::MemoryWrite::UnknownLinkTarget {
                     index,
-                    target: edge.target,
+                    target: target_id,
                 });
             }
         }
@@ -356,7 +362,33 @@ impl Storage for InMemoryStorage {
             .lock()
             .expect("lock")
             .iter()
-            .filter(|memory| memory.links.iter().any(|edge| edge.target == subject))
+            .filter(|memory| {
+                memory
+                    .links
+                    .iter()
+                    .any(|edge| edge.target.as_uuid() == Some(subject))
+            })
+            .filter(|memory| include_superseded || memory.superseded_by.is_none())
+            .cloned()
+            .collect())
+    }
+
+    async fn memories_about_subject(
+        &self,
+        subject: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<graph_owl_core::memory::Memory>, StorageError> {
+        Ok(self
+            .memories
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|memory| {
+                memory
+                    .links
+                    .iter()
+                    .any(|edge| edge.target.as_str() == subject)
+            })
             .filter(|memory| include_superseded || memory.superseded_by.is_none())
             .cloned()
             .collect())
@@ -402,12 +434,15 @@ impl Storage for InMemoryStorage {
 
         let assets = self.assets.lock().expect("lock");
         for (index, edge) in replacement.links.iter().enumerate() {
-            let known = assets.iter().any(|asset| asset.id == edge.target)
-                || held.iter().any(|other| other.id == edge.target);
+            let Some(target_id) = edge.target.as_uuid() else {
+                continue;
+            };
+            let known = assets.iter().any(|asset| asset.id == target_id)
+                || held.iter().any(|other| other.id == target_id);
             if !known {
                 return Ok(graph_owl_storage::SupersedeOutcome::UnknownLinkTarget {
                     index,
-                    target: edge.target,
+                    target: target_id,
                 });
             }
         }

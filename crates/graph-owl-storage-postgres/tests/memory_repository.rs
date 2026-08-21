@@ -81,7 +81,7 @@ async fn reviewer(storage: &PostgresStorage, id: &str) -> String {
 fn about(target: Uuid) -> MemoryLink {
     MemoryLink {
         relation: LinkRelation::About,
-        target,
+        target: target.into(),
     }
 }
 
@@ -111,7 +111,7 @@ async fn a_memory_round_trips_with_its_links() {
             about(table),
             MemoryLink {
                 relation: LinkRelation::Affects,
-                target: other,
+                target: other.into(),
             },
         ],
     );
@@ -131,7 +131,7 @@ async fn a_memory_round_trips_with_its_links() {
     assert_eq!(read.authorship, written.authorship);
     assert!((read.confidence - written.confidence).abs() < f64::EPSILON);
     assert_eq!(read.links.len(), 2);
-    assert_eq!(read.anchors(), vec![table]);
+    assert_eq!(read.anchors(), vec![table.into()]);
 }
 
 /// **`MemoryKind::Investigation` round-trips through the real `CHECK`
@@ -215,7 +215,7 @@ async fn an_unresolvable_link_names_which_one_it_was() {
             about(table),
             MemoryLink {
                 relation: LinkRelation::Evidence,
-                target: ghost,
+                target: ghost.into(),
             },
         ],
     );
@@ -245,7 +245,7 @@ async fn a_rejected_link_leaves_no_memory_behind() {
             about(table),
             MemoryLink {
                 relation: LinkRelation::Evidence,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
         ],
     );
@@ -282,7 +282,7 @@ async fn a_link_to_another_memory_resolves() {
             about(table),
             MemoryLink {
                 relation: LinkRelation::Follows,
-                target: first.id,
+                target: first.id.into(),
             },
         ],
     );
@@ -299,7 +299,8 @@ async fn a_link_to_another_memory_resolves() {
     assert!(
         read.links
             .iter()
-            .any(|edge| edge.relation == LinkRelation::Follows && edge.target == first.id)
+            .any(|edge| edge.relation == LinkRelation::Follows
+                && edge.target.as_uuid() == Some(first.id))
     );
 }
 
@@ -345,7 +346,7 @@ async fn retrieval_finds_every_memory_linked_to_the_subject() {
             about(elsewhere),
             MemoryLink {
                 relation: LinkRelation::Mentions,
-                target: table,
+                target: table.into(),
             },
         ],
     );
@@ -823,4 +824,135 @@ async fn a_batch_read_returns_only_the_embedded_memories_correctly_keyed() {
     assert_eq!(read.len(), 1);
     assert_eq!(read.get(&embedded.id), Some(&vec![0.5, 0.5]));
     assert_eq!(read.get(&unembedded.id), None);
+}
+
+// ---- graph-native subjects ----
+//
+// Verified against the running deployment before this migration existed: a
+// real GST finding's subject is exactly this IRI shape, and
+// `/assets/{id}/contradictions` and `/assets/{id}/memories` returned `400
+// UUID parsing failed` against it — there was no column this string could
+// ever go in. These tests are the schema-and-adapter half of the fix; the
+// pure anchoring/candidate-detection logic is unit tested in
+// `graph-owl-core::contradiction` and is deliberately not re-tested here.
+
+const GST_SUBJECT: &str = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011";
+
+#[tokio::test]
+async fn a_memory_anchored_to_a_graph_subject_round_trips_through_real_postgres() {
+    let (storage, _database, _url) = test_storage().await;
+    let written = memory(
+        MemoryKind::Decision,
+        "The claimed tax amount matches the books.",
+        vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: GST_SUBJECT.into(),
+        }],
+    );
+
+    assert_eq!(
+        storage.save_memory(&written).await.expect("save"),
+        MemoryWrite::Saved
+    );
+    let read = storage
+        .find_memory(written.id)
+        .await
+        .expect("read")
+        .expect("present");
+
+    assert_eq!(read.anchors(), vec![GST_SUBJECT.into()]);
+}
+
+// No existence check for a graph subject — matching `findings.subject`'s own
+// precedent (V59): a subject lives as triples, not as a row this could look
+// up. An asset/memory target still goes through the real lookup, proven by
+// `an_unresolvable_link_names_which_one_it_was` above; this is the negative
+// that makes the *subject* column's own contract explicit rather than
+// assumed from that unrelated test.
+#[tokio::test]
+async fn a_graph_subject_target_is_never_unresolvable() {
+    let (storage, _database, _url) = test_storage().await;
+    let written = memory(
+        MemoryKind::Caveat,
+        "This subject was never catalogued anywhere.",
+        vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: "https://graph-owl.dev/packs/gst#a-subject-nobody-seeded".into(),
+        }],
+    );
+
+    assert_eq!(
+        storage.save_memory(&written).await.expect("save"),
+        MemoryWrite::Saved
+    );
+}
+
+#[tokio::test]
+async fn memories_about_subject_finds_only_the_subject_asked_about() {
+    let (storage, _database, _url) = test_storage().await;
+    let elsewhere = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-012";
+    let anchored = memory(
+        MemoryKind::Decision,
+        "The claimed tax amount matches the books.",
+        vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: GST_SUBJECT.into(),
+        }],
+    );
+    let unrelated = memory(
+        MemoryKind::Decision,
+        "A different invoice entirely.",
+        vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: elsewhere.into(),
+        }],
+    );
+    storage.save_memory(&anchored).await.expect("save");
+    storage.save_memory(&unrelated).await.expect("save");
+
+    let found = storage
+        .memories_about_subject(GST_SUBJECT, false)
+        .await
+        .expect("read");
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, anchored.id);
+}
+
+// A subject stored via one memory link and an asset stored via another must
+// not cross-contaminate: querying by the graph-subject method must not
+// surface an asset-anchored memory, and the ordinary asset query
+// (`memories_about`) must not surface a subject-anchored one — proving the
+// two retrieval paths stay genuinely separate rather than one silently
+// falling back to the other.
+#[tokio::test]
+async fn subject_and_asset_anchored_memories_do_not_cross_contaminate() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let asset_anchored = memory(MemoryKind::Decision, "About the table.", vec![about(table)]);
+    let subject_anchored = memory(
+        MemoryKind::Decision,
+        "About the GST invoice.",
+        vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: GST_SUBJECT.into(),
+        }],
+    );
+    storage.save_memory(&asset_anchored).await.expect("save");
+    storage.save_memory(&subject_anchored).await.expect("save");
+
+    let by_subject = storage
+        .memories_about_subject(GST_SUBJECT, false)
+        .await
+        .expect("read");
+    let by_asset = storage.memories_about(table, false).await.expect("read");
+
+    assert_eq!(
+        by_subject.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![subject_anchored.id]
+    );
+    assert_eq!(
+        by_asset.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![asset_anchored.id]
+    );
 }

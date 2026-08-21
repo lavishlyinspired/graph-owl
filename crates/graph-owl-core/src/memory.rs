@@ -115,14 +115,74 @@ pub enum LinkRelation {
     Mentions,
 }
 
+/// What a memory link points at: a catalog asset or another memory — both by
+/// `Uuid`, exactly as before this type existed — or a graph-native subject a
+/// domain pack owns (an invoice, a filing period), addressed the same way
+/// `graph_owl_core::finding::Finding::subject` already is: a plain string in
+/// `Sid`'s wire form, validated by nothing but non-blankness. **One wire
+/// shape for all three.** Disambiguating asset-vs-memory was already a
+/// storage-layer question, never a domain one — the domain has only ever
+/// needed equality, to find a shared anchor and to match a `Contradicts`
+/// link's target against the corpus — so adding a third case that is
+/// "neither" changes nothing this type's callers were relying on.
+///
+/// `#[serde(transparent)]` keeps the wire form a bare JSON string exactly as
+/// it always was: a `Uuid`'s own string form for an asset or memory, so
+/// every existing client is unaffected, or a subject IRI for the new case.
+#[derive(
+    utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct MemoryTarget(String);
+
+impl MemoryTarget {
+    /// The target's own `Uuid` — a catalog asset or another memory. `None`
+    /// for a graph-native subject, which was never given one.
+    #[must_use]
+    pub fn as_uuid(&self) -> Option<Uuid> {
+        Uuid::parse_str(&self.0).ok()
+    }
+
+    /// The wire/storage form: a `Uuid`'s string form, or the subject IRI
+    /// verbatim.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<Uuid> for MemoryTarget {
+    fn from(id: Uuid) -> Self {
+        Self(id.to_string())
+    }
+}
+
+impl From<String> for MemoryTarget {
+    fn from(subject: String) -> Self {
+        Self(subject)
+    }
+}
+
+impl From<&str> for MemoryTarget {
+    fn from(subject: &str) -> Self {
+        Self(subject.to_string())
+    }
+}
+
+impl std::fmt::Display for MemoryTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One edge from a memory to something in the catalog.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryLink {
     /// How this memory relates to the target.
     pub relation: LinkRelation,
-    /// The asset, run, or other memory this points at.
-    pub target: Uuid,
+    /// The asset, run, memory, or graph-native subject this points at.
+    pub target: MemoryTarget,
 }
 
 /// Why a memory could not be created.
@@ -143,6 +203,12 @@ pub enum MemoryError {
     /// to fall back on.
     #[error("an agent-authored memory has to state its own confidence")]
     AgentWithoutConfidence,
+    /// A link's target is blank. Whether it names an asset, a memory or a
+    /// graph subject, an empty string names nothing a reviewer could ever
+    /// follow — the same failure `NoContent` guards for the memory's own
+    /// text.
+    #[error("a memory link's target cannot be blank")]
+    BlankLinkTarget,
 }
 
 /// A piece of organizational knowledge.
@@ -246,6 +312,7 @@ impl Memory {
     ///
     /// [`MemoryError::NoAnchor`] without an `About` link;
     /// [`MemoryError::NoContent`] for blank content;
+    /// [`MemoryError::BlankLinkTarget`] for a link whose target is blank;
     /// [`MemoryError::ConfidenceOutOfRange`] outside `[0, 1]`;
     /// [`MemoryError::AgentWithoutConfidence`] when an agent states none.
     pub fn new(
@@ -261,6 +328,9 @@ impl Memory {
         }
         if !links.iter().any(|l| l.relation == LinkRelation::About) {
             return Err(MemoryError::NoAnchor);
+        }
+        if links.iter().any(|l| l.target.as_str().trim().is_empty()) {
+            return Err(MemoryError::BlankLinkTarget);
         }
 
         let Some(confidence) = confidence.or_else(|| authorship.default_confidence()) else {
@@ -302,11 +372,11 @@ impl Memory {
 
     /// Everything this memory is anchored to.
     #[must_use]
-    pub fn anchors(&self) -> Vec<Uuid> {
+    pub fn anchors(&self) -> Vec<MemoryTarget> {
         self.links
             .iter()
             .filter(|l| l.relation == LinkRelation::About)
-            .map(|l| l.target)
+            .map(|l| l.target.clone())
             .collect()
     }
 }
@@ -400,7 +470,7 @@ mod tests {
     fn about(target: Uuid) -> MemoryLink {
         MemoryLink {
             relation: LinkRelation::About,
-            target,
+            target: target.into(),
         }
     }
 
@@ -454,15 +524,15 @@ mod tests {
         let links = vec![
             MemoryLink {
                 relation: LinkRelation::Affects,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
             MemoryLink {
                 relation: LinkRelation::Evidence,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
             MemoryLink {
                 relation: LinkRelation::Follows,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
         ];
 
@@ -477,12 +547,12 @@ mod tests {
         let links = vec![
             MemoryLink {
                 relation: LinkRelation::Evidence,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
             about(Uuid::new_v4()),
             MemoryLink {
                 relation: LinkRelation::Affects,
-                target: Uuid::new_v4(),
+                target: Uuid::new_v4().into(),
             },
         ];
 
@@ -573,13 +643,13 @@ mod tests {
             about(anchor),
             MemoryLink {
                 relation: LinkRelation::Affects,
-                target: affected,
+                target: affected.into(),
             },
         ];
 
         let memory = memory_with(human(), None, links).unwrap();
 
-        assert_eq!(memory.anchors(), vec![anchor]);
+        assert_eq!(memory.anchors(), vec![anchor.into()]);
     }
 
     #[test]
@@ -808,5 +878,134 @@ mod tests {
         };
 
         assert_eq!(since, version(4, 2));
+    }
+}
+
+/// `MemoryTarget` — grown to name a graph-native subject (an IRI a domain
+/// pack owns) alongside the asset/memory `Uuid` it always named. Verified
+/// live against the running deployment: a real GST finding's subject
+/// (`https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011`) is
+/// exactly this shape, and the memory/contradiction endpoints rejected it
+/// with a `400` before this existed — there was no `Uuid` to parse it into.
+#[cfg(test)]
+mod memory_target_tests {
+    use super::*;
+
+    fn human() -> Authorship {
+        Authorship::Human {
+            user_id: "sakshi".into(),
+        }
+    }
+
+    const GST_SUBJECT: &str = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011";
+
+    // **The wire form did not change for the case that already shipped.** A
+    // `Uuid` target still serializes as its own bare string — the same shape
+    // every existing client already sends and reads — so this is not a
+    // breaking change to the asset/memory case, only an addition.
+    #[test]
+    fn an_asset_target_serializes_as_the_bare_uuid_string_exactly_as_before() {
+        let id = Uuid::new_v4();
+        let target: MemoryTarget = id.into();
+
+        let json = serde_json::to_value(&target).expect("serializes");
+
+        assert_eq!(json, serde_json::Value::String(id.to_string()));
+    }
+
+    // The new case: a graph subject IRI round-trips as itself, not wrapped in
+    // an object — the same "one wire shape" promise as the asset case.
+    #[test]
+    fn a_subject_target_serializes_as_the_bare_iri_string() {
+        let target: MemoryTarget = GST_SUBJECT.into();
+
+        let json = serde_json::to_value(&target).expect("serializes");
+
+        assert_eq!(json, serde_json::Value::String(GST_SUBJECT.to_string()));
+        let back: MemoryTarget = serde_json::from_value(json).expect("deserializes");
+        assert_eq!(back, target);
+    }
+
+    // `Display` is what a log line or an error message renders — it has to be
+    // the target's own text, not a placeholder, or a diagnostic naming "which
+    // link failed" would print nothing useful.
+    #[test]
+    fn display_renders_the_targets_own_text() {
+        let asset: MemoryTarget = Uuid::nil().into();
+        let subject: MemoryTarget = GST_SUBJECT.into();
+
+        assert_eq!(asset.to_string(), Uuid::nil().to_string());
+        assert_eq!(subject.to_string(), GST_SUBJECT);
+    }
+
+    // `as_uuid` is how storage and `contradiction::contradictions` tell the
+    // two apart — an asset/memory target must resolve back to its `Uuid`.
+    #[test]
+    fn an_asset_targets_own_uuid_round_trips_through_as_uuid() {
+        let id = Uuid::new_v4();
+        let target: MemoryTarget = id.into();
+
+        assert_eq!(target.as_uuid(), Some(id));
+    }
+
+    // And the negative that makes `as_uuid` meaningful rather than always
+    // `Some`: a subject IRI was never given a `Uuid` and must say so, not
+    // fabricate one.
+    #[test]
+    fn a_subject_target_has_no_uuid() {
+        let target: MemoryTarget = GST_SUBJECT.into();
+
+        assert_eq!(target.as_uuid(), None);
+    }
+
+    // A blank target — of any relation, not only `About` — names nothing a
+    // reviewer could ever follow, the same failure `NoContent` guards for the
+    // memory's own text.
+    #[test]
+    fn refuses_a_link_whose_target_is_blank() {
+        let links = vec![
+            MemoryLink {
+                relation: LinkRelation::About,
+                target: Uuid::new_v4().into(),
+            },
+            MemoryLink {
+                relation: LinkRelation::Mentions,
+                target: "   ".into(),
+            },
+        ];
+
+        let err = Memory::new(
+            MemoryKind::Caveat,
+            "Refunds are excluded from revenue.".into(),
+            human(),
+            None,
+            links,
+            Utc::now(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, MemoryError::BlankLinkTarget);
+    }
+
+    // The capability this all exists for: a memory can be anchored to a
+    // domain pack's own graph subject, not only a catalog asset.
+    #[test]
+    fn a_memory_can_be_anchored_to_a_graph_subject_iri() {
+        let links = vec![MemoryLink {
+            relation: LinkRelation::About,
+            target: GST_SUBJECT.into(),
+        }];
+
+        let memory = Memory::new(
+            MemoryKind::Decision,
+            "The claimed tax amount matches the books.".into(),
+            human(),
+            None,
+            links,
+            Utc::now(),
+        )
+        .expect("a graph subject is a valid anchor");
+
+        assert_eq!(memory.anchors(), vec![GST_SUBJECT.into()]);
     }
 }

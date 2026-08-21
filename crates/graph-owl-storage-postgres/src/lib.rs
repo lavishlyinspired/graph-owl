@@ -9,7 +9,9 @@ use graph_owl_core::contradiction::{Review, Verdict};
 use graph_owl_core::custom_property::CustomProperty;
 use graph_owl_core::domain::{DataProduct, Domain, DomainAssignment, domain_fqn};
 use graph_owl_core::lifecycle::{Deprecation, LifecycleState};
-use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
+use graph_owl_core::memory::{
+    Authorship, LinkRelation, Memory, MemoryKind, MemoryLink, MemoryTarget,
+};
 use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
 use graph_owl_core::usage::{UsageOperation, UsageRollup};
 use graph_owl_core::{
@@ -165,13 +167,32 @@ async fn insert_links(
     links: &[MemoryLink],
 ) -> Result<Option<(usize, Uuid)>, StorageError> {
     for (index, edge) in links.iter().enumerate() {
+        // A graph-native subject is never an asset or a memory — it has no
+        // `Uuid` to look up at all, and (matching `findings.subject`, V59)
+        // no existence check: a subject lives as triples, not as a row this
+        // could resolve against. It always writes.
+        let Some(target_id) = edge.target.as_uuid() else {
+            sqlx::query(
+                "INSERT INTO memory_links (memory_id, relation, subject_target)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(memory_id)
+            .bind(relation_str(edge.relation))
+            .bind(edge.target.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            continue;
+        };
+
         // Which column the target belongs in is a question only the database can
         // answer, and asking it is not wasted work — Slice A requires an
         // unresolvable target to be reported as a client error naming the index,
         // so the lookup is the validation.
         let is_asset: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM assets WHERE id = $1)")
-                .bind(edge.target)
+                .bind(target_id)
                 .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -179,14 +200,14 @@ async fn insert_links(
             false
         } else {
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM memories WHERE id = $1)")
-                .bind(edge.target)
+                .bind(target_id)
                 .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| StorageError::Unexpected(e.to_string()))?
         };
 
         if !is_asset && !is_memory {
-            return Ok(Some((index, edge.target)));
+            return Ok(Some((index, target_id)));
         }
 
         sqlx::query(
@@ -196,8 +217,8 @@ async fn insert_links(
         )
         .bind(memory_id)
         .bind(relation_str(edge.relation))
-        .bind(if is_asset { Some(edge.target) } else { None })
-        .bind(if is_asset { None } else { Some(edge.target) })
+        .bind(if is_asset { Some(target_id) } else { None })
+        .bind(if is_asset { None } else { Some(target_id) })
         .execute(&mut **tx)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -205,11 +226,14 @@ async fn insert_links(
     Ok(None)
 }
 
+/// One `memory_links` row: `(relation, asset_target, memory_target, subject_target)`.
+type MemoryLinkRow = (String, Option<Uuid>, Option<Uuid>, Option<String>);
+
 /// A memory's links, from whichever target column holds each one.
 async fn read_links(pool: &PgPool, memory_id: Uuid) -> Result<Vec<MemoryLink>, StorageError> {
-    let rows: Vec<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT relation, asset_target, memory_target FROM memory_links
-         WHERE memory_id = $1 ORDER BY relation, asset_target, memory_target",
+    let rows: Vec<MemoryLinkRow> = sqlx::query_as(
+        "SELECT relation, asset_target, memory_target, subject_target FROM memory_links
+         WHERE memory_id = $1 ORDER BY relation, asset_target, memory_target, subject_target",
     )
     .bind(memory_id)
     .fetch_all(pool)
@@ -217,12 +241,18 @@ async fn read_links(pool: &PgPool, memory_id: Uuid) -> Result<Vec<MemoryLink>, S
     .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
     rows.into_iter()
-        .map(|(relation, asset_target, memory_target)| {
-            // The `CHECK` guarantees exactly one is set, so a row with neither is
+        .map(|(relation, asset_target, memory_target, subject_target)| {
+            // The `CHECK` guarantees exactly one is set, so a row with none is
             // a corrupt row and not a shape to paper over with a default.
-            let target = asset_target.or(memory_target).ok_or_else(|| {
-                StorageError::Unexpected(format!("memory link {memory_id} has no target"))
-            })?;
+            let target: MemoryTarget = match (asset_target, memory_target, subject_target) {
+                (Some(id), None, None) | (None, Some(id), None) => id.into(),
+                (None, None, Some(subject)) => subject.into(),
+                _ => {
+                    return Err(StorageError::Unexpected(format!(
+                        "memory link {memory_id} has no target"
+                    )));
+                }
+            };
             Ok(MemoryLink {
                 relation: relation_from(&relation)?,
                 target,
@@ -2343,6 +2373,37 @@ impl Storage for PostgresStorage {
              FROM memories m
              JOIN memory_links l ON l.memory_id = m.id
              WHERE (l.asset_target = $1 OR l.memory_target = $1)
+               AND ($2 OR m.superseded_by IS NULL)
+             GROUP BY m.id
+             ORDER BY m.as_of DESC, m.id",
+        )
+        .bind(subject)
+        .bind(include_superseded)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut memories = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let links = read_links(&self.pool, id).await?;
+            memories.push(memory_from_row(row, links)?);
+        }
+        Ok(memories)
+    }
+
+    async fn memories_about_subject(
+        &self,
+        subject: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<Memory>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT m.id, m.kind, m.content, m.summary, m.author_kind, m.author_user_id,
+                    m.author_agent_id, m.author_model, m.confidence, m.as_of,
+                    m.supersedes, m.superseded_by, m.retracted_at, m.retraction_reason
+             FROM memories m
+             JOIN memory_links l ON l.memory_id = m.id
+             WHERE l.subject_target = $1
                AND ($2 OR m.superseded_by IS NULL)
              GROUP BY m.id
              ORDER BY m.as_of DESC, m.id",

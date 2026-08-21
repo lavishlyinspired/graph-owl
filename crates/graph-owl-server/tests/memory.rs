@@ -1070,3 +1070,121 @@ async fn a_real_persons_stated_confidence_overrides_the_human_default() {
         "{body}"
     );
 }
+
+// ---- graph-native subjects ----
+//
+// Every test above anchors to a `POST /assets`-issued `Uuid`. Verified
+// against the running deployment before this existed: a real GST finding's
+// subject is an IRI, never a `Uuid`, and `GET /assets/{id}/memories` and
+// `GET /assets/{id}/contradictions` both answered it with `400 UUID parsing
+// failed` — the exact regression these tests pin shut. The URL keeps the
+// `/assets/{id}/...` shape rather than growing a second route: `recall` and
+// `contradictions_about` were already documented as being about "a
+// subject", not "an asset" — only the HTTP path extractor's `Uuid`-only type
+// had narrowed that.
+
+const GST_SUBJECT: &str = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011";
+
+#[tokio::test]
+async fn a_memory_anchored_to_a_graph_subject_is_created_and_recalled() {
+    let (app, _database, _) = test_app().await;
+
+    let (created, body) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body(
+            "The claimed tax amount matches the books.",
+            GST_SUBJECT,
+        )),
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED, "{body}");
+
+    let (status, recalled) = send(
+        &app,
+        "GET",
+        &format!("/assets/{}/memories", urlencoding_the_subject()),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{recalled}");
+    let items = recalled.as_array().expect("array");
+    assert_eq!(items.len(), 1, "{recalled}");
+    assert_eq!(
+        items[0]["memory"]["content"],
+        "The claimed tax amount matches the books."
+    );
+}
+
+#[tokio::test]
+async fn two_competing_decisions_about_a_graph_subject_surface_as_a_candidate() {
+    let (app, _database, _) = test_app().await;
+    for content in ["Refunds are included.", "Refunds are excluded."] {
+        let (created, body) = send(
+            &app,
+            "POST",
+            "/memories",
+            Some(memory_body(content, GST_SUBJECT)),
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED, "{body}");
+    }
+
+    let (status, found) = send(
+        &app,
+        "GET",
+        &format!("/assets/{}/contradictions", urlencoding_the_subject()),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found.as_array().expect("array").len(), 1, "{found}");
+    assert_eq!(found[0]["kind"], "candidate");
+    assert_eq!(found[0]["subject"], GST_SUBJECT);
+}
+
+// The negative that makes the two tests above about *this* subject: an
+// unrelated one, real but never written to, comes back empty rather than
+// erroring — the same posture the asset path already has for a subject with
+// no memories, proven for the shape `Uuid::parse_str` cannot even attempt.
+#[tokio::test]
+async fn a_graph_subject_nobody_wrote_about_recalls_and_lists_nothing() {
+    let (app, _database, _) = test_app().await;
+    let untouched = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-999";
+    let encoded = encode_path_segment(untouched);
+
+    let (recall_status, recalled) =
+        send(&app, "GET", &format!("/assets/{encoded}/memories"), None).await;
+    let (list_status, found) = send(
+        &app,
+        "GET",
+        &format!("/assets/{encoded}/contradictions"),
+        None,
+    )
+    .await;
+
+    assert_eq!(recall_status, StatusCode::OK, "{recalled}");
+    assert_eq!(recalled.as_array().expect("array").len(), 0, "{recalled}");
+    assert_eq!(list_status, StatusCode::OK, "{found}");
+    assert_eq!(found.as_array().expect("array").len(), 0, "{found}");
+}
+
+fn urlencoding_the_subject() -> String {
+    encode_path_segment(GST_SUBJECT)
+}
+
+/// Percent-encodes exactly the reserved characters `GST_SUBJECT` contains
+/// (`:`, `/`, `#`) so the IRI survives as a **single** path segment — an
+/// unencoded `/` would otherwise split it and route to the wrong handler
+/// entirely, matching `reasoning_for_any_subject.rs`'s own `%23`-only
+/// encoding for the same reason.
+fn encode_path_segment(subject: &str) -> String {
+    subject
+        .replace('%', "%25")
+        .replace(':', "%3A")
+        .replace('/', "%2F")
+        .replace('#', "%23")
+}

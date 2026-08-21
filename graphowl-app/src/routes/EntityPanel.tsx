@@ -51,6 +51,72 @@ function Side({ memory }: { readonly memory: Memory | null }) {
   );
 }
 
+/** One flagged pair, plus its confirm/dismiss controls — pulled out so
+ *  Overview can render it for a catalog asset or a graph-native subject
+ *  alike, since neither Memory-Contradictions nor Findings is exclusive to
+ *  one entity kind any more. */
+function ContradictionCard({
+  pair,
+  confirming,
+  onConfirm,
+  onStartDismiss,
+  onConfirmDismiss,
+  onCancelDismiss,
+}: {
+  readonly pair: ResolvedPair;
+  readonly confirming: boolean;
+  readonly onConfirm: () => void;
+  readonly onStartDismiss: () => void;
+  readonly onConfirmDismiss: () => void;
+  readonly onCancelDismiss: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-gowl-amber-border bg-gowl-amber-deep p-4">
+      <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-amber">
+        {`${strings.entityContradictionTitle} · ${kindLabel(pair.kind)}`}
+      </div>
+      <div className="grid grid-cols-[1fr_34px_1fr] items-center gap-3">
+        <Side memory={pair.a} />
+        <div className="text-center text-[18px] text-gowl-amber">{strings.entityContradictionDivider}</div>
+        <Side memory={pair.b} />
+      </div>
+      <div className="mt-3.5 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onConfirm}
+          className="rounded-md border border-gowl-amber-border px-3 py-1.5 text-[15.5px] text-gowl-amber"
+        >
+          {strings.entityConfirm}
+        </button>
+        {confirming ? (
+          <>
+            <span className="text-[15.5px] text-gowl-t5">{strings.entityDismissBody}</span>
+            <button
+              type="button"
+              onClick={onConfirmDismiss}
+              className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
+            >
+              {strings.entityDismiss}
+            </button>
+            <button type="button" onClick={onCancelDismiss} className="text-[15.5px] text-gowl-t6">
+              {strings.entityDismissCancel}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={onStartDismiss}
+            className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
+          >
+            {strings.entityDismiss}
+          </button>
+        )}
+        <span className="ml-auto text-[15.5px] text-gowl-t6">{strings.entityContradictionHint}</span>
+      </div>
+    </div>
+  );
+}
+
 /** One history rendering, shared by the Overview panel and the History
  *  tab — a graph-only subject (a GST invoice, most of this console's real
  *  data) has no `/assets/{id}/versions` at all, so its history is its own
@@ -297,10 +363,15 @@ export function EntityPanel({ id }: { readonly id: string }) {
     } else {
       void (async () => {
         try {
-          const [outgoing, incoming, allFindings] = await Promise.all([
+          const [outgoing, incoming, allFindings, contradictions] = await Promise.all([
             fetchGraphContext(id, { direction: "outgoing", hops: 1 }),
             fetchGraphContext(id, { direction: "incoming", hops: 1 }),
             fetchFindings(),
+            // Works for a graph-native subject now too — verified against the
+            // running deployment, this used to 400 ("UUID parsing failed")
+            // for exactly this id shape. See lib/findingsQueue.ts's header
+            // comment for the full story.
+            fetchContradictions(id),
           ]);
           if (!live) return;
 
@@ -315,6 +386,14 @@ export function EntityPanel({ id }: { readonly id: string }) {
           setDownstream(impactFromEdges(outgoing.edges));
           setSources(anchor?.sources ?? []);
           setSubjectFindings(findingsFor(allFindings, id));
+
+          if (contradictions.length === 0) {
+            setPairs([]);
+          } else {
+            const recalled = await recallMemories(id);
+            if (!live) return;
+            setPairs(pairsFor(contradictions, recalled.map((r) => r.memory)));
+          }
         } catch {
           if (live) setError(true);
         }
@@ -375,7 +454,7 @@ export function EntityPanel({ id }: { readonly id: string }) {
                   {subject.semanticType}
                 </span>
               )}
-              {isAssetEntity && openPairs.length > 0 && (
+              {openPairs.length > 0 && (
                 <span className="rounded border border-gowl-amber-border bg-gowl-amber-bg px-1.5 py-0.5 font-mono text-[13.5px] text-gowl-amber">
                   {`${openPairs.length} CONTRADICTION${openPairs.length === 1 ? "" : "S"}`}
                 </span>
@@ -453,64 +532,26 @@ export function EntityPanel({ id }: { readonly id: string }) {
             )}
           </div>
 
-          {isAssetEntity
-            ? openPairs.map((pair) => {
-                const key = `${pair.id.a}-${pair.id.b}`;
-                return (
-                  <div key={key} className="rounded-lg border border-gowl-amber-border bg-gowl-amber-deep p-4">
-                    <div className="mb-3 font-mono text-[13.5px] tracking-widest text-gowl-amber">
-                      {`${strings.entityContradictionTitle} · ${kindLabel(pair.kind)}`}
-                    </div>
-                    <div className="grid grid-cols-[1fr_34px_1fr] items-center gap-3">
-                      <Side memory={pair.a} />
-                      <div className="text-center text-[18px] text-gowl-amber">{strings.entityContradictionDivider}</div>
-                      <Side memory={pair.b} />
-                    </div>
-                    <div className="mt-3.5 flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => void decide(pair, "confirmed")}
-                        className="rounded-md border border-gowl-amber-border px-3 py-1.5 text-[15.5px] text-gowl-amber"
-                      >
-                        {strings.entityConfirm}
-                      </button>
-                      {confirmingDismiss === key ? (
-                        <>
-                          <span className="text-[15.5px] text-gowl-t5">{strings.entityDismissBody}</span>
-                          <button
-                            type="button"
-                            onClick={() => void decide(pair, "dismissed")}
-                            className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
-                          >
-                            {strings.entityDismiss}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmingDismiss(null)}
-                            className="text-[15.5px] text-gowl-t6"
-                          >
-                            {strings.entityDismissCancel}
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setConfirmingDismiss(key)}
-                          className="rounded-md border border-gowl-line-3 px-3 py-1.5 text-[15.5px] text-gowl-t4"
-                        >
-                          {strings.entityDismiss}
-                        </button>
-                      )}
-                      <span className="ml-auto text-[15.5px] text-gowl-t6">{strings.entityContradictionHint}</span>
-                    </div>
-                  </div>
-                );
-              })
-            : (
-                <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
-                  <SubjectFindings findings={subjectFindings} semanticType={subject?.semanticType} />
-                </div>
-              )}
+          {openPairs.map((pair) => {
+            const key = `${pair.id.a}-${pair.id.b}`;
+            return (
+              <ContradictionCard
+                key={key}
+                pair={pair}
+                confirming={confirmingDismiss === key}
+                onConfirm={() => void decide(pair, "confirmed")}
+                onStartDismiss={() => setConfirmingDismiss(key)}
+                onConfirmDismiss={() => void decide(pair, "dismissed")}
+                onCancelDismiss={() => setConfirmingDismiss(null)}
+              />
+            );
+          })}
+
+          {!isAssetEntity && (
+            <div className="rounded-lg border border-gowl-line bg-gowl-panel p-4">
+              <SubjectFindings findings={subjectFindings} semanticType={subject?.semanticType} />
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-4">

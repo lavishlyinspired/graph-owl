@@ -28,10 +28,9 @@
 //! claimed is the *ordering* each term produces, not a calibrated exchange rate
 //! between terms.
 
-use crate::memory::{Authorship, LinkRelation, Memory, Staleness};
+use crate::memory::{Authorship, LinkRelation, Memory, MemoryTarget, Staleness};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-use uuid::Uuid;
 
 /// How much each term counts. Configurable, because the right trade-off is a
 /// property of an estate rather than of this code.
@@ -142,17 +141,18 @@ pub struct Ranked<'a> {
 #[must_use]
 pub fn rank<'a>(
     query: &str,
-    subject: Uuid,
+    subject: impl Into<MemoryTarget>,
     candidates: &[Candidate<'a>],
     now: DateTime<Utc>,
     weights: &Weights,
 ) -> Vec<Ranked<'a>> {
+    let subject = subject.into();
     let mut ranked: Vec<Ranked<'a>> = candidates
         .iter()
         .map(|candidate| Ranked {
             memory: candidate.memory,
             staleness: candidate.staleness.clone(),
-            score: score(query, subject, candidate, now, weights),
+            score: score(query, &subject, candidate, now, weights),
         })
         .collect();
 
@@ -178,12 +178,12 @@ pub fn rank<'a>(
 /// numbers on screen do not add up to the number they explain.
 fn score(
     query: &str,
-    subject: Uuid,
+    subject: &MemoryTarget,
     candidate: &Candidate<'_>,
     now: DateTime<Utc>,
     weights: &Weights,
 ) -> Score {
-    let anchor = weights.anchor * anchor_strength(candidate.memory, subject);
+    let anchor = weights.anchor * anchor_strength(candidate.memory, subject.clone());
     let lexical = weights.lexical * lexical_overlap(query, candidate.memory);
     let semantic = candidate.semantic.map(|value| weights.semantic * value);
     // Negative: the only term that pushes down. Kept signed rather than
@@ -296,7 +296,8 @@ fn recency_decay(as_of: DateTime<Utc>, now: DateTime<Utc>, half_life_days: f64) 
 /// scores zero rather than borrowing its own anchor, which would make every
 /// memory in the corpus look maximally on-topic for every query.
 #[must_use]
-pub fn anchor_strength(memory: &Memory, subject: Uuid) -> f64 {
+pub fn anchor_strength(memory: &Memory, subject: impl Into<MemoryTarget>) -> f64 {
+    let subject = subject.into();
     memory
         .links
         .iter()
@@ -351,6 +352,7 @@ mod tests {
     use super::*;
     use crate::memory::{MemoryKind, MemoryLink};
     use chrono::Duration;
+    use uuid::Uuid;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-07-30T12:00:00Z")
@@ -359,7 +361,10 @@ mod tests {
     }
 
     fn link(relation: LinkRelation, target: Uuid) -> MemoryLink {
-        MemoryLink { relation, target }
+        MemoryLink {
+            relation,
+            target: target.into(),
+        }
     }
 
     /// A memory built for one axis at a time. Every isolating test varies one
@@ -1158,5 +1163,83 @@ mod tests {
             + s.confidence;
 
         assert!((s.total - sum).abs() < 1e-9, "{s:?}");
+    }
+
+    // ---- graph-native subjects ----
+    //
+    // `rank`/`anchor_strength` used to take `subject: Uuid`, so ranking only
+    // ever worked for a catalog asset. Generalised to `impl Into<MemoryTarget>`
+    // so a domain pack's own graph subject (an invoice, a filing period) gets
+    // the same lexical/recency/authorship/confidence scoring an asset always
+    // has — every existing call site above still compiles unchanged, passing
+    // a bare `Uuid`, because `Uuid: Into<MemoryTarget>`.
+
+    const GST_SUBJECT: &str = "https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-011";
+
+    fn about_subject(subject: &str) -> MemoryLink {
+        MemoryLink {
+            relation: LinkRelation::About,
+            target: subject.into(),
+        }
+    }
+
+    #[test]
+    fn anchor_strength_recognises_a_graph_subject_the_same_as_an_asset() {
+        let memory = Memory::new(
+            MemoryKind::Rationale,
+            "The claimed tax amount matches the books.".into(),
+            human(),
+            Some(1.0),
+            vec![about_subject(GST_SUBJECT)],
+            now(),
+        )
+        .unwrap();
+
+        assert!((anchor_strength(&memory, GST_SUBJECT) - 1.0).abs() < f64::EPSILON);
+    }
+
+    // The same isolating shape as `about_outranks_mentions_with_identical_text`,
+    // proving the whole `rank` pipeline — not just `anchor_strength` in
+    // isolation — treats a graph subject as a real anchor.
+    #[test]
+    fn about_outranks_mentions_for_a_graph_subject_with_identical_text() {
+        let text = "The claimed tax amount matches the books.";
+        let anchored = Memory::new(
+            MemoryKind::Rationale,
+            text.into(),
+            human(),
+            Some(1.0),
+            vec![about_subject(GST_SUBJECT)],
+            now(),
+        )
+        .unwrap();
+        let mentioned = Memory::new(
+            MemoryKind::Rationale,
+            text.into(),
+            human(),
+            Some(1.0),
+            vec![
+                MemoryLink {
+                    relation: LinkRelation::Mentions,
+                    target: GST_SUBJECT.into(),
+                },
+                // Every memory needs an anchor to exist; this one is about
+                // something else, matching how `memory()` above builds a
+                // `Mentions` candidate.
+                about_subject("https://graph-owl.dev/packs/gst#books-27AABCS1429B1Z8-INV-MAR-012"),
+            ],
+            now(),
+        )
+        .unwrap();
+
+        let ranked = rank(
+            "tax claimed",
+            GST_SUBJECT,
+            &[fresh(&mentioned), fresh(&anchored)],
+            now(),
+            &Weights::default(),
+        );
+
+        assert_eq!(order(&ranked), vec![anchored.id, mentioned.id]);
     }
 }
